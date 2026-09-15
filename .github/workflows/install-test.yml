@@ -272,7 +272,11 @@ jobs:
           chmod +x scripts/package-darwin.sh
           ./scripts/package-darwin.sh
           sudo mkdir -p /usr/local/lib/sqlite3
-          sudo install -m0755 fractalsql.dylib /usr/local/lib/sqlite3/fractalsql.so
+          # Keep the native name: `.load /usr/local/lib/sqlite3/fractalsql`
+          # (bare, no extension) resolves through SQLite's loader suffix
+          # fallback, which on Darwin appends ".dylib" — never ".so".
+          # This matches easy_install.sh's darwin layout exactly.
+          sudo install -m0755 fractalsql.dylib /usr/local/lib/sqlite3/fractalsql.dylib
           sudo install -m0755 include/darwin-arm64/fractalsql-reasoning-http.so \
               /usr/local/lib/sqlite3/
           ls -l /usr/local/lib/sqlite3

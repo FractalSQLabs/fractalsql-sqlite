@@ -355,7 +355,15 @@ function Invoke-Wizard {
             if ($cfg.Contains('http_token')) {
                 Write-Warn2 "Snippet contains your http_token in plain text - protect it like a credential (ACL restricted below)."
             }
-            icacls.exe $snippetPath /inheritance:r /grant:r "$env:USERNAME:R" | Out-Null
+            # Braced form: in "$env:USERNAME:R" the parser reads
+            # USERNAME:R as ONE drive-qualified variable name, which
+            # resolves to nothing - icacls then gets an empty /grant:r
+            # argument ("Invalid parameter", exit 87) and the snippet
+            # keeps its inherited ACL.
+            icacls.exe $snippetPath /inheritance:r /grant:r "${env:USERNAME}:R" | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warn2 "couldn't restrict the snippet's ACL (icacls exited $LASTEXITCODE) - the file keeps its inherited ACL."
+            }
         }
     }
 
@@ -368,7 +376,11 @@ function Invoke-Wizard {
         }
         if ($Provider -ne 'skip' -and (Confirm-Step "Run a live reasoning smoke test (SELECT fractal_reason('say ok'))? A cloud endpoint may incur cost, and a cold local model can take several minutes the first time.")) {
             try {
-                $reply = Invoke-Sqlite $SqliteBin @("-init", "`"$snippetPath`"", "SELECT fractal_reason('say ok');")
+                # Bare path: ArgumentList escapes values containing
+                # spaces itself. Embedding quotes here hands sqlite3 a
+                # argv element with literal quote characters inside,
+                # which -init then can't open.
+                $reply = Invoke-Sqlite $SqliteBin @("-init", $snippetPath, "SELECT fractal_reason('say ok');")
                 Write-Host "  $reply"
             } catch {
                 Write-Warn2 "That failed. If it looks like a timeout on a slow/cold local model, give the model a minute and retry, or raise the plugin's wait ceiling first (FSQL_REASONING_HTTP_TIMEOUT_MS / FSQL_REASONING_HTTP_LOW_SPEED_SECS in the shell before starting sqlite3), or see docs/reasoning-setup.md's 'Handling Constrained Hardware' section."

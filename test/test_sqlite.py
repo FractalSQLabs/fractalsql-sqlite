@@ -25,7 +25,10 @@ Exit codes
     1  an assertion failed (stderr explains which)
     2  couldn't find a loadable extension
 """
-from __future__ import annotations
+# Runs on the system pythons of every install-test container, down to
+# 3.6 (RHEL 8) — keep the syntax and stdlib usage inside that floor.
+# (No `from __future__ import annotations`: that future is 3.7+, and
+# on 3.6 it is a compile-time SyntaxError for the whole module.)
 
 import json
 import math
