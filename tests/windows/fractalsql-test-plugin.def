@@ -1,0 +1,12 @@
+; fractalsql-test-plugin.def
+; Shared Windows DLL export table for build_test.ps1's mock/evil test
+; plugins (mock_reasoning_plugin.c, evil_crash_plugin.c,
+; evil_lying_length_plugin.c, evil_nonterminating_plugin_win.c). Only
+; the single V1 ABI entry point is exported, matching the convention
+; fractalsql-reasoning-http.def already established for the shipped
+; reasoning plugin -- MSVC does not export plain C symbols from a DLL
+; by default (unlike an ELF .so on Linux), so without this LoadLibrary
+; + GetProcAddress("fsql_reasoning_init") would fail to find it.
+
+EXPORTS
+    fsql_reasoning_init

@@ -1,6 +1,6 @@
 -- sql/load_extension.sql
 --
--- Example usage for sqlite-fractalsql (Community Edition).
+-- Example usage for fractalsql-sqlite (Community Edition).
 --
 -- Load the extension. Adjust the path if your install is elsewhere.
 -- Release-package install paths:
@@ -20,7 +20,7 @@
 -- Edition + version metadata.
 -- ---------------------------------------------------------------
 SELECT fractalsql_edition();        -- 'Community'
-SELECT fractalsql_version();        -- '1.0.0'
+SELECT fractalsql_version();        -- '2.0.0'
 
 -- ---------------------------------------------------------------
 -- fractal_search(vector, query) — cosine distance between `vector`

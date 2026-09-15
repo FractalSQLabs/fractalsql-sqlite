@@ -1,34 +1,39 @@
 Source: sqlite3-fractalsql
 Section: database
 Priority: optional
-Maintainer: FractalSQLabs <ops@fractalsqlabs.io>
+Maintainer: FractalSQLabs
 Build-Depends:
  debhelper-compat (= 13),
- g++,
+ gcc,
  libsqlite3-dev,
- pkg-config
+ pkg-config,
+ python3
 Standards-Version: 4.6.2
-Homepage: https://github.com/FractalSQLabs/sqlite-fractalsql
+Homepage: https://github.com/FractalSQLabs/fractalsql-sqlite
 
 Package: sqlite3-fractalsql
 Architecture: amd64 arm64
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
- libc6 (>= 2.38)
+ libc6 (>= 2.34)
 Recommends:
  sqlite3
 Description: Stochastic Fractal Search SQLite loadable extension (Community)
- sqlite3-fractalsql is a SQLite loadable extension exposing a
- fractal_search(vector, query) scalar function plus fractalsql_edition()
- and fractalsql_version() helpers, backed by a LuaJIT-compiled
- Stochastic Fractal Search optimizer.
+ sqlite3-fractalsql is a SQLite loadable extension exposing the full
+ FractalSQL 2.0 surface — fractal_search/fractal_search_explore retrieval, the
+ fractal_vector BLOB type with vector math, sovereign-tier agents
+ (fractal_reason, fractal_text_to_sql, fractal_embed, the vectorizer),
+ fractal dimension analysis, and the QTL ledger — statically linked
+ against the vendored pure-C FractalSQL core.
  .
- Community Edition (v1.0.0): Salimi 2014 canonical SFS with Gaussian
- diffusion and greedy sniper selection.
+ Community Edition (v2.0.0): Salimi 2014 canonical SFS with Gaussian
+ diffusion and greedy sniper selection; sovereign-tier features drive
+ an optional reasoning plugin (fractalsql-reasoning-http).
  .
- Zero runtime dependency: LuaJIT, libgcc, and libstdc++ are all
- statically linked into the extension; the only import is glibc.
+ Zero runtime dependency beyond glibc: the core archive is statically
+ linked into the extension; the only import is libc (plus libdl for
+ plugin loading and libm/libpthread, per the linker line).
  .
  After installation, load the extension in any SQLite session:
  .

@@ -1,0 +1,15 @@
+# TSAN_OPTIONS=suppressions=tests/tsan_suppressions.txt (build_test.sh --tsan)
+#
+# sqlite3_fractalsql_init: SQLITE_EXTENSION_INIT2(pApi) unconditionally
+# writes the process-global `sqlite3_api` pointer every time an
+# extension is loaded -- stock SQLite extension boilerplate, not
+# fractalsql-specific. Gate 33's harness deliberately loads the
+# extension on N concurrent connections (one per worker thread) to
+# drive real concurrent ledger writes, which makes every worker race on
+# that global write. In practice this is harmless (every load in one
+# process gets the same pApi value back from SQLite core), and every
+# real caller already avoids it by loading extensions before going
+# multi-threaded -- confirmed real, first run of this harness, not a
+# ledger bug. Suppressed so a genuine finding in the ledger's own
+# concurrent state doesn't get lost in this always-present one.
+race:sqlite3_fractalsql_init

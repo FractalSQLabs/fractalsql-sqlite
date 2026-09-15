@@ -1,4 +1,4 @@
-name: Release sqlite-fractalsql Packages
+name: Release fractalsql-sqlite Packages
 
 on:
   push:
@@ -15,28 +15,38 @@ env:
 permissions:
   contents: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # ------------------------------------------------------------------
   # Linux: .so + .deb + .rpm + .zip for amd64 and arm64.
   # ------------------------------------------------------------------
   build-and-release:
-    runs-on: ubuntu-latest
+    # Native arm64 via GitHub's ubuntu-24.04-arm runner. Earlier
+    # iterations used ubuntu-latest + QEMU, which paid the cost of
+    # x86->aarch64 instruction translation for the entire Docker
+    # build. Native arm64 runners (GA mid-2025) run the same Docker +
+    # buildx stack at native speed; no QEMU shim needed.
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        architecture: [amd64, arm64]
+        include:
+          - { architecture: amd64, profile: modern, runner: ubuntu-latest }
+          - { architecture: amd64, profile: legacy, runner: ubuntu-latest }
+          - { architecture: amd64, profile: musl,   runner: ubuntu-latest }
+          - { architecture: arm64, profile: modern, runner: ubuntu-24.04-arm }
+          - { architecture: arm64, profile: legacy, runner: ubuntu-24.04-arm }
+          - { architecture: arm64, profile: musl,   runner: ubuntu-24.04-arm }
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: linux/amd64,linux/arm64
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
       - name: Install Packaging Tools
         run: |
@@ -44,25 +54,125 @@ jobs:
           sudo apt-get install -y ruby ruby-dev build-essential rpm zip
           sudo gem install --no-document fpm
 
-      - name: Build fractalsql.so for ${{ matrix.architecture }}
+      - name: Build fractalsql.so (${{ matrix.profile }}) for ${{ matrix.architecture }}
+        env:
+          PROFILE: ${{ matrix.profile }}
         run: |
           chmod +x build.sh
-          ./build.sh ${{ matrix.architecture }}
+          ./build.sh ${{ matrix.architecture }} --profile=${{ matrix.profile }}
 
-      - name: Build .zip, .deb, and .rpm for ${{ matrix.architecture }}
+      - name: Build packages (${{ matrix.profile }}) for ${{ matrix.architecture }}
+        # modern + legacy → .zip + .deb + .rpm
+        # musl            → .apk + .zip
+        env:
+          PROFILE: ${{ matrix.profile }}
         run: |
           chmod +x scripts/package.sh
           scripts/package.sh ${{ matrix.architecture }}
 
-      - name: Upload artifacts (per-arch)
-        uses: actions/upload-artifact@v4
+      # A broken build must never reach a published release -- catch it
+      # here, before packaging is trusted and uploaded. modern/legacy are
+      # glibc, loadable directly by this runner's own sqlite3 (a newer
+      # host glibc always runs an older-glibc-targeted .so; that's the
+      # whole point of the legacy profile). musl needs a real musl libc
+      # to dlopen cleanly, so it's smoke-tested inside alpine:3.20
+      # instead -- same reasoning as install-test.yml's apk-install job.
+      - name: Smoke test — .load in sqlite3 CLI
+        if: matrix.profile != 'musl'
+        run: |
+          set -euo pipefail
+          case "${{ matrix.profile }}" in
+            modern) SUFFIX="" ;;
+            legacy) SUFFIX="-legacy" ;;
+          esac
+          SO="dist/${{ matrix.architecture }}/fractalsql${SUFFIX}.so"
+          test -f "${SO}"
+          sudo apt-get install -y -qq sqlite3
+          # Explicit entry point on EVERY .load: without one, .load
+          # derives it from the file name, and "fractalsql-legacy.so"
+          # yields the wrong "sqlite3_fractalsqllegacy_init".
+          OUT=$(sqlite3 :memory: ".load ${SO} sqlite3_fractalsql_init" "SELECT fractalsql_edition() || '|' || fractalsql_version();")
+          echo "result: ${OUT}"
+          test "${OUT}" = "Community|2.0.0"
+          DIST=$(sqlite3 :memory: ".load ${SO} sqlite3_fractalsql_init" "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');")
+          echo "self-search distance: ${DIST}"
+          awk -v d="${DIST}" 'BEGIN { if (d >= 1e-6) exit 1 }'
+
+      - name: Smoke test — .load in sqlite3 CLI (musl, via alpine:3.20)
+        if: matrix.profile == 'musl'
+        run: |
+          set -euo pipefail
+          SO="dist/${{ matrix.architecture }}/fractalsql-musl.so"
+          test -f "${SO}"
+          docker run --rm -v "$(pwd):/work" -w /work alpine:3.20 sh -c '
+            set -eu
+            apk add --no-cache sqlite
+            # Explicit entry point: without one, .load derives it from
+            # the file name, and "fractalsql-musl.so" yields the wrong
+            # "sqlite3_fractalsqlmusl_init".
+            # The assertions avoid SQL string literals on purpose: in
+            # SQL a double-quoted "|" is a column reference (and
+            # embedding single quotes through the two shells gets
+            # unreadable), so edition and version are asserted
+            # separately.
+            OUT=$(sqlite3 :memory: ".load '"${SO}"' sqlite3_fractalsql_init" "SELECT fractalsql_edition();")
+            echo "edition: ${OUT}"
+            test "${OUT}" = "Community"
+            OUT=$(sqlite3 :memory: ".load '"${SO}"' sqlite3_fractalsql_init" "SELECT fractalsql_version();")
+            echo "version: ${OUT}"
+            test "${OUT}" = "2.0.0"
+          '
+
+      # Every profile installs to the SAME fixed path regardless of the
+      # on-disk artifact's own -legacy/-musl suffix (see
+      # scripts/package.sh) -- .load looks for
+      # /usr/local/lib/sqlite3/fractalsql.so unconditionally, so a
+      # packaging-metadata slip here would be silent until a real
+      # install. apk's payload isn't a plain deb/rpm content listing;
+      # install-test.yml's apk-install job already does a real install +
+      # file-existence check in a live Alpine container, which is a
+      # stronger check than a listing here, so this only covers deb/rpm.
+      - name: Verify extension files land at the right path
+        if: matrix.profile != 'musl'
+        run: |
+          set -euo pipefail
+          for deb in dist/packages/*-${{ matrix.architecture }}.deb; do
+            [ -e "${deb}" ] || continue
+            echo "=== ${deb} ==="
+            CONTENTS=$(dpkg-deb -c "${deb}")
+            echo "${CONTENTS}" | grep -E 'usr/local/lib/sqlite3/fractalsql\.so$'
+            echo "${CONTENTS}" | grep -E 'usr/local/lib/sqlite3/fractalsql-reasoning-http\.so$'
+          done
+          for rpm in dist/packages/*-${{ matrix.architecture }}.rpm; do
+            [ -e "${rpm}" ] || continue
+            echo "=== ${rpm} ==="
+            CONTENTS=$(rpm -qlp "${rpm}" 2>/dev/null || rpm2cpio "${rpm}" | cpio -t 2>/dev/null)
+            echo "${CONTENTS}" | grep -E '(^|/)usr/local/lib/sqlite3/fractalsql\.so$'
+            echo "${CONTENTS}" | grep -E '(^|/)usr/local/lib/sqlite3/fractalsql-reasoning-http\.so$'
+          done
+
+      # easy_install.sh is arch/profile-independent (pure bash), so stamp
+      # it once from a single matrix cell, not once per cell -- uploading
+      # the identical file from every cell would race concurrent release-
+      # asset uploads of the same name.
+      - name: Stamp version into easy_install.sh
+        if: matrix.architecture == 'amd64' && matrix.profile == 'modern'
+        run: |
+          set -euo pipefail
+          FSQL_VERSION="${{ github.ref_name }}"
+          FSQL_VERSION="${FSQL_VERSION#v}"
+          sed "s/@@FSQL_VERSION@@/${FSQL_VERSION}/" scripts/easy_install.sh > dist/packages/easy_install.sh
+          chmod +x dist/packages/easy_install.sh
+
+      - name: Upload artifacts (per-arch / per-profile)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
-          name: sqlite-fractalsql-${{ matrix.architecture }}
+          name: fractalsql-sqlite-${{ matrix.architecture }}-${{ matrix.profile }}
           path: dist/packages/*
           if-no-files-found: error
 
       - name: Upload to Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           files: dist/packages/*
           fail_on_unmatched_files: false
@@ -70,34 +180,164 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ------------------------------------------------------------------
-  # Windows: fractalsql.dll + FractalSQL-<version>-<arch>.msi
+  # macOS: fractalsql.dylib for Apple Silicon (arm64, native) + Intel
+  # (x86_64, cross-compiled via FSQL_DARWIN_ARCH -- the free Intel
+  # macos-13 runner was retired Dec 2025, so both legs now run on
+  # macos-14), packaged by scripts/package-darwin.sh into the
+  # easy_install-compatible tarball
+  # (fractalsql-sqlite-<version>-darwin-<arch>.tar.gz).
   #
-  # Matrix:
-  #   x64   → windows-latest      (AMD64 host, native x64 build)
-  #   x86   → windows-latest      (AMD64 host, cross-compiled 32-bit)
-  #   arm64 → windows-11-arm      (native ARM64 Windows runner)
+  # Pure C, statically linked against the vendored darwin core archive
+  # (include/darwin-<arch>/libfractalsql-community-sovereign-c.a) —
+  # same zero-runtime-dep posture as the Linux .so and Windows DLL.
   #
-  # x86 cross-build notes
-  #   `ilammy/msvc-dev-cmd@v1 with: arch: x86` activates the 32-bit
-  #   MSVC toolchain on the x64 host. LuaJIT's msvcbuild.bat builds
-  #   a native x86 static lib in that dev-cmd environment. The WXS
-  #   preprocessor picks ProgramFilesFolder (instead of
-  #   ProgramFiles64Folder) when sys.BUILDARCH=="x86", so the MSI
-  #   installs into C:\Program Files (x86)\FractalSQL on 64-bit
-  #   Windows — pairs naturally with the 32-bit sqlite3.exe that
-  #   sqlite.org still ships as sqlite-tools-win32-x86-*.zip.
+  # SQLite extensions on macOS are loaded via `.load <abs-path>` —
+  # no plugin_dir to worry about. The dylib just needs to exist and
+  # not be quarantined.
   #
-  # On each runner the pipeline chains:
-  #   1. MSVC dev cmd (ilammy/msvc-dev-cmd) matched to matrix.arch
-  #   2. WiX Toolset v3 via chocolatey. WiX is an x64 .NET app; on
-  #      the ARM64 runner it runs under emulation, which is fine —
-  #      candle/light still emit a native ARM64 MSI because we pass
-  #      `-arch arm64` to candle.
-  #   3. LuaJIT 2.1 built from source (msvcbuild.bat static).
-  #   4. SQLite amalgamation download for sqlite3ext.h.
-  #   5. scripts/windows/build.bat     → fractalsql.dll (/MT /GL)
-  #   6. scripts/windows/build-msi.bat → FractalSQL-1.0.0-<arch>.msi
-  #      (candle -arch <MSI_ARCH> flows into $(sys.BUILDARCH) and
+  # Unsigned release: users run `xattr -d com.apple.quarantine` once
+  # after extraction. Code signing + notarization deferred.
+  # ------------------------------------------------------------------
+  build-macos:
+    name: macos ${{ matrix.fsql_arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            fsql_arch: x86_64
+          - runner: macos-14
+            fsql_arch: arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install SQLite headers
+        run: |
+          set -euo pipefail
+          # Homebrew's sqlite provides sqlite3ext.h (newer than the
+          # macOS-SDK-bundled one, which is sometimes stripped).
+          brew install sqlite
+
+      - name: Build + package dylib
+        run: |
+          set -euo pipefail
+          chmod +x scripts/package-darwin.sh
+          # Pin the artifact version to the tag (release.yml only fires
+          # on v* tags; strip the v). Branch builds fall back to the
+          # header-derived version inside package-darwin.sh.
+          export FSQL_PKG_VERSION="${GITHUB_REF_NAME#v}"
+          # x86_64 cross-builds on an Apple Silicon runner (the Intel
+          # macos-13 image was retired) and arm64 builds native. The
+          # script passes -arch itself — without it clang would target
+          # the arm64 host on both legs and the x86_64 link would come
+          # up empty against the x86_64 vendored archive.
+          FSQL_DARWIN_ARCH=${{ matrix.fsql_arch }} ./scripts/package-darwin.sh
+          ls -l dist/packages
+
+      - name: Posture checks (otool, size, exports)
+        run: |
+          set -euo pipefail
+          DYLIB="fractalsql.dylib"
+
+          echo "--- otool -L ---"
+          otool -L "${DYLIB}"
+          # tail -n +3: line 1 is the "filename:" header, line 2 is
+          # always the dylib's own install name — a self-reference,
+          # not a dependency, so it must not count as disallowed.
+          BAD=$(otool -L "${DYLIB}" \
+                  | tail -n +3 \
+                  | awk '{print $1}' \
+                  | grep -vE '^(/usr/lib/libSystem\.B\.dylib|/System/Library/Frameworks/)' \
+                  | grep -v '^$' || true)
+          if [ -n "${BAD}" ]; then
+              echo "FAIL: disallowed dynamic deps:" >&2
+              echo "${BAD}" >&2
+              exit 1
+          fi
+
+          echo "--- size ---"
+          SZ=$(stat -f '%z' "${DYLIB}")
+          echo "size: ${SZ} bytes"
+          if [ "${SZ}" -gt 4194304 ]; then
+              echo "FAIL: dylib exceeds 4 MiB ceiling (matches build.sh's SIZE_CEILING_BYTES)" >&2
+              exit 1
+          fi
+
+          echo "--- required exports ---"
+          # SQLite's extension loader calls sqlite3_fractalsql_init.
+          nm -gU "${DYLIB}" | grep -E '_sqlite3_fractalsql_init$' \
+              || { echo "FAIL: sqlite3_fractalsql_init missing"; exit 1; }
+          echo "ok: ${DYLIB}"
+
+      # arm64 only: both legs now run on the same native-arm64 macos-14
+      # runner (see the job header comment), and Homebrew's sqlite3
+      # there is an arm64-native binary -- it cannot .load the
+      # cross-compiled x86_64 dylib (architecture mismatch in the TEST,
+      # not a signal about the build). install-test.yml's macos-install
+      # job covers the live functional path on the arch that IS native
+      # here; the posture checks above (otool/size/exports) are pure
+      # static inspection and still run for x86_64 too.
+      - name: Functional test — .load in sqlite3 CLI
+        if: matrix.fsql_arch == 'arm64'
+        run: |
+          set -euo pipefail
+          DYLIB="$(pwd)/fractalsql.dylib"
+          SQLITE_BIN="$(brew --prefix sqlite)/bin/sqlite3"
+          # Sanity: load the extension, call edition/version, and
+          # confirm the sovereign self-search path returns ~0 distance.
+          OUT=$("${SQLITE_BIN}" :memory: \
+              ".load ${DYLIB}" \
+              "SELECT fractalsql_edition() || '|' || fractalsql_version();")
+          echo "result: ${OUT}"
+          test "${OUT}" = "Community|2.0.0"
+          DIST=$("${SQLITE_BIN}" :memory: \
+              ".load ${DYLIB}" \
+              "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');")
+          echo "self-search distance: ${DIST}"
+          awk -v d="${DIST}" 'BEGIN { if (d >= 1e-6) exit 1 }'
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: fractalsql-sqlite-darwin-${{ matrix.fsql_arch }}
+          path: dist/packages/fractalsql-sqlite-*-darwin-${{ matrix.fsql_arch }}.tar.gz
+          if-no-files-found: error
+
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
+        with:
+          files: dist/packages/fractalsql-sqlite-*-darwin-${{ matrix.fsql_arch }}.tar.gz
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ------------------------------------------------------------------
+  # Windows: fractalsql.dll + FractalSQL-<version>-x64.msi
+  #
+  # x64 only: include/ carries exactly one Windows core drop
+  # (windows-x86_64), so the 32-bit x86 and arm64 legs were removed —
+  # linking the x64 archive into 32-bit/ARM64 objects makes the linker
+  # skip every member and the DLL dies with unresolved externals. The
+  # legs return when the core foundry ships windows-x86 /
+  # windows-arm64 drops and scripts\windows\build.bat learns to
+  # dispatch on VSCMD_ARG_TGT_ARCH; the WiX -arch handling below is
+  # already arch-agnostic and needs no change for them.
+  #
+  # On the runner the pipeline chains:
+  #   1. MSVC dev cmd (ilammy/msvc-dev-cmd), arch x64
+  #   2. WiX Toolset v3 via chocolatey.
+  #   3. SQLite amalgamation download for sqlite3ext.h.
+  #   4. scripts/windows/build.bat     → fractalsql.dll (/MT /GL;
+  #      pure C, statically linked against the vendored
+  #      include\windows-x86_64\core archive + bcrypt.lib)
+  #   5. scripts/windows/build-msi.bat → FractalSQL-<ver>-x64.msi
+  #      (MSI_VERSION is stamped from the release tag here; candle
+  #       -arch <MSI_ARCH> flows into $(sys.BUILDARCH) and
   #       sets <Package Platform="…"/> + the Program Files dir ref)
   # ------------------------------------------------------------------
   build-windows-msi:
@@ -107,17 +347,13 @@ jobs:
         include:
           - arch: x64
             runner: windows-latest
-          - arch: x86
-            runner: windows-latest
-          - arch: arm64
-            runner: windows-11-arm
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Set up MSVC dev cmd (${{ matrix.arch }})
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1
         with:
           arch: ${{ matrix.arch }}
 
@@ -126,12 +362,10 @@ jobs:
         run: |
           choco install -y --no-progress wixtoolset
 
-          # On the x64 runner, choco shims candle/light into
-          # C:\ProgramData\chocolatey\bin automatically. On the
-          # windows-11-arm runner it doesn't — the wixtoolset chocó
-          # package only drops files under "Program Files (x86)\WiX
-          # Toolset vX.Y\bin" and we have to put that on PATH
-          # ourselves. Find wherever candle.exe landed and append its
+          # choco shims candle/light into C:\ProgramData\chocolatey\bin
+          # automatically, but the wixtoolset package sometimes only
+          # drops files under "Program Files (x86)\WiX Toolset vX.Y\bin"
+          # instead. Find wherever candle.exe landed and append its
           # directory to $GITHUB_PATH so subsequent steps pick it up.
           $wixBin = $null
           $candidates = @(
@@ -156,19 +390,6 @@ jobs:
           Write-Host "WiX bin dir: $wixBin"
           Add-Content -Path $env:GITHUB_PATH -Value $wixBin
 
-      - name: Clone + build static LuaJIT 2.1 with MSVC
-        shell: cmd
-        run: |
-          if not exist deps mkdir deps
-          git clone --depth 1 --branch v2.1 https://github.com/LuaJIT/LuaJIT.git deps\LuaJIT
-          cd deps\LuaJIT\src
-          call msvcbuild.bat static
-          if not exist lua51.lib (
-            echo ==^> LuaJIT static build failed
-            exit /b 1
-          )
-          dir lua51.lib lua.h
-
       - name: Download SQLite amalgamation for headers
         shell: pwsh
         run: |
@@ -184,7 +405,6 @@ jobs:
       - name: Build fractalsql.dll (/MT static CRT, /GL WPO)
         shell: cmd
         run: |
-          set LUAJIT_DIR=%CD%\deps\LuaJIT\src
           set SQLITE_DIR=%CD%\deps\sqlite
           set OUT_DIR=%CD%\dist\windows
           if not exist "%OUT_DIR%" mkdir "%OUT_DIR%"
@@ -211,20 +431,91 @@ jobs:
         shell: cmd
         env:
           MSI_ARCH: ${{ matrix.arch }}
+          # ProductVersion + filename, from the release tag (v-prefixed
+          # tags strip the v, matching easy_install's stamping below).
+          MSI_VERSION: ${{ github.ref_name }}
         run: |
+          set MSI_VERSION=%MSI_VERSION:v=%
           call scripts\windows\build-msi.bat
           if errorlevel 1 exit /b 1
           dir dist\windows\*.msi
 
-      - name: Upload MSI artifact
-        uses: actions/upload-artifact@v4
+      # A broken build must never reach a published release -- catch it
+      # here, before packaging is trusted and uploaded (same principle as
+      # build-and-release's/build-macos's own smoke tests). x64 only:
+      # choco's sqlite3.exe is an x64-native binary, so runner, MSI,
+      # and available sqlite3.exe are all confirmed the same
+      # architecture. (When the x86/arm64 legs return with their own
+      # core drops, the arch-mismatched cells skip this step again --
+      # the condition below already carries it.)
+      - name: Install our MSI + functional test
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem "dist\windows\FractalSQL-SQLite-*-x64.msi" | Select-Object -First 1
+          if (-not $msi) { Write-Host "FATAL: built .msi not found"; exit 1 }
+          $p = Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /quiet /norestart" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Write-Host "FATAL: msiexec exited $($p.ExitCode)"; exit 1 }
+          Get-ChildItem 'C:\Program Files\FractalSQL'
+
+          choco install sqlite --no-progress
+          $cmd = Get-Command sqlite3.exe -ErrorAction SilentlyContinue
+          if (-not $cmd) { Write-Host "FATAL: sqlite3.exe not on PATH after choco install"; exit 1 }
+
+          # .load's tokenizer splits on whitespace and mangles backslashes
+          # inside "..."-quoted paths, and this path contains a space
+          # ("Program Files"), so hand it the quoted forward-slash form --
+          # LoadLibrary accepts both. (build_test.ps1's Resolve-Ext
+          # documents the same tokenizer behavior.)
+          $load = '.load "C:/Program Files/FractalSQL/fractalsql.dll"'
+          $out = & $cmd.Source ':memory:' $load "SELECT fractalsql_edition() || '|' || fractalsql_version();"
+          Write-Host "result: $out"
+          if ($out -ne 'Community|2.0.0') { Write-Host "FATAL: unexpected edition|version: $out"; exit 1 }
+
+          $dist = & $cmd.Source ':memory:' $load "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');"
+          Write-Host "self-search distance: $dist"
+          if ([double]$dist -ge 1e-6) { Write-Host "FATAL: self-search distance too large: $dist"; exit 1 }
+          Write-Host "ok: MSI install + .load + search"
+
+      # easy_install.ps1 is arch-independent (pure PowerShell), so stamp
+      # it once, not once per matrix cell -- uploading the identical file
+      # from every cell would race concurrent release-asset uploads of
+      # the same name.
+      - name: Stamp version into easy_install.ps1
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}" -replace '^v', ''
+          New-Item -ItemType Directory -Force -Path dist\windows | Out-Null
+          (Get-Content scripts\windows\easy_install.ps1 -Raw) -replace '@@FSQL_VERSION@@', $ver `
+              | Set-Content -Path dist\windows\easy_install.ps1 -Encoding utf8
+
+      - name: Upload easy_install.ps1 artifact
+        if: matrix.arch == 'x64'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
-          name: sqlite-fractalsql-windows-msi-${{ matrix.arch }}
+          name: fractalsql-sqlite-easy-install-ps1
+          path: dist/windows/easy_install.ps1
+          if-no-files-found: error
+
+      - name: Upload easy_install.ps1 to Release
+        if: matrix.arch == 'x64'
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
+        with:
+          files: dist/windows/easy_install.ps1
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: fractalsql-sqlite-windows-msi-${{ matrix.arch }}
           path: dist/windows/*.msi
           if-no-files-found: error
 
       - name: Upload to Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           files: dist/windows/*.msi
           fail_on_unmatched_files: false

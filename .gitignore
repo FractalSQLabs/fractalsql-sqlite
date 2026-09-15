@@ -1,18 +1,39 @@
-# Build artifacts
 *.so
 *.dylib
+*.dll
 *.o
+*.obj
+*.exp
 *.a
+*.lib
+*.pdb
+*.exe
 fractalsql.so
 fractalsql.dylib
 
-# NOTE: include/sfs_core_bc.h is a tracked source file
-# (pre-compiled LuaJIT bytecode). Do not add it to this list.
+/tsan_ledger_runner
+__pycache__/
+test/__pycache__/
+.pytest_cache/
+.coverage
 
-# Build output trees
+!include/**/*.a
+!include/**/*.so
+!include/**/*.dylib
+!include/**/*.dll
+!include/**/*.lib
+
 dist/
 
-# Packaging temp files (fpm + debhelper + rpmbuild stagedirs)
+bench/*.db
+
+/*_teardown.sql
+/*_generated.sql
+/bi_trend.sql
+/spike_candidate.sql
+
+/diag_loadext.py
+
 *.deb
 *.rpm
 *.zip
@@ -28,7 +49,6 @@ packaging/rpm/SOURCES/
 packaging/rpm/SPECS/
 packaging/rpm/SRPMS/
 
-# Editor / OS cruft
 .vscode/
 .idea/
 *.swp

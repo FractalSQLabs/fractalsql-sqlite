@@ -1,0 +1,340 @@
+name: build-test
+
+on:
+  push:
+    branches: [main, '2.x']
+  pull_request:
+    branches: [main, '2.x']
+  schedule:
+    # Weekly, not per-push -- the sanitizer/coverage jobs below are a
+    # heavier instrumented rebuild that isn't worth paying on every
+    # commit. workflow_dispatch covers on-demand runs of any of them.
+    - cron: '30 5 * * 1'
+  workflow_dispatch:
+    inputs:
+      gate_set:
+        description: 'Gate set: quick | default | fuzz'
+        required: false
+        default: default
+
+permissions:
+  contents: read
+
+env:
+  # Pinned so CI is reproducible — bump both in tandem when
+  # rolling the SQLite headers forward (mirrors release.yml).
+  SQLITE_YEAR: "2024"
+  SQLITE_VERSION: "3460000"    # SQLite 3.46.0
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gates:
+    name: ${{ matrix.os }} gates
+    if: github.event_name != 'schedule'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    env:
+      GATE_SET: ${{ github.event_name == 'workflow_dispatch' && inputs.gate_set || 'default' }}
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              build-essential sqlite3 libsqlite3-dev pkg-config
+
+      - name: Install toolchain (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install sqlite pkg-config
+          # Apple's /usr/bin/sqlite3 is built WITHOUT extension loading
+          # (SQLITE_OMIT_LOAD_EXTENSION) — ".load" is not a command
+          # there. Homebrew's sqlite is keg-only and never reaches
+          # PATH, so put its bin first: every gate that drives the
+          # extension through the sqlite3 shell needs a load-capable
+          # CLI (the release workflow's functional test resolves the
+          # same binary explicitly).
+          echo "$(brew --prefix sqlite)/bin" >> "$GITHUB_PATH"
+
+      - name: Install toolchain (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # sqlite3.exe CLI for the gate runner's smoke steps; python3
+          # is preinstalled on windows-2022 runners.
+          choco install sqlite --no-progress
+
+      - name: SQLite amalgamation headers (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # build_test.ps1's gate 01 builds via scripts\windows\build.bat,
+          # which needs sqlite3ext.h from SQLITE_DIR; on a runner there
+          # is no vendored or system copy, so point FSQL_SQLITE_DIR at
+          # the amalgamation downloaded here (the gate script honors
+          # that override first).
+          $zipName = "sqlite-amalgamation-${env:SQLITE_VERSION}.zip"
+          $url     = "https://www.sqlite.org/${env:SQLITE_YEAR}/$zipName"
+          New-Item -ItemType Directory -Force -Path deps | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile "deps\sqlite.zip"
+          Expand-Archive -Path "deps\sqlite.zip" -DestinationPath deps -Force
+          Rename-Item -Path "deps\sqlite-amalgamation-${env:SQLITE_VERSION}" `
+                      -NewName "sqlite"
+          Add-Content -Path $env:GITHUB_ENV -Value "FSQL_SQLITE_DIR=$PWD\deps\sqlite"
+
+      - name: Run gate suite (POSIX)
+        if: runner.os != 'Windows'
+        shell: bash
+        # build_test.sh takes flags, not a positional gate-set name --
+        # `default` means the bare invocation (no --quick/--fuzz).
+        run: |
+          case "${GATE_SET}" in
+            quick) ./build_test.sh --quick ;;
+            fuzz)  ./build_test.sh --fuzz ;;
+            *)     ./build_test.sh ;;
+          esac
+
+      - name: Run gate suite (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        # build_test.ps1 mirrors build_test.sh: -Quick/-Fuzz switches,
+        # no positional gate-set name.
+        run: |
+          switch ($env:GATE_SET) {
+            'quick' { ./build_test.ps1 -Quick }
+            'fuzz'  { ./build_test.ps1 -Fuzz }
+            default { ./build_test.ps1 }
+          }
+          exit $LASTEXITCODE
+
+      - name: Upload gate build log (failure diagnostics)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          # build_test.sh copies its full gate-01 build log here when the
+          # build fails; the step-output printer is grep-filtered and
+          # capped, so a long linker report (a complete "Undefined
+          # symbols" block, for one) only reaches CI through this
+          # artifact. Windows writes its log elsewhere and passes, so
+          # if-no-files-found: ignore keeps this a no-op there.
+          name: gate-build-log-${{ matrix.os }}
+          path: fractalsql_bt_build.log
+          if-no-files-found: ignore
+
+  sanitizers:
+    name: asan/ubsan (linux)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              build-essential sqlite3 libsqlite3-dev pkg-config
+
+      - name: Build with sanitizers
+        run: |
+          make clean || true
+          make CFLAGS="-std=c11 -O1 -g -fPIC -fsanitize=address,undefined -fno-omit-frame-pointer -Wall -Wextra -I/usr/include -Iinclude -Isrc"
+
+      - name: Smoke under sanitizers
+        run: |
+          # Load the sanitized extension; SQLite's own test harness for
+          # loadable extensions exercises the C paths the pytest suite
+          # drives. Exit code + stderr are the gate.
+          #
+          # The extension is asan/ubsan-instrumented; the python3 that
+          # loads it is not. The Makefile's LDFLAGS deliberately omit
+          # -fsanitize, so the sanitizer runtimes are not dependencies
+          # of the .so — its __asan_* / __ubsan_* calls resolve against
+          # the loading process, which must therefore have them
+          # preloaded first (libasan first: ASan insists on being the
+          # first-loaded runtime). Without this, dlopen fails and
+          # SQLite's append-".so" retry masks the real error as
+          # "./fractalsql.so.so: cannot open shared object file".
+          export LD_PRELOAD="$(gcc -print-file-name=libasan.so):$(gcc -print-file-name=libubsan.so)"
+          # Preloading libasan also arms LeakSanitizer for the whole
+          # process, and the unsanitized host (CPython) reports its own
+          # benign shutdown allocations (e.g. the _datetime module's
+          # init-time dicts) at exit — interpreter noise that drowns
+          # any signal from the extension. This job gates on memory
+          # ERRORS and UB under the extension's code paths, so leak
+          # detection stays off here; it runs where the host itself is
+          # instrumented.
+          export ASAN_OPTIONS=detect_leaks=0
+          python3 - <<'EOF'
+          import sqlite3
+          conn = sqlite3.connect(":memory:")
+          conn.enable_load_extension(True)
+          conn.load_extension("./fractalsql.so")
+          conn.enable_load_extension(False)
+          cur = conn.cursor()
+          assert cur.execute("SELECT fractalsql_edition()").fetchone()[0] == "Community"
+          assert cur.execute("SELECT fractalsql_version()").fetchone()[0] == "2.0.0"
+          d = cur.execute("SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0')").fetchone()[0]
+          assert abs(d) < 1e-6
+          print("asan/ubsan smoke OK")
+          EOF
+
+  # windows-asan / windows-ubsan / darwin-asan / darwin-ubsan / linux-tsan:
+  # weekly/workflow_dispatch-only cadence, same basic-sanity scope as the
+  # always-on `sanitizers` job above -- build_test.sh/build_test.ps1
+  # already support -Asan/-Ubsan on Windows and --asan/--ubsan/--tsan on
+  # POSIX (see their own --help/.PARAMETER docs), this just wires the
+  # existing capability into CI. TSan has no Windows equivalent here
+  # (MSVC/clang-cl do not implement -fsanitize=thread -- build_test.sh
+  # itself warns and no-ops if --tsan is passed under MSYS) and is not
+  # combinable with --asan (their runtimes cannot link into the same
+  # binary), so it gets its own single job rather than folding into an
+  # existing one.
+  windows-asan:
+    name: build_test.ps1 -Asan (Windows)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Set up MSVC dev cmd (x64)
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1
+        with:
+          arch: x64
+
+      - name: Install sqlite3 CLI
+        shell: pwsh
+        run: choco install sqlite --no-progress
+
+      - name: build_test.ps1 -Asan
+        shell: pwsh
+        run: |
+          ./build_test.ps1 -Asan
+          exit $LASTEXITCODE
+
+  windows-ubsan:
+    name: build_test.ps1 -Ubsan (Windows)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Set up MSVC dev cmd (x64)
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1
+        with:
+          arch: x64
+
+      - name: Install sqlite3 CLI
+        shell: pwsh
+        run: choco install sqlite --no-progress
+
+      - name: build_test.ps1 -Ubsan
+        shell: pwsh
+        run: |
+          ./build_test.ps1 -Ubsan
+          exit $LASTEXITCODE
+
+  darwin-asan:
+    name: build_test.sh --asan (macOS)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install toolchain
+        run: brew install sqlite pkg-config
+
+      - name: build_test.sh --asan
+        run: |
+          chmod +x build_test.sh
+          ./build_test.sh --asan
+
+  darwin-ubsan:
+    name: build_test.sh --ubsan (macOS)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install toolchain
+        run: brew install sqlite pkg-config
+
+      - name: build_test.sh --ubsan
+        run: |
+          chmod +x build_test.sh
+          ./build_test.sh --ubsan
+
+  linux-tsan:
+    name: build_test.sh --tsan (linux)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # TSan support (tests/tsan_ledger_runner.c, gate 33
+    # tsan_ledger_concurrent) exists in build_test.sh but was never wired
+    # into any CI job before this -- runs directly on the runner like
+    # linux-asan/linux-ubsan above, not via Docker (build_test.sh has no
+    # Docker path at all for this repo).
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              build-essential sqlite3 libsqlite3-dev pkg-config util-linux
+
+      - name: build_test.sh --tsan
+        run: |
+          chmod +x build_test.sh
+          ./build_test.sh --tsan
+
+  # coverage: gcov-instrumented build + lcov/genhtml report, driven
+  # entirely by build_test.sh --coverage (the flag and the report
+  # generation live there, mirroring the PG runner's proven design).
+  # Weekly/workflow_dispatch-only cadence, like the sanitizer matrix
+  # above -- the report is useful to refresh on demand, not on every
+  # push. Ubuntu only: MSVC has no gcov (build_test.sh warns and no-ops
+  # under MSYS), and Darwin's sanitizer gates skip for SIP reasons that
+  # don't affect coverage but this job keeps to one platform where the
+  # lcov pipeline is proven.
+  coverage:
+    name: coverage (lcov)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install toolchain + lcov
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              build-essential sqlite3 libsqlite3-dev pkg-config lcov
+
+      - name: build_test.sh --coverage
+        run: |
+          chmod +x build_test.sh
+          ./build_test.sh --coverage
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: coverage-html
+          path: coverage_html/
+          retention-days: 30
+          if-no-files-found: warn

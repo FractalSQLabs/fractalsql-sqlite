@@ -2,232 +2,154 @@
   <img src="FractalSQLforSQLite.jpg" alt="FractalSQL for SQLite" width="720">
 </p>
 
-# sqlite-fractalsql by FractalSQLabs
+# FractalSQL: Sovereign Data Intelligence
+### Sovereign, Agentic SQLite
 
-**Stochastic Fractal Search as a SQLite loadable extension.**
-Drop a single `.so` (or `.dylib`) next to any SQLite database and get
-a continuous-space vector search function that runs entirely inside
-the host process.
+**Vector Search. In-Database Reasoning. Production-Safe Agency. All beside your data.**
 
-No server. No sidecar. No network hop. One scalar function, a JSON
-document back — sliceable by SQLite's native JSON operators.
+FractalSQL transforms SQLite from a passive data store into an active agentic
+database. FractalSQL adds what traditional RAG (Retrieval-Augmented Generation)
+stops short of: reasoning over what it retrieves, and when you enable it
+acting on the result, whether that's running a generated query or executing a
+decision an agent computed, all inside the same database process.
 
-## Why
+By bringing reasoning and agency directly into the SQLite backend, FractalSQL
+enables **Sovereign Data Intelligence**: the ability to reason, plan, and act upon
+your data with the deployment topology under your control. Run fully on-prem or in
+your own containers with Ollama/vLLM for zero data egress, or point at your
+organization's cloud AI accounts (Bedrock, Azure OpenAI, Vertex), where your compliance
+posture requires it for managed-model scale. You control the trade, not the product.
 
-| Scenario | What you get |
+| Traditional RAG Stack | The Sovereign Way (FractalSQL) |
 | --- | --- |
-| **Vercel Edge / AWS Lambda** | Drop `fractalsql.so` into `/api`, use `better-sqlite3`, vector search on a serverless function for $0 |
-| **Mobile (React Native, Flutter)** | ARM64 build runs inside your app's SQLite via the C bridge |
-| **Turso / libSQL** | Standard SQLite extension ABI — loads wherever `sqlite3_load_extension` is permitted |
-| **Privacy** | Data never leaves the device — the search happens in-process |
+| **Mode Collapse**: top-K search returns near-duplicates, starving the LLM of diverse context. | **Scout Discovery**: MMR-style diverse semantic search that discovers the data's real structure. |
+| **Fragmented Logic**: app pulls rows, calls LLM, handles retries, and glues answers in middleware. | **In-Database Reasoning**: reasoning and embedding happen inside the SQLite host process itself. |
+| **Passive Retrieval**: you ask a question, the DB returns rows, and you hope the LLM is correct. | **Autonomous Agency**: self-correcting SQL, loop detection, and trajectory forecasting. |
 
-## Production Ready
+## From zero to your first agent
 
-- **Static LuaJIT**: libluajit-5.1.a is statically linked into the
-  extension. No LuaJIT runtime dependency — the deployed `.so` needs
-  only glibc.
-- **Multi-arch**: native builds for **AMD64 / x86_64** and **ARM64 /
-  aarch64**. Verified on AWS Graviton, Apple Silicon, Ampere Altra,
-  Raspberry Pi.
-- **`SQLITE_INNOCUOUS`**: declared safe for use in views, triggers,
-  and sandboxed/untrusted contexts. Works under SQLite's default
-  threading model without extra locking.
-- **Minimum glibc 2.38** — aligned with Ubuntu 24.04 / Debian 13 / RHEL
-  family.
+FractalSQL's docs follow a single linear path. Each step answers one question
+and hands off to the next. You don't need to read everything; follow the path.
 
-## The function
+1. **What is this and why do I care?**: you are here. Sovereign Data Intelligence, in one page.
+2. **How do I get the extension running in 60 seconds?** → [Getting Started](docs/getting-started.md) (`.load` the extension, then your first Scout search).
+3. **How do I apply this to my industry?** → [Starter Kits](docs/starter-kits.md): runnable, industry-specific SQL scripts (SOC, FinTech, MedTech, Fleet, Smart-Cities, …).
+4. **How does a specific agent work and what are its inputs?** → [Agent Recipes](docs/api-agency.md): the built-in agents, each as a recipe.
+5. **How do I build a proprietary agent that isn't in the box?** → [Composition Guide](docs/composition-guide.md): the design patterns behind the recipes.
 
-```sql
-fractal_search(query_vector, k) -> TEXT (JSON)
-```
-
-| Arg | Type | Notes |
-| --- | --- | --- |
-| `query_vector` | TEXT or BLOB | CSV `'1.0,0.5,-0.25'`, bracketed `'[1.0,0.5,-0.25]'`, or a BLOB of packed little-endian float32s |
-| `k` | INTEGER | Number of near-optimal candidate points (clamped to 2..10000) |
-
-Returns a JSON document:
-
-```json
-{
-  "dim": 3,
-  "best_point": [0.603, 0.601, 0.002],
-  "best_fit": 0.00009,
-  "top_k": [
-    {"point": [0.603, 0.601, 0.002], "dist": 0.00009},
-    {"point": [0.612, 0.588, 0.003], "dist": 0.00021},
-    ...
-  ]
-}
-```
-
-Slice it with SQLite's JSON functions — no client-side parsing:
-
-```sql
-SELECT
-  json_extract(r, '$.best_point')  AS best_point,
-  json_extract(r, '$.best_fit')    AS best_fit
-FROM (SELECT fractal_search('0.1,0.2,-0.3', 10) AS r);
-
--- Fan out the top_k as rows for joining against real stored vectors:
-WITH result AS (SELECT fractal_search('0.1,0.2,-0.3', 10) AS r)
-SELECT value ->> 'dist' AS d
-FROM result, json_each(result.r, '$.top_k');
-```
+> New here? Step 2 is a one-command demo. Step 3 drops you into a vertical that
+> looks like your problem. Step 4 is the reference you'll keep coming back to.
 
 ---
 
-## Installation
+## 🎯 Who are you?
 
-### `.zip` (recommended for edge / serverless / mobile / bundling)
+Depending on your role, you'll want to start in different places:
 
-Grab `sqlite-fractalsql-linux-<arch>.zip` from
-[GitHub Releases](https://github.com/FractalSQLabs/sqlite-fractalsql/releases).
-Inside: `fractalsql.so`, `load_extension.sql`, `LICENSE`, `README.txt`.
+- **AI Engineer**: You want to improve RAG quality and reasoning.
+  → Start with **[docs/features.md](docs/features.md)** and **[docs/reasoning-setup.md](docs/reasoning-setup.md)**.
+- **DBA / Security Architect**: You care about stability, safety, and access control.
+  → See the **[Safety & Governance guide](docs/text-to-sql-setup.md#secure-it-authorization-vs-correctness)**.
+- **Product Developer**: You want to build agentic features quickly.
+  → Run the **[Docker Demo](docs/docker-demo.md)**, then pick a **[Starter Kit](docs/starter-kits.md)**.
+
+---
+
+## 🧩 What's in the box
+
+Four tiers of SQL-callable primitives, composable into agents with plain SQL
+and application code — no server-side language required.
+
+- **Discovery**: diverse, mode-collapse-free retrieval: `fractal_search` (Sniper), `fractal_search_explore` (Scout).
+- **Cognition**: in-process LLM integration: `fractal_reason` (Bedrock, Azure OpenAI, Vertex, Ollama), `fractal_embed`, `fractal_text_to_sql`.
+- **Agency**: self-correcting routines: the search/sql agents, plan/trajectory/loop-detection helpers — see the [Agent Recipes](docs/api-agency.md).
+- **Analytics**: fractal/dimension primitives: `fractal_dimension_dfa`, `fractal_dimension_boxcount`, `fractal_optimize_portfolio`, and more.
+
+Plus SQLite-native plumbing: `fractal_vector` as a canonical BLOB type,
+`fractalsql_set()`/`fractalsql_get()` per-connection configuration, the background
+`fractal_vectorizer` embedding pipeline, and the tamper-evident
+`fractal_ledger_*` audit surface. The full function-surface reference with
+runnable examples lives in [sql/fractalsql--1.0.sql](sql/fractalsql--1.0.sql).
+
+Reasoning is opt-in and provider-pluggable: the `fractalsql-reasoning-http`
+plugin speaks the OpenAI chat-completions wire format, so any OpenAI-compatible
+endpoint works. Without a plugin configured, Discovery and Analytics are fully
+functional and Cognition/Agency return clean precondition errors.
+
+---
+
+## 🚀 Get it running
+
+The fastest path is one command: Docker if you just want to try it, or the
+setup wizard if you have a real sqlite3 CLI install already. See
+**[Getting Started](docs/getting-started.md)** for the full walkthrough.
 
 ```bash
-unzip sqlite-fractalsql-linux-arm64.zip
-sqlite3 mydb.sqlite \
-    -cmd ".load ./fractalsql" \
-    -cmd "SELECT fractal_search('0.1,0.2,-0.3', 5);"
+docker compose up -d   # or: docker build -t fractalsql-sqlite .
+                       # then .load the extension and run your first Scout search
 ```
-
-Drop `fractalsql.so` into your Vercel `/api`, Lambda layer,
-mobile app bundle, or Turso deployment artifact.
-
-### Debian / Ubuntu — `.deb`
 
 ```bash
-sudo apt install ./sqlite3-fractalsql-arm64.deb
+# Or, on a real install (Linux/macOS):
+curl -fsSL https://github.com/FractalSQLabs/fractalsql-sqlite/releases/latest/download/easy_install.sh | bash
+# Windows: scripts/windows/easy_install.ps1
 ```
 
-The post-install step prints the load path. Installs to
-`/usr/lib/sqlite3/fractalsql.so`; use:
+Native installers: `.deb` / `.rpm` for Linux amd64/arm64 (glibc and musl
+channels), a Windows `.msi` (x64), and a self-contained tarball
+for macOS (arm64/x86_64). `easy_install.sh` (Linux/macOS) and
+`easy_install.ps1` (Windows) wrap all of these behind one interactive
+wizard; no telemetry, everything stays local.
 
-```sql
-SELECT load_extension('/usr/lib/sqlite3/fractalsql');
-```
-
-### RHEL / Fedora / Oracle Linux — `.rpm`
-
-```bash
-sudo rpm -i sqlite-fractalsql-aarch64.rpm
-```
-
-Package name is `sqlite-fractalsql` (matches `sqlite` upstream naming),
-vs. `sqlite3-fractalsql` on Debian (matches `sqlite3` binary). Same
-install path: `/usr/lib/sqlite3/fractalsql.so`. The RPM claims
-`%dir` ownership of `/usr/lib/sqlite3/` since no base package owns it.
-
-### Building from source
-
-```bash
-./build.sh amd64   # -> dist/amd64/fractalsql.so (static LuaJIT)
-./build.sh arm64   # -> dist/arm64/fractalsql.so (via QEMU)
-```
-
-The Dockerfile uses `debian:bookworm-slim` with `build-essential`,
-`libluajit-5.1-dev`, `libsqlite3-dev`, and cross-arch builds via
-buildx + QEMU. The build verifies statically that `ldd fractalsql.so`
-does NOT list libluajit — if it does, the build fails.
-
-For quick local iteration:
-
-```bash
-sudo apt install -y build-essential libluajit-5.1-dev libsqlite3-dev pkg-config
-make        # dynamic LuaJIT link — faster iteration, not shipped
-```
+Because configuration is per-connection (`fractalsql_set` — SQLite has no
+GUCs to persist), the wizard writes a `load_fractalsql.sql` bootstrap
+snippet you pass to every session: `sqlite3 -init load_fractalsql.sql mydb.sqlite`.
 
 ---
 
-## Architectural Performance
+## 🏛️ Enterprise Tier
 
-The core optimizer is distributed as **pre-compiled LuaJIT bytecode**
-embedded in the shared library. No Lua source ships with the
-extension.
-
-### No script parsing at runtime
-
-A conventional LuaJIT embedding loads source, invokes the parser,
-and generates bytecode before the first opcode executes.
-sqlite-fractalsql skips all of this: the bytecode is compiled once at
-release time and embedded in `fractalsql.so` as a C byte array.
-Loading the optimizer is a `luaL_loadbuffer` over an in-memory buffer
-— no tokenizer, no parser, no AST walk. Combined with the per-
-connection Lua state held in `sqlite3_user_data`, the parse cost is
-paid once per DB connection, not per query.
-
-### Static LuaJIT link
-
-`libluajit-5.1.a` is pulled into the `.so` via
-`-Wl,-Bstatic -lluajit-5.1 -Wl,-Bdynamic`. The build verifies
-statically that no dynamic luajit reference leaks into the artifact.
-This is what makes the extension deployable to Lambda layers, Vercel
-Edge Functions, and mobile app bundles with zero LuaJIT provisioning.
-
-### FFI hot loops
-
-Every per-generation SFS computation runs in pre-allocated `double[]`
-FFI cdata buffers. Inner loops — fitness evaluation, diffusion walks,
-bound checking — JIT-compile to tight machine code comparable to
-hand-written C.
+Everything above is Community edition and fully functional on its own.
+Discovery, Cognition, and Agency don't depend on anything in this section. For regulated
+environments that need to **prove, not just
+tamper-evident, HMAC-sealed decision record: see
+**[Enterprise Tier](docs/enterprise.md)** for the full mechanism, including
+what the ledger can and can't prove.
 
 ---
 
-## Architecture notes
+## 📊 Compatibility & License
 
-**One Lua state per DB connection.** Stashed in `sqlite3_user_data`
-and torn down by the `xDestroy` callback when the function is
-unregistered (typically at connection close). SQLite's
-`SQLITE_THREADSAFE=1` default serializes calls on a connection, so
-the state is accessed without extra locking; separate connections
-get separate states.
+| SQLite | Linux | Windows | macOS |
+| --- | :---: | :---: | :---: |
+| 3.25+ | ✓ | ✓ | ✓ |
 
-**Function flags.**
-`SQLITE_UTF8 | SQLITE_DETERMINISTIC | SQLITE_INNOCUOUS`.
-`DETERMINISTIC` lets SQLite hoist the call out of inner loops when
-the same arguments repeat. `INNOCUOUS` marks it safe for views,
-triggers, and sandboxed execution (Turso, D1 where permitted).
+Any SQLite host that permits `sqlite3_load_extension` — the `sqlite3` CLI,
+Python's `sqlite3` module (`conn.enable_load_extension`), better-sqlite3,
+libSQL/Turso-compatible hosts, mobile SQLite bridges. Verified on AWS
+Graviton, Apple Silicon, Ampere Altra, and Raspberry Pi.
 
-**BLOB input shape.** Pass a native vector as a BLOB of packed
-little-endian float32 values. The extension decodes them directly,
-bypassing string parsing. Useful when you already have embeddings
-stored as BLOBs.
+**License**: Apache-2.0. See `LICENSE`. Third-party components are under
+their own permissive licenses (BSD-2-Clause, MIT, and others) --
+see `THIRD-PARTY-NOTICES.md`.
 
-**Determinism.** LuaJIT's `math.random` is xoshiro256\*\*. Each
-connection builds a fresh Lua state, so pinning a seed
-(`math.randomseed` in a custom build) yields reproducible results.
+For enterprise editions, licensing, and support, contact
+**enterprise@fractalsqlabs.com**.
 
 ---
 
-## Status of advanced features
+## 📚 Documentation
 
-Shipping v1.0: scalar function, the "Easy Win". A virtual-table
-interface for `SELECT * FROM vectors WHERE vector MATCH '...'`
-syntax is on the roadmap — it would share the same LuaJIT core and
-decode path, but requires a separate xCreate/xConnect/xBestIndex
-implementation.
+*Follow the path above; the links below are the same steps, expanded.*
 
----
-
-## License
-
-MIT. See `LICENSE`.
-
-## Credits & Licensing
-
-FractalSQL is licensed under the MIT License.
-
-This project incorporates third-party components, including:
-
-- **SFS (Simultaneous Fractal Search)** algorithms based on work by
-  Hamid Salimi (2014), used under the BSD-3-Clause License.
-- **LuaJIT**, used under the MIT License.
-
-Full attribution and license texts can be found in
-[`LICENSE-THIRD-PARTY`](LICENSE-THIRD-PARTY).
-
----
-
-[github.com/FractalSQLabs](https://github.com/FractalSQLabs) · Issues and
-PRs welcome.
+- **[Getting Started](docs/getting-started.md)**: 60-second Docker / native install.
+- **[Starter Kits](docs/starter-kits.md)**: industry-specific runnable SQL scripts.
+- **[Agent Recipes](docs/api-agency.md)**: the sixteen installable agents, each as a recipe.
+- **[Composition Guide](docs/composition-guide.md)**: build your own agent.
+- **[Features](docs/features.md)**: the full Capability Map and API reference.
+- **[Reasoning Setup](docs/reasoning-setup.md)**: LLM provider configuration (Ollama, OpenAI, Bedrock, Azure, Vertex).
+- **[Text-to-SQL Setup](docs/text-to-sql-setup.md)**: pipeline details and the security model.
+- **[Vectorizer Setup](docs/vectorizer-setup.md)**: automatic embedding pipelines.
+- **[Docker Demo](docs/docker-demo.md)**: a one-command end-to-end demo.
+- **[Agent Blueprint Gallery](demo/README.md)**: the vertical demos and reference agents.
+- **[Enterprise Tier](docs/enterprise.md)**: the tamper-evident decision ledger (CISO/audit).

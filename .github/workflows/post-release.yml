@@ -1,0 +1,124 @@
+name: Post-release SBOM + Attestation + Sign
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to process (e.g. v2.0.0)'
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  sbom-attest-sign:
+    name: SBOM + Attest + Sign
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve release tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              echo "tag=${{ github.event.inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+          else
+              echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Generate SPDX SBOM with Syft
+        uses: anchore/sbom-action@d8a2c0130026bf585de5c176ab8f7ce62d75bf04  # v0.20.7
+        with:
+          path: .
+          format: spdx-json
+          artifact-name: fractalsql-sqlite-${{ steps.tag.outputs.tag }}.spdx.json
+          output-file: sbom.spdx.json
+          upload-release-assets: true
+          upload-artifact: true
+        # The `path: .` scan covers the vendored binaries in include/ —
+        # the per-platform core archives AND the fractalsql-reasoning-http
+        # plugin — so both land in the SBOM as their own components.
+
+      - name: Download release artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p dist
+          gh release download "${{ steps.tag.outputs.tag }}" \
+              --repo "${{ github.repository }}" \
+              --dir dist \
+              --pattern '*.deb' \
+              --pattern '*.rpm' \
+              --pattern '*.msi' \
+              --pattern '*.zip' \
+              --pattern '*.tar.gz' \
+              || echo "note: no matching assets on release yet — continuing"
+          ls -la dist || true
+
+      - name: Check there is anything to sign
+        id: have_assets
+        run: |
+          count=$(find dist -maxdepth 1 -type f \
+                \( -name '*.deb' -o -name '*.rpm' -o -name '*.msi' -o -name '*.zip' -o -name '*.tar.gz' \) \
+                2>/dev/null | wc -l)
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
+          echo "Found ${count} release artifact(s) to attest + sign."
+
+      - name: Attest build provenance
+        if: steps.have_assets.outputs.count != '0'
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be  # v2
+        with:
+          subject-path: |
+            dist/*.deb
+            dist/*.rpm
+            dist/*.msi
+            dist/*.zip
+            dist/*.tar.gz
+
+      - name: Install cosign
+        if: steps.have_assets.outputs.count != '0'
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da  # v3.7.0
+
+      - name: Sign release artifacts with cosign
+        if: steps.have_assets.outputs.count != '0'
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          for f in dist/*.deb dist/*.rpm dist/*.msi dist/*.zip dist/*.tar.gz; do
+              [ -f "$f" ] || continue
+              echo "--- signing $f ---"
+              cosign sign-blob \
+                  --yes \
+                  --output-signature "${f}.sig" \
+                  --output-certificate "${f}.pem" \
+                  "$f"
+          done
+
+      - name: Upload signatures + certs to release
+        if: steps.have_assets.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mapfile -t sigs < <(ls dist/*.sig dist/*.pem 2>/dev/null || true)
+          if [ ${#sigs[@]} -eq 0 ]; then
+              echo "note: no signatures produced — nothing to upload"
+              exit 0
+          fi
+          gh release upload \
+              "${{ steps.tag.outputs.tag }}" \
+              "${sigs[@]}" \
+              --repo "${{ github.repository }}" \
+              --clobber

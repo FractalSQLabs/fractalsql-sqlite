@@ -16,11 +16,12 @@
     5. Uninstall removes every file AND the Path entry.
 
   Build
-    candle scripts/windows/fractalsql.wxs -out obj\\fractalsql.wixobj
+    candle scripts/windows/fractalsql.wxs -dMSI_VERSION=X.Y.Z ^
+           -out obj\\fractalsql.wixobj
     light  obj\\fractalsql.wixobj ^
            -ext WixUIExtension ^
            -ext WixUtilExtension ^
-           -out dist\\windows\\FractalSQL-1.0.0.msi
+           -out dist\\windows\\FractalSQL-$(var.MSI_VERSION)-x64.msi
 
   ProductId is auto-generated per release (`*`) to force clean
   major upgrades; UpgradeCode is the PERMANENT identity of the
@@ -29,10 +30,21 @@
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
      xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
 
+  <!-- MSI_VERSION: the ProductVersion stamped into the MSI and the
+       filename build-msi.bat emits. build-msi.bat passes it with
+       candle's -d flag (release.yml stamps it from the release tag);
+       the default here keeps a plain local `candle scripts/windows/
+       fractalsql.wxs` working with no flag at all, sourced from the
+       same version string everything else in the repo reads
+       (FSQL_SQLITE_VERSION_STR, which fractalsql_version() returns). -->
+  <?ifndef MSI_VERSION ?>
+  <?define MSI_VERSION = "2.0.0" ?>
+  <?endif ?>
+
   <Product Id="*"
            Name="FractalSQL for SQLite"
            Language="1033"
-           Version="1.0.0"
+           Version="$(var.MSI_VERSION)"
            Manufacturer="FractalSQLabs"
            UpgradeCode="C7F2A9C4-4E31-4C5A-9A2F-4F1A6A5B3E17">
 
@@ -90,6 +102,20 @@
               KeyPath="yes" />
       </Component>
 
+      <Component Id="c_SurfaceRefSql" Guid="2C8B1D3A-9E41-4F70-A5D2-8E16C3A7B4F5">
+        <File Id="fractalsql_2_0.sql"
+              Source="sql/fractalsql--1.0.sql"
+              KeyPath="yes" />
+      </Component>
+
+      <!-- Reasoning plugin (sovereign tier). Vendored prebuilt artifact
+           from the core drop — always present in the repo. -->
+      <Component Id="c_ReasoningHttpDll" Guid="7A5E9F21-3D64-4B8C-9E02-5B7C1D4F8A63">
+        <File Id="fractalsql_reasoning_http_dll"
+              Source="include/windows-x86_64/fractalsql-reasoning-http.dll"
+              KeyPath="yes" />
+      </Component>
+
       <Component Id="c_License" Guid="0D4F9B8C-3A02-4B5F-B7AE-62A8D7F55810">
         <File Id="LICENSE.txt"
               Source="LICENSE"
@@ -97,16 +123,16 @@
       </Component>
 
       <!-- Third-party attribution ledger. Harvested by every MSI
-           (x64 / x86 / arm64) because the community bytecode that
-           all three ship is built on the same upstream set (Salimi
-           2014 SFS + LuaJIT). When/if an Enterprise sqlite MSI is
-           introduced, swap the Source here for the Enterprise
-           ledger (Kati 2023 / dFDB V6 / QRFS) — or better, split
-           into a separate ComponentGroup with a compile-time
+           (x64 / arm64): the community build ships the same upstream
+           set (Salimi 2014 SFS lineage + the vendored core drop's
+           notices). When/if an Enterprise sqlite MSI is introduced,
+           swap the Source here for the Enterprise ledger — or better,
+           split into a separate ComponentGroup with a compile-time
            <?if EDITION = "enterprise" ?> switch. -->
       <Component Id="c_LicenseThirdParty" Guid="9B4E6A7F-1C2D-4E8F-9A1B-3C5D7E9F0A2B">
         <File Id="LICENSE_THIRD_PARTY.txt"
-              Source="LICENSE-THIRD-PARTY"
+              Name="LICENSE-THIRD-PARTY"
+              Source="THIRD-PARTY-NOTICES.md"
               KeyPath="yes" />
       </Component>
 
@@ -145,13 +171,21 @@
       <ComponentGroupRef Id="CoreFiles" />
     </Feature>
 
+    <!-- Without this, WixUI_InstallDir's EULA dialog silently falls back
+         to WiX's own bundled placeholder License.rtf, which is
+         lorem-ipsum-style sample text, instead of this project's real
+         license. This points it at the actual Apache 2.0 LICENSE,
+         converted to RTF. License.rtf is generated from that file, not
+         hand-authored, to keep it faithful to the source. -->
+    <WixVariable Id="WixUILicenseRtf" Value="scripts\windows\License.rtf" />
+
     <!-- UI: standard WixUI_InstallDir (Welcome → EULA → FolderDlg →
          Ready → Progress). The install folder picker is the
          interactive piece the brief calls for.
          ADDTOPATH defaults to 1 (path entry added). Power-users who
          specifically don't want the PATH modification pass it on
          the command line:
-             msiexec /i FractalSQL-1.0.0.msi ADDTOPATH=0
+             msiexec /i FractalSQL-2.0.0.msi ADDTOPATH=0
          Adding a visible checkbox to the stock InstallDirDlg requires
          cloning that dialog under a new ID and rewiring the nav
          chain with <Publish> — a larger refactor we can layer in

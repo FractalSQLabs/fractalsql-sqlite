@@ -1,0 +1,30 @@
+# Vendored/build binaries under include/ (and anywhere else they land):
+# never text-convert these on checkout. Without this, a Windows clone
+# with core.autocrlf=true relies entirely on git's own content-sniffing
+# to treat them as binary -- usually correct, but not guaranteed for
+# every file shape, and a corrupted DLL/so fails silently (LoadLibrary/
+# dlopen just refuses to load it, with no hint that the bytes changed).
+*.dll -text
+*.so -text
+*.dylib -text
+*.a -text
+*.lib -text
+*.exp -text
+*.sig -text
+*.pdb -text
+*.ilk -text
+
+# POSIX shell scripts: keep LF everywhere, not just on the platforms
+# that default to it. demo/run_demo.sh and docker/demo-entrypoint.sh
+# are COPYd verbatim into the demo image by docker/Dockerfile -- a
+# CRLF-converted checkout would break them inside the container
+# (/bin/sh rejects \r-terminated lines), the same way it would break
+# the run_build_test.sh bind-mount path.
+*.sh text eol=lf
+
+# Windows batch files: the mirror image. cmd.exe misparses LF-only batch
+# files by tokenizing lines at arbitrary byte offsets (mid-word command
+# fragments, ALINK errors from half-read lines), so force CRLF on every
+# checkout -- an editor or tool that normalizes these to LF breaks
+# scripts\windows\build.bat and build-msi.bat silently.
+*.bat text eol=crlf

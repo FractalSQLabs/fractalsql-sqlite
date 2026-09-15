@@ -1,0 +1,579 @@
+name: Install test (packaging)
+
+# End-to-end validation of the shipped .deb and .rpm packages.
+# SQLite has no server plugin_dir — users load the extension by
+# explicit absolute path via `.load`. The test installs the package,
+# verifies the .so landed at /usr/local/lib/sqlite3/fractalsql.so
+# on both distros, then exercises the fractalsql_edition /
+# fractalsql_version UDFs in an in-memory database.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+  schedule:
+    - cron: '31 4 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build-artifacts:
+    name: Build .so + .deb + .rpm + .zip (amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      - name: Build fractalsql.so
+        run: |
+          chmod +x build.sh
+          ./build.sh amd64
+      - name: Install fpm
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ruby ruby-dev build-essential rpm zip
+          sudo gem install --no-document fpm
+      - name: Package .deb + .rpm + .zip (modern)
+        run: |
+          chmod +x scripts/package.sh
+          scripts/package.sh amd64
+
+      # Legacy profile (glibc 2.28) — for RHEL 8 / Ubuntu 20.04-class
+      # hosts. Built unconditionally so the rocky8 smoke job below has
+      # something to test.
+      - name: Build fractalsql.so (legacy profile)
+        run: PROFILE=legacy ./build.sh amd64
+      - name: Package .deb + .rpm + .zip (legacy)
+        run: PROFILE=legacy scripts/package.sh amd64
+
+      # Musl profile (Alpine 3.20 / musl 1.2). Used by the apk-install
+      # job below to verify the extension loads cleanly on Alpine.
+      - name: Build fractalsql.so (musl profile)
+        run: PROFILE=musl ./build.sh amd64
+      - name: Package .apk (musl)
+        run: PROFILE=musl scripts/package.sh amd64
+
+      - run: ls -l dist/packages
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: packages-amd64
+          path: dist/packages/*
+          retention-days: 1
+          if-no-files-found: error
+
+  debian-install:
+    name: Debian — install + .load + UDF exec
+    needs: build-artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: packages-amd64
+          path: dist/packages
+      - name: Install + verify in ubuntu:24.04
+        run: |
+          cat > test-deb.sh <<'SCRIPT'
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -qq -y sqlite3
+
+          apt-get install -qq -y ./dist/packages/sqlite3-fractalsql-amd64.deb
+
+          # SQLite has no server plugin_dir; the install path is
+          # /usr/local/lib/sqlite3/ by convention on both distros.
+          test -f /usr/local/lib/sqlite3/fractalsql.so
+
+          # python3 already on ubuntu:24.04. Run the full smoke suite —
+          # edition + version + fractal_search ordering — via the
+          # repo's existing test/test_sqlite.py.
+          apt-get install -qy python3
+          EXT_PATH=/usr/local/lib/sqlite3/fractalsql.so \
+              python3 /work/test/test_sqlite.py
+
+          echo "ok: Debian install + .load + smoke test"
+          SCRIPT
+          chmod +x test-deb.sh
+          docker run --rm -v "${{ github.workspace }}:/work" -w /work \
+              ubuntu:24.04 bash /work/test-deb.sh
+
+  rpm-install:
+    name: RHEL (Rocky 9) — install + .load + UDF exec
+    needs: build-artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: packages-amd64
+          path: dist/packages
+      - name: Install + verify in rockylinux:9
+        run: |
+          cat > test-rpm.sh <<'SCRIPT'
+          set -euo pipefail
+          dnf install -qy sqlite
+
+          dnf install -qy ./dist/packages/fractalsql-sqlite-amd64.rpm
+
+          test -f /usr/local/lib/sqlite3/fractalsql.so
+
+          dnf install -qy python3
+          EXT_PATH=/usr/local/lib/sqlite3/fractalsql.so \
+              python3 /work/test/test_sqlite.py
+
+          echo "ok: RPM install + .load + smoke test"
+
+          # --- Reasoning smoke test against a mock LLM endpoint --------
+          PLUGIN=/usr/local/lib/sqlite3/fractalsql-reasoning-http.so
+          test -f "${PLUGIN}" \
+              || { echo "FAIL: reasoning plugin missing at ${PLUGIN}"; exit 1; }
+
+          # .rpm has no Requires: libcurl -- install explicitly for the
+          # linkage check, same as a real user would need to.
+          dnf install -qy libcurl
+          ldd "${PLUGIN}" | grep -qi libcurl \
+              || { echo "FAIL: reasoning plugin not linked to libcurl"; ldd "${PLUGIN}"; exit 1; }
+
+          python3 /work/tests/_mock_llm_server.py pong-from-mock > /tmp/mock.port &
+          MOCK_PID=$!
+          for i in $(seq 1 50); do
+              [ -s /tmp/mock.port ] && break
+              sleep 0.2
+          done
+          MOCK_PORT=$(cat /tmp/mock.port)
+          test -n "${MOCK_PORT}"
+
+          REPLY=$(sqlite3 :memory: \
+              ".load /usr/local/lib/sqlite3/fractalsql" \
+              "SELECT fractalsql_set('reasoning_plugin', '${PLUGIN}');" \
+              "SELECT fractalsql_set('http_url', 'http://127.0.0.1:${MOCK_PORT}/v1/chat/completions');" \
+              "SELECT fractalsql_set('http_allow_plaintext', 'on');" \
+              "SELECT fractalsql_set('http_model', 'mock-model');" \
+              "SELECT fractal_reason('ping');" 2>/dev/null | tail -1)
+          kill "${MOCK_PID}" 2>/dev/null || true
+          test "${REPLY}" = "pong-from-mock" \
+              || { echo "FAIL: reasoning round-trip returned '${REPLY}'"; exit 1; }
+          echo "ok: reasoning round-trip via mock endpoint (rockylinux:9)"
+          SCRIPT
+          chmod +x test-rpm.sh
+          docker run --rm -v "${{ github.workspace }}:/work" -w /work \
+              rockylinux:9 bash /work/test-rpm.sh
+
+  rpm-install-rocky8:
+    name: RHEL (Rocky 8) — install legacy .rpm + .load + UDF exec
+    needs: build-artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: packages-amd64
+          path: dist/packages
+      - name: Install + verify in rockylinux:8
+        run: |
+          cat > test-rpm-legacy.sh <<'SCRIPT'
+          set -euo pipefail
+          dnf install -qy sqlite
+
+          # Install our LEGACY .rpm — built against glibc 2.28 so it
+          # actually loads on RHEL 8. The modern .rpm would fail at
+          # ld.so time on this host.
+          dnf install -qy ./dist/packages/fractalsql-sqlite-legacy-amd64.rpm
+
+          test -f /usr/local/lib/sqlite3/fractalsql.so
+
+          dnf install -qy python3
+          EXT_PATH=/usr/local/lib/sqlite3/fractalsql.so \
+              python3 /work/test/test_sqlite.py
+
+          echo "ok: Rocky 8 + legacy .rpm + .load + smoke test"
+
+          # --- Reasoning smoke test against a mock LLM endpoint --------
+          PLUGIN=/usr/local/lib/sqlite3/fractalsql-reasoning-http.so
+          test -f "${PLUGIN}" \
+              || { echo "FAIL: reasoning plugin missing at ${PLUGIN}"; exit 1; }
+
+          dnf install -qy libcurl
+          ldd "${PLUGIN}" | grep -qi libcurl \
+              || { echo "FAIL: reasoning plugin not linked to libcurl"; ldd "${PLUGIN}"; exit 1; }
+
+          python3 /work/tests/_mock_llm_server.py pong-from-mock > /tmp/mock.port &
+          MOCK_PID=$!
+          for i in $(seq 1 50); do
+              [ -s /tmp/mock.port ] && break
+              sleep 0.2
+          done
+          MOCK_PORT=$(cat /tmp/mock.port)
+          test -n "${MOCK_PORT}"
+
+          REPLY=$(sqlite3 :memory: \
+              ".load /usr/local/lib/sqlite3/fractalsql" \
+              "SELECT fractalsql_set('reasoning_plugin', '${PLUGIN}');" \
+              "SELECT fractalsql_set('http_url', 'http://127.0.0.1:${MOCK_PORT}/v1/chat/completions');" \
+              "SELECT fractalsql_set('http_allow_plaintext', 'on');" \
+              "SELECT fractalsql_set('http_model', 'mock-model');" \
+              "SELECT fractal_reason('ping');" 2>/dev/null | tail -1)
+          kill "${MOCK_PID}" 2>/dev/null || true
+          test "${REPLY}" = "pong-from-mock" \
+              || { echo "FAIL: reasoning round-trip returned '${REPLY}'"; exit 1; }
+          echo "ok: reasoning round-trip via mock endpoint (rockylinux:8, legacy)"
+          SCRIPT
+          chmod +x test-rpm-legacy.sh
+          docker run --rm -v "${{ github.workspace }}:/work" -w /work \
+              rockylinux:8 bash /work/test-rpm-legacy.sh
+
+  apk-install:
+    name: Alpine 3.20 — install musl .apk + .load + UDF exec
+    needs: build-artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: packages-amd64
+          path: dist/packages
+      - name: Install + verify in alpine:3.20
+        run: |
+          cat > test-apk.sh <<'SCRIPT'
+          set -euo pipefail
+          apk add --no-cache sqlite python3
+          apk add --no-cache --allow-untrusted ./dist/packages/fractalsql-sqlite-musl-amd64.apk
+
+          test -f /usr/local/lib/sqlite3/fractalsql.so
+
+          EXT_PATH=/usr/local/lib/sqlite3/fractalsql.so \
+              python3 /work/test/test_sqlite.py
+          echo "ok: Alpine 3.20 + musl .apk + .load + smoke test"
+
+          # --- Reasoning smoke test against a mock LLM endpoint --------
+          PLUGIN=/usr/local/lib/sqlite3/fractalsql-reasoning-http.so
+          test -f "${PLUGIN}" \
+              || { echo "FAIL: reasoning plugin missing at ${PLUGIN}"; exit 1; }
+
+          apk add --no-cache libcurl
+          ldd "${PLUGIN}" | grep -qi libcurl \
+              || { echo "FAIL: reasoning plugin not linked to libcurl"; ldd "${PLUGIN}"; exit 1; }
+
+          python3 /work/tests/_mock_llm_server.py pong-from-mock > /tmp/mock.port &
+          MOCK_PID=$!
+          for i in $(seq 1 50); do
+              [ -s /tmp/mock.port ] && break
+              sleep 0.2
+          done
+          MOCK_PORT=$(cat /tmp/mock.port)
+          test -n "${MOCK_PORT}"
+
+          REPLY=$(sqlite3 :memory: \
+              ".load /usr/local/lib/sqlite3/fractalsql" \
+              "SELECT fractalsql_set('reasoning_plugin', '${PLUGIN}');" \
+              "SELECT fractalsql_set('http_url', 'http://127.0.0.1:${MOCK_PORT}/v1/chat/completions');" \
+              "SELECT fractalsql_set('http_allow_plaintext', 'on');" \
+              "SELECT fractalsql_set('http_model', 'mock-model');" \
+              "SELECT fractal_reason('ping');" 2>/dev/null | tail -1)
+          kill "${MOCK_PID}" 2>/dev/null || true
+          test "${REPLY}" = "pong-from-mock" \
+              || { echo "FAIL: reasoning round-trip returned '${REPLY}'"; exit 1; }
+          echo "ok: reasoning round-trip via mock endpoint (alpine:3.20)"
+          SCRIPT
+          chmod +x test-apk.sh
+          docker run --rm -v "${{ github.workspace }}:/work" -w /work \
+              alpine:3.20 sh /work/test-apk.sh
+
+  macos-install:
+    name: "macOS — build + install + .load + reason (arm64)"
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Build + install the dylib (bare install, not the wizard)
+        run: |
+          set -euo pipefail
+          brew install sqlite
+          chmod +x scripts/package-darwin.sh
+          ./scripts/package-darwin.sh
+          sudo mkdir -p /usr/local/lib/sqlite3
+          sudo install -m0755 fractalsql.dylib /usr/local/lib/sqlite3/fractalsql.so
+          sudo install -m0755 include/darwin-arm64/fractalsql-reasoning-http.so \
+              /usr/local/lib/sqlite3/
+          ls -l /usr/local/lib/sqlite3
+
+      - name: .load + edition/version + search + reason (mock endpoint)
+        env:
+          SQLITE3_BIN: /opt/homebrew/opt/sqlite/bin/sqlite3
+        run: |
+          set -euo pipefail
+          EDITION=$("${SQLITE3_BIN}" :memory: ".load /usr/local/lib/sqlite3/fractalsql" "SELECT fractalsql_edition();")
+          VERSION=$("${SQLITE3_BIN}" :memory: ".load /usr/local/lib/sqlite3/fractalsql" "SELECT fractalsql_version();")
+          echo "edition=${EDITION} version=${VERSION}"
+          test "${EDITION}" = "Community"
+          test "${VERSION}" = "2.0.0"
+
+          # Search works with no further config.
+          "${SQLITE3_BIN}" :memory: \
+              ".load /usr/local/lib/sqlite3/fractalsql" \
+              "SELECT fractal_search('0.6,0.8,0.0','0.6,0.8,0.0');"
+
+          # --- Reasoning smoke test against a mock LLM endpoint --------
+          PLUGIN=/usr/local/lib/sqlite3/fractalsql-reasoning-http.so
+          python3 tests/_mock_llm_server.py pong-from-mock > /tmp/mock.port &
+          MOCK_PID=$!
+          for i in $(seq 1 50); do
+              [ -s /tmp/mock.port ] && break
+              sleep 0.2
+          done
+          MOCK_PORT=$(cat /tmp/mock.port)
+          test -n "${MOCK_PORT}"
+
+          REPLY=$("${SQLITE3_BIN}" :memory: \
+              ".load /usr/local/lib/sqlite3/fractalsql" \
+              "SELECT fractalsql_set('reasoning_plugin', '${PLUGIN}');" \
+              "SELECT fractalsql_set('http_url', 'http://127.0.0.1:${MOCK_PORT}/v1/chat/completions');" \
+              "SELECT fractalsql_set('http_allow_plaintext', 'on');" \
+              "SELECT fractalsql_set('http_model', 'mock-model');" \
+              "SELECT fractal_reason('ping');" 2>/dev/null | tail -1)
+          kill "${MOCK_PID}" 2>/dev/null || true
+          test "${REPLY}" = "pong-from-mock" \
+              || { echo "FAIL: reasoning round-trip returned '${REPLY}'"; exit 1; }
+          echo "ok: macOS build + install + search + reasoning round-trip"
+
+  # ----------------------------------------------------------------------
+  # easy-install trio — the wizard end-to-end against a mock LLM. The wizard's
+  # live smoke test (SELECT fractal_reason('say ok')) must round-trip
+  # through the reasoning plugin to the mock server and come back with
+  # the canned reply; that proves snippet + plugin + endpoint wiring,
+  # not just file placement.
+  # ----------------------------------------------------------------------
+  easy-install-linux:
+    name: "easy_install.sh: Debian wizard, non-interactive"
+    needs: build-artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: packages-amd64
+          path: dist/packages
+      - name: Install package, then run easy_install.sh against a mock LLM
+        run: |
+          cat > test-easy-install.sh <<'SCRIPT'
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -qq -y sqlite3 python3
+
+          # Package installed manually here (mirrors debian-install) so
+          # the wizard detects it and Phase B is never exercised —
+          # --no-install, same as anyone who ran apt install first.
+          apt-get install -qq -y ./dist/packages/sqlite3-fractalsql-amd64.deb
+          test -f /usr/local/lib/sqlite3/fractalsql.so
+          test -f /usr/local/lib/sqlite3/fractalsql-reasoning-http.so
+
+          chmod +x /work/scripts/easy_install.sh
+          # Mock LLM prints its bound port on stdout (single line).
+          python3 /work/tests/_mock_llm_server.py pong-from-mock > /tmp/mock.port &
+          MOCK_PID=$!
+          for i in $(seq 1 50); do
+              [ -s /tmp/mock.port ] && break
+              sleep 0.2
+          done
+          MOCK_PORT=$(cat /tmp/mock.port)
+          test -n "${MOCK_PORT}"
+
+          # ollama mode sets http_allow_plaintext=on; openai-compatible
+          # doesn't — plain-HTTP localhost is exactly the ollama case.
+          ./scripts/easy_install.sh --no-install --yes \
+              --provider ollama \
+              --url "http://127.0.0.1:${MOCK_PORT}/v1/chat/completions" \
+              --model mock-model \
+              --embed-url "http://127.0.0.1:${MOCK_PORT}/v1/embeddings" \
+              --embed-model mock-embed --think off | tee /tmp/easy-install.log
+
+          kill "${MOCK_PID}" 2>/dev/null || true
+
+          grep -q 'pong-from-mock' /tmp/easy-install.log \
+              || { echo "FAIL: reasoning round-trip via easy_install.sh didn't reach the mock reply"; exit 1; }
+
+          EDITION=$(sqlite3 :memory: ".read /usr/local/lib/sqlite3/load_fractalsql.sql" "SELECT fractalsql_edition();")
+          VERSION=$(sqlite3 :memory: ".read /usr/local/lib/sqlite3/load_fractalsql.sql" "SELECT fractalsql_version();")
+          echo "edition=${EDITION} version=${VERSION}"
+          test "${EDITION}" = "Community"
+          test "${VERSION}" = "2.0.0"
+          echo "ok: easy_install.sh end-to-end (Debian)"
+          SCRIPT
+          chmod +x test-easy-install.sh
+          docker run --rm -v "${{ github.workspace }}:/work" -w /work \
+              ubuntu:24.04 bash /work/test-easy-install.sh
+
+  easy-install-macos:
+    name: "easy_install.sh: macOS wizard, non-interactive (arm64)"
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Build + install the dylib (stands in for the release tarball)
+        run: |
+          set -euo pipefail
+          brew install sqlite
+          chmod +x scripts/package-darwin.sh
+          ./scripts/package-darwin.sh
+          sudo mkdir -p /usr/local/lib/sqlite3
+          sudo install -m0755 fractalsql.dylib /usr/local/lib/sqlite3/
+          sudo install -m0755 include/darwin-arm64/fractalsql-reasoning-http.so \
+              /usr/local/lib/sqlite3/
+          ls -l /usr/local/lib/sqlite3
+
+      - name: Run easy_install.sh against a mock LLM
+        env:
+          SQLITE3_BIN: /opt/homebrew/opt/sqlite/bin/sqlite3
+        run: |
+          set -euo pipefail
+          python3 tests/_mock_llm_server.py pong-from-mock > /tmp/mock.port &
+          MOCK_PID=$!
+          for i in $(seq 1 50); do
+              [ -s /tmp/mock.port ] && break
+              sleep 0.2
+          done
+          MOCK_PORT=$(cat /tmp/mock.port)
+          test -n "${MOCK_PORT}"
+
+          chmod +x scripts/easy_install.sh
+          ./scripts/easy_install.sh --no-install --yes \
+              --provider ollama \
+              --url "http://127.0.0.1:${MOCK_PORT}/v1/chat/completions" \
+              --model mock-model \
+              --embed-url "http://127.0.0.1:${MOCK_PORT}/v1/embeddings" \
+              --embed-model mock-embed --think off | tee /tmp/easy-install.log
+
+          kill "${MOCK_PID}" 2>/dev/null || true
+
+          grep -q 'pong-from-mock' /tmp/easy-install.log \
+              || { echo "FAIL: reasoning round-trip via easy_install.sh didn't reach the mock reply"; exit 1; }
+          echo "ok: easy_install.sh end-to-end (macOS, arm64)"
+
+  easy-install-windows:
+    name: "easy_install.ps1: Windows wizard, non-interactive"
+    runs-on: windows-latest
+    env:
+      # Same pin as release.yml — the amalgamation headers the DLL build
+      # compiles against.
+      SQLITE_YEAR: "2024"
+      SQLITE_VERSION: "3460000"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Set up MSVC dev cmd (x64)
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1
+        with:
+          arch: x64
+
+      - name: Download SQLite amalgamation for headers
+        shell: pwsh
+        run: |
+          $zipName = "sqlite-amalgamation-${env:SQLITE_VERSION}.zip"
+          $url     = "https://www.sqlite.org/${env:SQLITE_YEAR}/$zipName"
+          New-Item -ItemType Directory -Force -Path deps | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile "deps\sqlite.zip"
+          Expand-Archive -Path "deps\sqlite.zip" -DestinationPath deps -Force
+          Rename-Item -Path "deps\sqlite-amalgamation-${env:SQLITE_VERSION}" `
+                      -NewName "sqlite"
+
+      - name: Build fractalsql.dll
+        shell: cmd
+        run: |
+          set SQLITE_DIR=%CD%\deps\sqlite
+          set OUT_DIR=%CD%\dist\windows
+          call scripts\windows\build.bat
+          if errorlevel 1 exit /b 1
+
+      - name: Install WiX Toolset (provides candle.exe + light.exe)
+        shell: pwsh
+        run: |
+          choco install -y --no-progress wixtoolset
+          $wixBin = $null
+          $candidates = @(
+            "C:\Program Files (x86)\WiX Toolset v3.14\bin",
+            "C:\Program Files\WiX Toolset v3.14\bin",
+            "C:\Program Files (x86)\WiX Toolset v3.11\bin"
+          )
+          foreach ($c in $candidates) {
+            if (Test-Path (Join-Path $c "candle.exe")) { $wixBin = $c; break }
+          }
+          if (-not $wixBin) {
+            $hit = Get-ChildItem -Path "C:\Program Files (x86)", "C:\Program Files" `
+                     -Recurse -Filter "candle.exe" -ErrorAction SilentlyContinue `
+                   | Select-Object -First 1
+            if ($hit) { $wixBin = $hit.DirectoryName }
+          }
+          if (-not $wixBin) {
+            Write-Host "FATAL: candle.exe not found after choco install wixtoolset"
+            exit 1
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value $wixBin
+
+      - name: Build MSI
+        shell: cmd
+        run: |
+          call scripts\windows\build-msi.bat
+          if errorlevel 1 exit /b 1
+
+      - name: Install our MSI
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem "dist\windows\FractalSQL-SQLite-*-x64.msi" | Select-Object -First 1
+          if (-not $msi) { Write-Host "FATAL: built .msi not found"; exit 1 }
+          $p = Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /quiet /norestart" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Write-Host "FATAL: msiexec exited $($p.ExitCode)"; exit 1 }
+          Get-ChildItem 'C:\Program Files\FractalSQL'
+
+      - name: Install sqlite3 CLI
+        shell: pwsh
+        run: |
+          choco install sqlite --no-progress
+          $cmd = Get-Command sqlite3.exe -ErrorAction SilentlyContinue
+          if (-not $cmd) { Write-Host "FATAL: sqlite3.exe not on PATH after choco install"; exit 1 }
+          Write-Host "sqlite3: $($cmd.Source)"
+          Add-Content -Path $env:GITHUB_ENV -Value "SQLITE3_EXE=$($cmd.Source)"
+
+      - name: Run easy_install.ps1 against a mock LLM
+        shell: pwsh
+        run: |
+          # Mock LLM prints its bound port on stdout (single line).
+          $mock = Start-Process -FilePath python `
+              -ArgumentList @('tests\_mock_llm_server.py', 'pong-from-mock') `
+              -RedirectStandardOutput mock.port -RedirectStandardError mock.err `
+              -NoNewWindow -PassThru
+          for ($i = 0; $i -lt 50; $i++) {
+              if ((Test-Path mock.port) -and (Get-Item mock.port).Length -gt 0) { break }
+              Start-Sleep -Milliseconds 200
+          }
+          $port = (Get-Content mock.port -ErrorAction Stop).Trim()
+          if (-not $port) { Write-Host "FATAL: mock server didn't report a port"; exit 1 }
+          Write-Host "mock LLM on port $port"
+
+          & .\scripts\windows\easy_install.ps1 `
+              -Sqlite3Path $env:SQLITE3_EXE `
+              -NoInstall -Yes `
+              -Provider ollama `
+              -Url "http://127.0.0.1:$port/v1/chat/completions" `
+              -Model mock-model `
+              -EmbedUrl "http://127.0.0.1:$port/v1/embeddings" `
+              -EmbedModel mock-embed -Think off 2>&1 | Tee-Object -FilePath easy-install.log
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "FATAL: easy_install.ps1 exited $LASTEXITCODE"
+              exit 1
+          }
+          Stop-Process -Id $mock.Id -ErrorAction SilentlyContinue
+
+          $hit = Select-String -Path easy-install.log -Pattern 'pong-from-mock' -Quiet
+          if (-not $hit) {
+              Write-Host "FAIL: reasoning round-trip via easy_install.ps1 didn't reach the mock reply"
+              exit 1
+          }
+          Write-Host "ok: easy_install.ps1 end-to-end (Windows)"
