@@ -165,7 +165,7 @@ jobs:
           chmod +x dist/packages/easy_install.sh
 
       - name: Upload artifacts (per-arch / per-profile)
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: fractalsql-sqlite-${{ matrix.architecture }}-${{ matrix.profile }}
           path: dist/packages/*
@@ -301,7 +301,7 @@ jobs:
           awk -v d="${DIST}" 'BEGIN { if (d >= 1e-6) exit 1 }'
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: fractalsql-sqlite-darwin-${{ matrix.fsql_arch }}
           path: dist/packages/fractalsql-sqlite-*-darwin-${{ matrix.fsql_arch }}.tar.gz
@@ -492,7 +492,7 @@ jobs:
 
       - name: Upload easy_install.ps1 artifact
         if: matrix.arch == 'x64'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: fractalsql-sqlite-easy-install-ps1
           path: dist/windows/easy_install.ps1
@@ -508,7 +508,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload MSI artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: fractalsql-sqlite-windows-msi-${{ matrix.arch }}
           path: dist/windows/*.msi
