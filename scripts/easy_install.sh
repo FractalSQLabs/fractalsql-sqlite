@@ -418,7 +418,12 @@ phase_c_wizard() {
             reply="$("${SQLITE3_BIN}" ":memory:" \
                 ".read ${SNIPPET}" \
                 "SELECT fractal_reason('say ok');" 2>&1 || true)"
-            echo "  ${reply}" | head -5
+            # The reply's HEAD is the snippet's own chatter — every
+            # fractalsql_set in the bootstrap prints one "ok" line, and
+            # that already eats any head -N. What the user (and anyone
+            # tailing a wizard log) cares about is the model's actual
+            # answer, which is always at the tail.
+            echo "  ${reply}" | tail -5
             if [[ "${reply}" == *Error* || "${reply}" == *error* ]]; then
                 warn "That failed. If it looks like a timeout on a slow/cold local model, give the model a minute and retry, or raise the plugin's wait ceiling first (FSQL_REASONING_HTTP_TIMEOUT_MS / FSQL_REASONING_HTTP_LOW_SPEED_SECS in the shell before starting sqlite3), or see docs/reasoning-setup.md's 'Handling Constrained Hardware' section."
             fi

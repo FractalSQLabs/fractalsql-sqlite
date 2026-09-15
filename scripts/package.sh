@@ -124,6 +124,9 @@ DEB_NAME="sqlite3-fractalsql${PKG_SUFFIX}"
 DEB_OUT="${DIST_DIR}/${DEB_NAME}-${PKG_ARCH}.deb"
 
 if [[ "${PROFILE}" != "musl" ]]; then
+# The reasoning plugin dynamically links libcurl. OR-dependency: newer
+# releases ship it as libcurl4t64 (which does NOT provide libcurl4),
+# older ones only as libcurl4 — apt needs just one side satisfiable.
 DEB_ARGS=(
     ./dist/${PKG_ARCH}/fractalsql${BIN_SUFFIX}.so=/usr/local/lib/sqlite3/fractalsql.so
     ./sql/load_extension.sql=/usr/share/doc/${DEB_NAME}/load_extension.sql
@@ -141,6 +144,7 @@ fpm -s dir -t deb \
     --iteration "${ITERATION}" \
     --description "FractalSQL SQLite extension, Community Edition" \
     --depends "libc6 (>= ${GLIBC_DEP})" \
+    --depends "libcurl4 | libcurl4t64" \
     --after-install packaging/debian/postinst \
     -p "${DEB_OUT}" \
     "${DEB_ARGS[@]}"
@@ -172,6 +176,10 @@ install -Dm0644 THIRD-PARTY-NOTICES.md \
     "${STAGE_PKG}/usr/share/doc/${RPM_NAME}/LICENSE-THIRD-PARTY"
 
 if [[ "${PROFILE}" != "musl" ]]; then
+# The reasoning plugin dynamically links libcurl — declare it so a
+# plain `dnf/apt install` of the package actually yields a loadable
+# plugin. (musl ships no loadable plugin, so the .apk below keeps the
+# sqlite-only depends.)
 fpm -s dir -t rpm \
     -n "${RPM_NAME}" \
     -v "${VERSION}" \
@@ -179,6 +187,7 @@ fpm -s dir -t rpm \
     --iteration "${ITERATION}" \
     --description "FractalSQL SQLite extension, Community Edition" \
     --depends "sqlite" \
+    --depends "libcurl" \
     --directories /usr/local/lib/sqlite3 \
     --after-install /dev/stdin \
     -p "${RPM_OUT}" \

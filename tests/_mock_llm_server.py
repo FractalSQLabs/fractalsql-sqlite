@@ -82,7 +82,13 @@ class MockEmbedServer:
     extension's own "no plugin configured" precondition checks.
     """
 
-    def __init__(self, vector: list[float] | None = None, body: dict | None = None):
+    # NOTE: no `X | None` / `list[float]` in these signatures. This file
+    # runs under the install-test containers' system Python, which is
+    # 3.6 on RHEL 8 and 3.9 on RHEL 9 -- PEP 604 unions and builtin
+    # generics crash those interpreters at class-creation time (the
+    # stub dies before it can print its port, and every job waiting on
+    # that port fails with it).
+    def __init__(self, vector: list = None, body: dict = None):
         if body is not None:
             self._body = body
         else:
