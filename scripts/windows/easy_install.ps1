@@ -376,13 +376,20 @@ function Invoke-Wizard {
         }
         if ($Provider -ne 'skip' -and (Confirm-Step "Run a live reasoning smoke test (SELECT fractal_reason('say ok'))? A cloud endpoint may incur cost, and a cold local model can take several minutes the first time.")) {
             try {
-                # Bare path: ArgumentList escapes values containing
-                # spaces itself. Embedding quotes here hands sqlite3 a
-                # argv element with literal quote characters inside,
-                # which -init then can't open.
-                $reply = Invoke-Sqlite $SqliteBin @("-init", $snippetPath, "SELECT fractal_reason('say ok');")
+                # .read inside a -cmd, NOT -init: the CLI runs the -init
+                # file on its own open, and the fractalsql_set() state
+                # written there does not reach the connection that
+                # executes the command-line SQL afterwards (fractal_reason
+                # then reports "reasoning plugin not configured"). .read
+                # in the same session as the query is exactly the bash
+                # wizard's form. Forward slashes + single quotes: same
+                # form the snippet's own .load line uses, which the CLI's
+                # dot-command tokenizer accepts with spaces in the path.
+                $readSnippet = ".read '$($snippetPath.Replace('\', '/'))'"
+                $reply = Invoke-Sqlite $SqliteBin @("-cmd", $readSnippet, "SELECT fractal_reason('say ok');")
                 Write-Host "  $reply"
             } catch {
+                Write-Warn2 "smoke error: $($_.Exception.Message)"
                 Write-Warn2 "That failed. If it looks like a timeout on a slow/cold local model, give the model a minute and retry, or raise the plugin's wait ceiling first (FSQL_REASONING_HTTP_TIMEOUT_MS / FSQL_REASONING_HTTP_LOW_SPEED_SECS in the shell before starting sqlite3), or see docs/reasoning-setup.md's 'Handling Constrained Hardware' section."
             }
         }

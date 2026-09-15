@@ -25,6 +25,10 @@ test/__pycache__/
 
 dist/
 
+# Windows DLL build's amalgamation-header download (build.bat's
+# SQLITE_DIR default; downloaded fresh by the CI wizard job each run).
+deps/
+
 bench/*.db
 
 /*_teardown.sql

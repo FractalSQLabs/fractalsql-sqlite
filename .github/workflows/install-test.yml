@@ -544,7 +544,7 @@ jobs:
               -Url "http://127.0.0.1:$port/v1/chat/completions" `
               -Model mock-model `
               -EmbedUrl "http://127.0.0.1:$port/v1/embeddings" `
-              -EmbedModel mock-embed -Think off 2>&1 | Tee-Object -FilePath easy-install.log
+              -EmbedModel mock-embed -Think off *>&1 | Tee-Object -FilePath easy-install.log
           if ($LASTEXITCODE -ne 0) {
               Write-Host "FATAL: easy_install.ps1 exited $LASTEXITCODE"
               exit 1
