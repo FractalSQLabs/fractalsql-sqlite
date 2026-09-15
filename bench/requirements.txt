@@ -1,2 +1,2 @@
 sqlite-vec>=0.1
-numpy>=1.21
+numpy>=2.5.3
