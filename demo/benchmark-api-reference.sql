@@ -291,7 +291,7 @@ SELECT json_extract(value, '$.doc_id') AS doc_id,
        json_extract(value, '$.distance') AS distance
   FROM json_each(fractal_hybrid_clinical_search(
       'bmk_corpus', 'emb', '[0,0,0,0,0,0,0,0]',
-      (SELECT group_concat(id - 1, ',') FROM bmk_corpus WHERE id <= 20), 3));
+      (SELECT group_concat(id, ',') FROM bmk_corpus WHERE id <= 20), 3));
 
 SELECT json_extract(value, '$.doc_id') AS doc_id,
        json_extract(value, '$.distance') AS distance
@@ -312,6 +312,95 @@ SELECT json_extract(value, '$.doc_id') AS doc_id,
        json_extract(value, '$.distance') AS distance
   FROM json_each(fractal_cross_modal_search('bmk_modal', 'combined_vec',
                                             '0.5,0.5', '-0.5,-0.5', 0.5, 3));
+
+-- ------------------------------------------------------------------
+-- 10. Time-series / topology / fingerprints + vector quantization
+--     (10 functions)
+-- ------------------------------------------------------------------
+.print
+.print === Analytics: fractal_change_point_detect, fractal_periodogram, ===
+.print === fractal_tda_persistence_diagram, fractal_state_fingerprint, ===
+.print === fractal_cycle_detect, fractal_optimize_subset ===
+
+-- 300-point series with a deliberate mean step at t=150 (composite
+-- returns-style TEXT array, built with a recursive CTE -- SQLite has
+-- no generate_series).
+WITH RECURSIVE gs(t) AS (SELECT 1 UNION ALL SELECT t + 1 FROM gs WHERE t < 300)
+SELECT fractal_change_point_detect(
+    (SELECT '[' || group_concat(x) || ']' FROM
+        (SELECT printf('%.4f', CASE WHEN t <= 150 THEN 0.1 ELSE 2.1 END
+                       + (t % 7) * 0.003) AS x FROM gs)),
+    20, 1.0) AS change_points;
+
+-- 120-point composite of two sinusoids (periods 12 and 5 -- a real
+-- two-peak spectrum).
+WITH RECURSIVE gs(t) AS (SELECT 1 UNION ALL SELECT t + 1 FROM gs WHERE t < 120)
+SELECT fractal_periodogram(
+    (SELECT '[' || group_concat(x) || ']' FROM
+        (SELECT printf('%.6f', sin(t * 0.52359878) + 0.5 * sin(t * 1.25663706)) AS x
+           FROM gs)),
+    3) AS periodogram;
+
+-- 16-point 2D square-ring lattice (a closed perimeter -- the cycle the
+-- graph cycle-rank Betti-1 should flag). The l2 branch of this section
+-- needs no reasoning endpoint.
+WITH RECURSIVE g(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM g WHERE i < 15)
+SELECT fractal_tda_persistence_diagram(
+    (SELECT '[' || group_concat(pts) || ']'
+       FROM (SELECT printf('%d,%d',
+                CASE WHEN i < 4 THEN i - 2
+                     WHEN i < 8 THEN 2
+                     WHEN i < 12 THEN 2 - (i - 8)
+                     ELSE -2 END,
+                CASE WHEN i < 4 THEN -2
+                     WHEN i < 8 THEN -2 + (i - 4)
+                     WHEN i < 12 THEN 2
+                     ELSE 2 - (i - 12) END) AS pts
+          FROM g)),
+    2, 1, 1.0) AS tda;
+
+-- SimHash fingerprints: two nearly-identical states collide; orthogonal
+-- states do not. 64-bit -> 8-byte BLOB -> 16 hex chars.
+SELECT hex(fractal_state_fingerprint('1.0,0.0,0.0', 64))       AS fp_a,
+       hex(fractal_state_fingerprint('1.001,0.002,0.0', 64))   AS fp_a_near,
+       hex(fractal_state_fingerprint('0.0,1.0,0.0', 64))       AS fp_b;
+
+-- Brent's cycle detection over a clean period-2 fingerprint stream
+-- (one-hot directions, so the two states are distinguishable).
+WITH RECURSIVE g(t) AS (SELECT 0 UNION ALL SELECT t + 1 FROM g WHERE t < 9)
+SELECT fractal_cycle_detect(
+    (SELECT json_group_array(f)
+       FROM (SELECT hex(fractal_state_fingerprint(
+                CASE WHEN t % 2 = 0 THEN '1.0,0.0,0.0'
+                     ELSE '0.0,1.0,0.0' END, 64)) AS f
+          FROM (SELECT t FROM g))),
+    64) AS cycle_detect;
+
+-- Value-weighted allocation: best 5 of 10 scored items (upper_bounds
+-- each <= 1.0, as the wrapper's own error hint documents).
+SELECT fractal_optimize_subset(
+    '10,9,8,7,6,5,4,3,2,1',
+    '1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0',
+    5) AS optimize_subset;
+
+.print
+.print === Vector math: fractal_vector_lp_distance, fractal_vector_quantize_int8, ===
+.print === fractal_vector_quantize_binary, fractal_vector_hamming_distance ===
+
+SELECT fractal_vector_lp_distance('1,0,0', '0.5,0,0', 2.0) AS lp2,
+       fractal_vector_lp_distance('1,0,0', '0.5,0,0', 0.5) AS lp05;
+
+SELECT fractal_vector_quantize_int8('0.5,-0.25,0.75,0.0') AS int8_doc;
+
+SELECT hex(fractal_vector_quantize_binary(
+           '1,-1,1,1,-1,1,-1,-1,1,1')) AS binary_code;
+
+SELECT fractal_vector_hamming_distance(
+           fractal_vector_quantize_binary('1,-1,1,1,-1,1,-1,-1,1,1'),
+           fractal_vector_quantize_binary('1,-1,1,1,-1,1,-1,-1,1,1')) AS hamming_same,
+       fractal_vector_hamming_distance(
+           fractal_vector_quantize_binary('1,-1,1,1,-1,1,-1,-1,1,1'),
+           fractal_vector_quantize_binary('-1,-1,1,1,-1,1,-1,-1,1,1')) AS hamming_one_bit;
 
 .print
 .print ================================================================

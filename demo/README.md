@@ -142,8 +142,8 @@ runs in **two** states:
   engagement events with the community `fractal_feedback_report()`
   primitive, then each enterprise call fails with a clean `fractalsql:
   enterprise tier not loaded` error. SQLite has no exception handling in
-  plain SQL (no `DO`/PL/pgSQL equivalent), so unlike the PostgreSQL
-  edition this can't be caught and summarized in one message — every
+  plain SQL (no `DO`/PL/pgSQL equivalent), so this can't be caught and
+  summarized in one message the way the server edition does it — every
   call below the first prints its own copy of the same error, and the
   `sqlite3` shell (per its default `.bail off`) carries on. The community
   search engine above is unaffected either way, though the process does
@@ -219,9 +219,9 @@ a richer three-table schema with real foreign keys (`customers` ->
 `orders` -> `order_items`) — single-table questions, a question
 requiring a join, and a question requiring all three tables, plus
 capturing and running a generated statement yourself via the CLI's
-`.once`/`.read` spool trick (there's no `\gset` here). Unlike the PG
-edition, `fractal_text_to_sql(question)` takes only the question — there
-is no `text[]` scoping argument (SQLite has no array type); scoping the
+`.once`/`.read` spool trick (there's no `\gset` here). This edition's
+`fractal_text_to_sql(question)` takes only the question — there
+is no array-typed scoping argument (SQLite has no array type); scoping the
 LLM's view is `fractal_sql_agent`'s job instead
 (`fractal_sql_agent(question, '["orders", "customers"]')`), and plain
 `fractal_text_to_sql()` always auto-discovers the whole database — audit
@@ -243,23 +243,25 @@ for history, not the recommended starting point.
 
 ## Industry vertical demos
 
-Eleven runnable walkthroughs — eight **industry verticals** and three
+Thirteen runnable walkthroughs — ten **industry verticals** and three
 **agentic verticals** — each with its own synthetic dataset and its own
 subset of the function surface chosen for genuine domain fit, not forced
 coverage. Every one ends with a `fractal_reason()` narrative call over
-real computed results, same closing pattern as `demo.sql`. Same
+real computed results, same closing pattern as `demo.sql` — except the
+two newest verticals, Biotech/Genomics and Agentic Edge Swarm, which are
+raw-primitive showcases and run with no reasoning endpoint at all. Same
 prerequisites as `demo.sql` (extension loaded; the final reasoning
 section in each needs [reasoning configured](../docs/reasoning-setup.md)
-— every earlier section runs without it). All eleven are also wired
+— every earlier section runs without it). All thirteen are also wired
 into the Docker demo — see [the Learning Path](../docs/docker-demo.md#the-learning-path).
-Four (MedTech, Maritime, Fleet, Cybersecurity) store their vector
+Five (MedTech, Maritime, Fleet, Cybersecurity, Biotech/Genomics) store their vector
 columns as the native **`fractal_vector`** BLOB type instead of
 CSV-TEXT — see
 [demo-fractal-vector.sql](demo-fractal-vector.sql) and
 [docs/vectorizer-setup.md](../docs/vectorizer-setup.md#storage-csv-text-vs-the-fractal_vector-blob)
-for the type itself. SQLite has no typmod, so unlike PG's
-`fractal_vector(n)` column declaration, dimension enforcement here is a
-`CHECK (fractal_vector_dims(col) = n)` constraint on the column instead.
+for the type itself. SQLite has no typmod, so the dimension
+enforcement here is a `CHECK (fractal_vector_dims(col) = n)`
+constraint on the column instead of a typed column of fixed width.
 
 ```sh
 sqlite3 mydb.sqlite -cmd ".load ./dist/amd64/fractalsql" \
@@ -270,7 +272,8 @@ sqlite3 mydb.sqlite -cmd ".load ./dist/amd64/fractalsql" \
   Quantitative Finance & Algorithmic Trading. A 25-asset factor-model
   portfolio (`fractal_optimize_portfolio` picks the best 8) and a
   300-point price series with a deliberate volatility regime change at
-  t=150 (`fractal_dimension_dfa`/`fractal_dimension_drift`).
+  t=240 (`fractal_dimension_dfa`/`fractal_dimension_drift`, with
+  `fractal_change_point_detect` localizing the boundary).
   `fractal_search_trajectory` finds which of 10 historical quarterly
   rebalances the new allocation most resembles.
 - **[demo-vertical-medtech-clinical.sql](demo-vertical-medtech-clinical.sql)** —
@@ -346,7 +349,31 @@ sqlite3 mydb.sqlite -cmd ".load ./dist/amd64/fractalsql" \
   `fractal_hybrid_clinical_search` uses), compromise detection via
   `fractal_search_trajectory` (`fractal_vector` overload), and
   connection-rate regime-change detection via `fractal_dimension_dfa`/
-  `fractal_dimension_drift` on a beaconing-onset series.
+  `fractal_dimension_drift` on a beaconing-onset series, with
+  `fractal_periodogram` reading the beacon interval itself out of the
+  post-shift traffic.
+- **[demo-vertical-biotech-genomics.sql](demo-vertical-biotech-genomics.sql)** —
+  Structural Biology & Genomics. A synthetic scRNA-seq-style embedding
+  in 3D — 60 points in two well-separated clusters (30 + 30) plus 6
+  points bridging them in a rough ring — analyzed by
+  `fractal_tda_persistence_diagram`: exact 0-dim persistence
+  (cluster birth/death bars) plus the graph-cycle-rank Betti-1, which
+  flags the closed loop the shape actually has. Then
+  `fractal_vector_lp_distance` between the two cluster centroids,
+  contrasting p=1 Manhattan (robust to per-feature outliers) against
+  p=2 Euclidean. A raw-primitive showcase — no reasoning endpoint
+  needed.
+- **[demo-vertical-agentic-edge-swarm.sql](demo-vertical-agentic-edge-swarm.sql)** —
+  Agentic Edge / Robotics Swarm. A battery- and bandwidth-constrained
+  10-node edge swarm: `fractal_vector_quantize_int8` (4x) and
+  `fractal_vector_quantize_binary` (32x) for compressed peer-state
+  memory with `fractal_vector_hamming_distance` as the cheap candidate
+  filter ahead of a full-precision re-rank, `fractal_agent_detect_loop`
+  on a node stuck oscillating between two headings vs. one genuinely
+  exploring (deterministic multi-frequency sinusoids — the negative
+  control that must NOT be flagged), and `fractal_optimize_subset`'s
+  value-weighted allocation for battery-constrained task routing. A
+  raw-primitive showcase — no reasoning endpoint needed.
 
 ### Agentic verticals (Universal Agent composition)
 
@@ -367,8 +394,9 @@ plugin not configured" hint and the shell moves on).
   `fractal_search_agent` and `fractal_rag_agent` (retrieve-then-reason),
   both gated on the reasoning plugin — a clean hint without one, and the
   analytic sections still run either way — `fractal_agent_detect_loop`
-  on a period-2 state-hash toggle (the short-period check flags it even
-  though its DFA alpha is only ~0.04), `fractal_dimension_drift` over a
+  on a period-2 oscillation in a state-vector log (the SimHash + Brent
+  cycle detector flags the 2-state cycle even though its DFA alpha is
+  only ~0.04), `fractal_dimension_drift` over a
   non-degenerate latency series, plus `fractal_agent_route_task` and
   `fractal_agent_outlier_intercept` Domain Agent compositions.
 - **[demo-vertical-agentic-fintech-mcts.sql](demo-vertical-agentic-fintech-mcts.sql)** —
@@ -400,9 +428,9 @@ instance with that requirement in mind.
 
 ## The sixteen agents
 
-`demo-agents.sql` validates the sixteen installable agents. Unlike
-PostgreSQL, where these ship in an optional `fractalsql_agents`
-dependent extension, `src/fsql_domain_agents.c` registers all sixteen
+`demo-agents.sql` validates the sixteen installable agents. Unlike the
+server edition, where these ship in an optional dependent extension,
+`src/fsql_domain_agents.c` registers all sixteen
 as plain C SQL functions in this same extension DLL, next to the six
 Universal Agents, the reasoning core, and the search core — no separate
 install step. Load the extension once and all sixteen are already there
@@ -479,12 +507,14 @@ tables (`agents_demo_caps`, `agents_demo_badstates`, `agents_demo_mem`,
 `agents_demo_catalog`, `agents_demo_data`, `agents_demo_patients`,
 `agents_demo_fcatalog`/`agents_demo_fwarmup`, `agents_demo_nodes`,
 `agents_demo_alloc`, `agents_demo_vehicles`, `agents_demo_tracks`) are
-dropped and recreated at the top of their sections. The eight
+dropped and recreated at the top of their sections. The ten
 non-agentic vertical demos (`demo-vertical-quant-finance.sql`,
 `demo-vertical-medtech-clinical.sql`, `demo-vertical-recommendation-search.sql`,
 `demo-vertical-sovereign-edge-ai.sql`, `demo-vertical-maritime-defense.sql`,
 `demo-vertical-fleet-logistics.sql`, `demo-vertical-smart-cities-iot.sql`,
-`demo-vertical-cybersecurity-threat-detection.sql`) are likewise now **presets** —
+`demo-vertical-cybersecurity-threat-detection.sql`,
+`demo-vertical-biotech-genomics.sql`, `demo-vertical-agentic-edge-swarm.sql`) are
+likewise now **presets** —
 each rewired section keeps its raw-primitive call as a commented blueprint
 above the shipped agent call that generalizes it (the 3 agentic vertical
 reference blueprints — `demo-vertical-agentic-ops-devops.sql`,
@@ -535,6 +565,8 @@ DROP TABLE vmd_vessels;                                                         
 DROP TABLE vfl_vehicles;                                                                            -- demo-vertical-fleet-logistics.sql
 DROP TABLE vsc_sensors;                                                                             -- demo-vertical-smart-cities-iot.sql
 DROP TABLE vcy_hosts;                                                                               -- demo-vertical-cybersecurity-threat-detection.sql
+DROP TABLE vbg_cells;                                                                               -- demo-vertical-biotech-genomics.sql
+DROP TABLE vae_agents; DROP TABLE vae_heading_log;                                                  -- demo-vertical-agentic-edge-swarm.sql
 DROP TABLE incident_logs; DROP TABLE agent_capabilities; DROP TABLE known_bad_states;               -- demo-vertical-agentic-ops-devops.sql
 DROP TABLE trade_strategies; DROP TABLE portfolios; DROP TABLE assets;
 DROP TABLE restrictions; DROP TABLE historical_allocations;                                        -- demo-vertical-agentic-fintech-mcts.sql

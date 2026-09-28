@@ -27,7 +27,7 @@ Description: Stochastic Fractal Search SQLite loadable extension (Community)
  fractal dimension analysis, and the QTL ledger — statically linked
  against the vendored pure-C FractalSQL core.
  .
- Community Edition (v2.0.0): Salimi 2014 canonical SFS with Gaussian
+ Community Edition (v2.0.4): Salimi 2014 canonical SFS with Gaussian
  diffusion and greedy sniper selection; sovereign-tier features drive
  an optional reasoning plugin (fractalsql-reasoning-http).
  .

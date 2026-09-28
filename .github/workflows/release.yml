@@ -93,7 +93,7 @@ jobs:
           # yields the wrong "sqlite3_fractalsqllegacy_init".
           OUT=$(sqlite3 :memory: ".load ${SO} sqlite3_fractalsql_init" "SELECT fractalsql_edition() || '|' || fractalsql_version();")
           echo "result: ${OUT}"
-          test "${OUT}" = "Community|2.0.0"
+          test "${OUT}" = "Community|2.0.4"
           DIST=$(sqlite3 :memory: ".load ${SO} sqlite3_fractalsql_init" "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');")
           echo "self-search distance: ${DIST}"
           awk -v d="${DIST}" 'BEGIN { if (d >= 1e-6) exit 1 }'
@@ -120,7 +120,7 @@ jobs:
             test "${OUT}" = "Community"
             OUT=$(sqlite3 :memory: ".load '"${SO}"' sqlite3_fractalsql_init" "SELECT fractalsql_version();")
             echo "version: ${OUT}"
-            test "${OUT}" = "2.0.0"
+            test "${OUT}" = "2.0.4"
           '
 
       # Every profile installs to the SAME fixed path regardless of the
@@ -293,7 +293,7 @@ jobs:
               ".load ${DYLIB}" \
               "SELECT fractalsql_edition() || '|' || fractalsql_version();")
           echo "result: ${OUT}"
-          test "${OUT}" = "Community|2.0.0"
+          test "${OUT}" = "Community|2.0.4"
           DIST=$("${SQLITE_BIN}" :memory: \
               ".load ${DYLIB}" \
               "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');")
@@ -470,7 +470,7 @@ jobs:
           $load = '.load "C:/Program Files/FractalSQL/fractalsql.dll"'
           $out = & $cmd.Source ':memory:' $load "SELECT fractalsql_edition() || '|' || fractalsql_version();"
           Write-Host "result: $out"
-          if ($out -ne 'Community|2.0.0') { Write-Host "FATAL: unexpected edition|version: $out"; exit 1 }
+          if ($out -ne 'Community|2.0.4') { Write-Host "FATAL: unexpected edition|version: $out"; exit 1 }
 
           $dist = & $cmd.Source ':memory:' $load "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');"
           Write-Host "self-search distance: $dist"

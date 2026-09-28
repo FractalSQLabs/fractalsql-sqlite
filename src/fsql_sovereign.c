@@ -33,6 +33,16 @@
  *   fractal_diversify_current_dq()                       -> REAL / NULL
  *   fractal_diversify_overhead_p99_us()                  -> REAL / NULL
  *   fractal_feedback_report(handle, kind [, dwell_ms])   -> (null)
+ *   fractal_change_point_detect(series, window,          -> TEXT (JSON)
+ *         threshold [, max_points])
+ *   fractal_periodogram(series [, max_peaks])            -> TEXT (JSON)
+ *   fractal_optimize_subset(item_values, upper_bounds, k -> TEXT (JSON)
+ *         [, prev_weights [, turnover_penalty [, seed]]])
+ *   fractal_state_fingerprint(vec, n_bits [, seed])       -> BLOB
+ *   fractal_cycle_detect(fingerprints_json, n_bits        -> TEXT (JSON)
+ *         [, hamming_threshold])
+ *   fractal_tda_persistence_diagram(points, dim, max_dim, -> TEXT (JSON)
+ *         max_thresh [, max_h0_bars])
  *
  * Design notes:
  *
@@ -1437,6 +1447,464 @@ static void isolate_background_fn(sqlite3_context *ctx, int argc,
 }
 
 /* ------------------------------------------------------------------
+ * Change-point detection / periodogram / subset optimization /
+ * state fingerprint / cycle detection / TDA persistence diagram
+ * ------------------------------------------------------------------ */
+
+/* fractal_change_point_detect(series, window, threshold [, max_points])
+ * -> TEXT JSON {"indices":[...]}. */
+static void change_point_fn(sqlite3_context *ctx, int argc,
+                            sqlite3_value **argv) {
+    if (any_arg_null(3, argv)) { sqlite3_result_null(ctx); return; }
+
+    double *series = NULL;
+    int n = 0;
+    if (decode_series(argv[0], &series, &n) != 0) {
+        sqlite3_result_error(ctx,
+            "fractalsql: malformed series (expect CSV/JSON text or "
+            "float32 BLOB)", -1);
+        return;
+    }
+    int window = sqlite3_value_int(argv[1]);
+    double threshold = sqlite3_value_double(argv[2]);
+    int max_points = opt_int(argc, argv, 3, 64);
+    if (window <= 0 || threshold <= 0.0 || max_points <= 0) {
+        free(series);
+        sqlite3_result_error(ctx,
+            "fractalsql: window and threshold must be > 0, "
+            "max_points must be > 0", -1);
+        return;
+    }
+
+    size_t *out_indices = (size_t *)malloc((size_t)max_points * sizeof(size_t));
+    if (!out_indices) { free(series); sqlite3_result_error_nomem(ctx); return; }
+    size_t out_n = 0;
+    int rc = fsql_change_point_detect(series, (size_t)n, (size_t)window,
+                                      threshold, out_indices,
+                                      (size_t)max_points, &out_n);
+    free(series);
+    if (rc != FSQL_OK) {
+        free(out_indices);
+        char buf[160];
+        snprintf(buf, sizeof buf,
+                 "fractalsql: fractal_change_point_detect rc=%d "
+                 "(need n >= 2*window)", rc);
+        sqlite3_result_error(ctx, buf, -1);
+        return;
+    }
+
+    SB out; memset(&out, 0, sizeof out);
+    int bad = sb_append(&out, "{\"indices\":[");
+    for (size_t i = 0; i < out_n && !bad; i++)
+        bad = sb_appendf(&out, "%s%zu", i ? "," : "", out_indices[i]);
+    if (!bad) bad = sb_append(&out, "]}");
+    free(out_indices);
+    if (bad) { free(out.s); sqlite3_result_error_nomem(ctx); return; }
+    sb_result(ctx, &out);
+}
+
+/* fractal_periodogram(series [, max_peaks]) -> TEXT JSON
+ * {"freqs":[...],"power":[...]}, both sorted by power descending. */
+static void periodogram_fn(sqlite3_context *ctx, int argc,
+                           sqlite3_value **argv) {
+    if (sqlite3_value_type(argv[0]) == SQLITE_NULL) {
+        sqlite3_result_null(ctx); return;
+    }
+
+    double *series = NULL;
+    int n = 0;
+    if (decode_series(argv[0], &series, &n) != 0) {
+        sqlite3_result_error(ctx,
+            "fractalsql: malformed series (expect CSV/JSON text or "
+            "float32 BLOB)", -1);
+        return;
+    }
+    int max_peaks = opt_int(argc, argv, 1, 8);
+    if (max_peaks <= 0) {
+        free(series);
+        sqlite3_result_error(ctx, "fractalsql: max_peaks must be > 0", -1);
+        return;
+    }
+
+    double *out_freqs = (double *)malloc((size_t)max_peaks * sizeof(double));
+    double *out_power = (double *)malloc((size_t)max_peaks * sizeof(double));
+    if (!out_freqs || !out_power) {
+        free(series); free(out_freqs); free(out_power);
+        sqlite3_result_error_nomem(ctx);
+        return;
+    }
+    size_t out_n_peaks = 0;
+    int rc = fsql_periodogram(series, (size_t)n, out_freqs, out_power,
+                              (size_t)max_peaks, &out_n_peaks);
+    free(series);
+    if (rc != FSQL_OK) {
+        free(out_freqs); free(out_power);
+        char buf[128];
+        snprintf(buf, sizeof buf,
+                 "fractalsql: fractal_periodogram rc=%d (need n >= 4)", rc);
+        sqlite3_result_error(ctx, buf, -1);
+        return;
+    }
+
+    SB out; memset(&out, 0, sizeof out);
+    int bad = sb_append(&out, "{\"freqs\":[");
+    for (size_t i = 0; i < out_n_peaks && !bad; i++)
+        bad = sb_appendf(&out, "%s%.10f", i ? "," : "", out_freqs[i]);
+    if (!bad) bad = sb_append(&out, "],\"power\":[");
+    for (size_t i = 0; i < out_n_peaks && !bad; i++)
+        bad = sb_appendf(&out, "%s%.10f", i ? "," : "", out_power[i]);
+    if (!bad) bad = sb_append(&out, "]}");
+    free(out_freqs); free(out_power);
+    if (bad) { free(out.s); sqlite3_result_error_nomem(ctx); return; }
+    sb_result(ctx, &out);
+}
+
+/* Hardcoded SQL-level objective for fractal_optimize_subset: maximize
+ * sum(weight[i] * item_value[i]) -- value-weighted allocation, the
+ * natural generic use of this primitive (per-item "how much is this
+ * worth" against per-item capacity bounds). Same treatment
+ * fractal_optimize_portfolio already gets for its own hardcoded
+ * Sharpe-ratio objective, since SQL can't pass a C function pointer.
+ * fsql_optimize_subset's search MINIMIZES, so this returns the
+ * negated sum (lower is better), matching portfolio_fitness's own
+ * -(ret/risk) convention in core. */
+static double subset_value_objective(const double *weights, size_t n, void *ctx) {
+    const double *item_values = (const double *)ctx;
+    double sum = 0.0;
+    for (size_t i = 0; i < n; i++) sum += weights[i] * item_values[i];
+    return -sum;
+}
+
+/* fractal_optimize_subset(item_values, upper_bounds, k
+ *   [, prev_weights [, turnover_penalty [, seed]]]) -> TEXT JSON
+ * {"score":S,"weights":[...]}. score is the actual (positive)
+ * value-weighted sum achieved, not the negated internal fitness. */
+static void optimize_subset_fn(sqlite3_context *ctx, int argc,
+                               sqlite3_value **argv) {
+    if (any_arg_null(3, argv)) { sqlite3_result_null(ctx); return; }
+
+    double *item_values = NULL, *upper = NULL, *prev = NULL;
+    int n_items = 0, n_upper = 0, n_prev = 0;
+    if (decode_series(argv[0], &item_values, &n_items) != 0 ||
+        decode_series(argv[1], &upper, &n_upper) != 0) {
+        free(item_values); free(upper);
+        sqlite3_result_error(ctx,
+            "fractalsql: malformed item_values/upper_bounds (expect "
+            "CSV/JSON text or float32 BLOB)", -1);
+        return;
+    }
+    if (n_upper != n_items) {
+        free(item_values); free(upper);
+        sqlite3_result_error(ctx,
+            "fractalsql: upper_bounds length must match item_values "
+            "length", -1);
+        return;
+    }
+    if (argc > 3 && sqlite3_value_type(argv[3]) != SQLITE_NULL) {
+        if (decode_series(argv[3], &prev, &n_prev) != 0 || n_prev != n_items) {
+            free(item_values); free(upper); free(prev);
+            sqlite3_result_error(ctx,
+                "fractalsql: malformed prev_weights, or length does not "
+                "match item_values", -1);
+            return;
+        }
+    }
+    int k = sqlite3_value_int(argv[2]);
+    if (k <= 0 || k > n_items) {
+        free(item_values); free(upper); free(prev);
+        char buf[96];
+        snprintf(buf, sizeof buf,
+                 "fractalsql: k must satisfy 1 <= k <= item_values "
+                 "length (%d)", n_items);
+        sqlite3_result_error(ctx, buf, -1);
+        return;
+    }
+    double turnover_penalty = opt_double(argc, argv, 4, 0.0);
+    uint64_t seed = opt_seed(argc, argv, 5);
+
+    double *weights = (double *)malloc((size_t)n_items * sizeof(double));
+    if (!weights) {
+        free(item_values); free(upper); free(prev);
+        sqlite3_result_error_nomem(ctx);
+        return;
+    }
+    double score = 0.0;
+    int rc = fsql_optimize_subset(subset_value_objective, item_values,
+                                  (size_t)n_items, (size_t)k,
+                                  NULL /* lower_bounds: default [0,1] */,
+                                  upper, prev, turnover_penalty, seed,
+                                  weights, &score);
+    if (rc != FSQL_OK) {
+        char buf[160];
+        snprintf(buf, sizeof buf,
+                 "fractalsql: fractal_optimize_subset rc=%d (check "
+                 "0<=upper_bounds[i]<=1 and sum of k largest "
+                 "upper_bounds >= 1.0)", rc);
+        free(item_values); free(upper); free(prev); free(weights);
+        sqlite3_result_error(ctx, buf, -1);
+        return;
+    }
+
+    SB out; memset(&out, 0, sizeof out);
+    int bad = sb_appendf(&out, "{\"score\":%.10f,\"weights\":[", -score);
+    for (int i = 0; i < n_items && !bad; i++)
+        bad = sb_appendf(&out, "%s%.10f", i ? "," : "", weights[i]);
+    if (!bad) bad = sb_append(&out, "]}");
+    free(item_values); free(upper); free(prev); free(weights);
+    if (bad) { free(out.s); sqlite3_result_error_nomem(ctx); return; }
+    sb_result(ctx, &out);
+}
+
+/* fractal_state_fingerprint(vec, n_bits [, seed]) -> BLOB,
+ * (n_bits+7)/8 bytes. Random-hyperplane SimHash: two nearly-identical
+ * state vectors collapse to the same or a low-Hamming-distance
+ * fingerprint. `vec` is a CSV/JSON/BLOB double-precision series (this
+ * function operates on raw state vectors, not fractal_vector's
+ * float32 canonical BLOB type). */
+static void state_fingerprint_fn(sqlite3_context *ctx, int argc,
+                                 sqlite3_value **argv) {
+    if (sqlite3_value_type(argv[0]) == SQLITE_NULL ||
+        sqlite3_value_type(argv[1]) == SQLITE_NULL) {
+        sqlite3_result_null(ctx); return;
+    }
+    double *v = NULL;
+    int dim = 0;
+    if (decode_series(argv[0], &v, &dim) != 0) {
+        sqlite3_result_error(ctx,
+            "fractalsql: malformed vec (expect CSV/JSON text or "
+            "float32 BLOB)", -1);
+        return;
+    }
+    int n_bits = sqlite3_value_int(argv[1]);
+    if (n_bits <= 0) {
+        free(v);
+        sqlite3_result_error(ctx, "fractalsql: n_bits must be > 0", -1);
+        return;
+    }
+    double seed = opt_double(argc, argv, 2, 0.0);
+
+    size_t nbytes = ((size_t)n_bits + 7) / 8;
+    uint8_t *out = (uint8_t *)malloc(nbytes);
+    if (!out) { free(v); sqlite3_result_error_nomem(ctx); return; }
+    int rc = fsql_state_fingerprint(v, (size_t)dim, (size_t)n_bits, seed, out);
+    free(v);
+    if (rc != FSQL_OK) {
+        free(out);
+        sqlite3_result_error(ctx,
+            "fractalsql: fractal_state_fingerprint failed", -1);
+        return;
+    }
+    sqlite3_result_blob(ctx, out, (int)nbytes, SQLITE_TRANSIENT);
+    free(out);
+}
+
+static int hexval(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Decodes exactly out_cap bytes of hex text into out. Returns 0 on
+ * success, -1 on length/character mismatch. */
+static int hex_decode(const char *s, int slen, uint8_t *out, size_t out_cap) {
+    if (s == NULL || slen < 0 || (size_t)slen != out_cap * 2) return -1;
+    for (size_t i = 0; i < out_cap; i++) {
+        int hi = hexval(s[2 * i]);
+        int lo = hexval(s[2 * i + 1]);
+        if (hi < 0 || lo < 0) return -1;
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return 0;
+}
+
+/* fractal_cycle_detect(fingerprints_json, n_bits [, hamming_threshold])
+ * -> TEXT JSON {"detected":bool[,"cycle_len":N,"at_index":I]}.
+ * fingerprints_json is a JSON array of hex-encoded fingerprints, each
+ * (n_bits+7)/8 bytes decoded (a caller with a table of BLOB
+ * fingerprints builds this via e.g.
+ * `SELECT json_group_array(hex(fp)) FROM t ORDER BY t.rowid`).
+ * Single-call convenience over the stateful fsql_cycle_detect_init/
+ * _feed/_free streaming API: scans the whole array once via this
+ * connection's own json_each(), stopping at the first cycle found (if
+ * any) -- the underlying detector re-arms after a hit, but a second
+ * call is needed to look for a second, independent cycle later in a
+ * longer stream. */
+static void cycle_detect_fn(sqlite3_context *ctx, int argc,
+                            sqlite3_value **argv) {
+    if (sqlite3_value_type(argv[0]) == SQLITE_NULL ||
+        sqlite3_value_type(argv[1]) == SQLITE_NULL) {
+        sqlite3_result_null(ctx); return;
+    }
+    int n_bits = sqlite3_value_int(argv[1]);
+    if (n_bits <= 0) {
+        sqlite3_result_error(ctx, "fractalsql: n_bits must be > 0", -1);
+        return;
+    }
+    size_t n_bytes = ((size_t)n_bits + 7) / 8;
+    int hamming_threshold = opt_int(argc, argv, 2, 0);
+    if (hamming_threshold < 0) {
+        sqlite3_result_error(ctx,
+            "fractalsql: hamming_threshold must be >= 0", -1);
+        return;
+    }
+
+    sqlite3 *db = sqlite3_context_db_handle(ctx);
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT value FROM json_each(?1)", -1,
+                           &stmt, NULL) != SQLITE_OK) {
+        sqlite3_result_error(ctx,
+            "fractalsql: fractal_cycle_detect: malformed fingerprints_json",
+            -1);
+        return;
+    }
+    sqlite3_bind_value(stmt, 1, argv[0]);
+
+    fsql_cycle_state_t cs;
+    memset(&cs, 0, sizeof cs);
+    if (fsql_cycle_detect_init(&cs, n_bytes, hamming_threshold) != FSQL_OK) {
+        sqlite3_finalize(stmt);
+        sqlite3_result_error_nomem(ctx);
+        return;
+    }
+
+    uint8_t *fp = (uint8_t *)malloc(n_bytes);
+    if (!fp) {
+        fsql_cycle_detect_free(&cs);
+        sqlite3_finalize(stmt);
+        sqlite3_result_error_nomem(ctx);
+        return;
+    }
+
+    int found = 0, detected = 0;
+    size_t cycle_len = 0, at_index = 0, idx = 0;
+    int step_rc;
+    while (!found && (step_rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const char *hex_txt = (const char *)sqlite3_column_text(stmt, 0);
+        int hex_len = sqlite3_column_bytes(stmt, 0);
+        if (hex_decode(hex_txt, hex_len, fp, n_bytes) != 0) {
+            free(fp); fsql_cycle_detect_free(&cs); sqlite3_finalize(stmt);
+            char buf[128];
+            snprintf(buf, sizeof buf,
+                     "fractalsql: fingerprints_json[%zu] is not %zu bytes "
+                     "of hex text", idx, n_bytes);
+            sqlite3_result_error(ctx, buf, -1);
+            return;
+        }
+        detected = 0;
+        cycle_len = 0;
+        if (fsql_cycle_detect_feed(&cs, fp, &detected, &cycle_len) != FSQL_OK) {
+            free(fp); fsql_cycle_detect_free(&cs); sqlite3_finalize(stmt);
+            sqlite3_result_error(ctx,
+                "fractalsql: fractal_cycle_detect: feed failed", -1);
+            return;
+        }
+        if (detected) { found = 1; at_index = idx; }
+        idx++;
+    }
+    free(fp);
+    fsql_cycle_detect_free(&cs);
+    int prep_ok = (step_rc == SQLITE_DONE || found);
+    sqlite3_finalize(stmt);
+    if (!prep_ok) {
+        sqlite3_result_error(ctx,
+            "fractalsql: fractal_cycle_detect: malformed fingerprints_json",
+            -1);
+        return;
+    }
+
+    char buf[128];
+    if (found) {
+        snprintf(buf, sizeof buf,
+                 "{\"detected\":true,\"cycle_len\":%zu,\"at_index\":%zu}",
+                 cycle_len, at_index);
+    } else {
+        snprintf(buf, sizeof buf, "{\"detected\":false}");
+    }
+    sqlite3_result_text(ctx, buf, -1, SQLITE_TRANSIENT);
+}
+
+/* fractal_tda_persistence_diagram(points, dim, max_dim, max_thresh
+ *   [, max_h0_bars]) -> TEXT JSON {"n_h0_bars":N,
+ *   "h0_bars":[{"birth":b,"death":d},...],"betti1":N|null}.
+ *
+ * SCOPE NOTE (carry forward into any caller-facing docs/demos): the
+ * 0-dim persistence diagram (h0_bars, birth/death) is an EXACT,
+ * complete computation -- single-linkage clustering is mathematically
+ * equivalent to 0-dim persistent homology of the Vietoris-Rips
+ * filtration. betti1, when requested (max_dim=1), is the bare
+ * 1-skeleton GRAPH's cycle rank, NOT full simplicial H1 of the
+ * Vietoris-Rips complex -- it over-counts true H1 whenever a filled
+ * triangle exists in the point cloud. A real TDA library (Ripser/
+ * GUDHI) computes full H1 via boundary-matrix reduction; this
+ * primitive deliberately doesn't attempt that (see
+ * include/fractalsql_sql.h's own note on this function). Not gated --
+ * ships as a normal function, just documented accurately here and at
+ * every call site. */
+static void tda_persistence_fn(sqlite3_context *ctx, int argc,
+                               sqlite3_value **argv) {
+    if (any_arg_null(4, argv)) { sqlite3_result_null(ctx); return; }
+
+    double *points = NULL;
+    int flat_n = 0;
+    if (decode_series(argv[0], &points, &flat_n) != 0) {
+        sqlite3_result_error(ctx,
+            "fractalsql: malformed points (expect CSV/JSON text or "
+            "float32 BLOB)", -1);
+        return;
+    }
+    int dim = sqlite3_value_int(argv[1]);
+    int max_dim = sqlite3_value_int(argv[2]);
+    double max_thresh = sqlite3_value_double(argv[3]);
+    int max_h0_bars = opt_int(argc, argv, 4, 64);
+    if (dim <= 0 || flat_n % dim != 0 || (max_dim != 0 && max_dim != 1) ||
+        max_thresh <= 0.0 || max_h0_bars <= 0) {
+        free(points);
+        sqlite3_result_error(ctx,
+            "fractalsql: invalid input (dim must divide points length, "
+            "max_dim must be 0 or 1, max_thresh > 0, max_h0_bars > 0)",
+            -1);
+        return;
+    }
+
+    fsql_tda_bar_t *bars =
+        (fsql_tda_bar_t *)malloc((size_t)max_h0_bars * sizeof(fsql_tda_bar_t));
+    if (!bars) { free(points); sqlite3_result_error_nomem(ctx); return; }
+    size_t out_n_h0_bars = 0;
+    size_t out_betti1 = 0;
+    int rc = fsql_tda_persistence_diagram(points, (size_t)(flat_n / dim),
+                                          (size_t)dim, max_dim, max_thresh,
+                                          bars, (size_t)max_h0_bars,
+                                          &out_n_h0_bars, &out_betti1);
+    free(points);
+    if (rc != FSQL_OK) {
+        free(bars);
+        char buf[160];
+        snprintf(buf, sizeof buf,
+                 "fractalsql: fractal_tda_persistence_diagram rc=%d "
+                 "(need 2 <= n_points <= %d, finite coordinates)",
+                 rc, FSQL_TDA_MAX_POINTS);
+        sqlite3_result_error(ctx, buf, -1);
+        return;
+    }
+
+    SB out; memset(&out, 0, sizeof out);
+    int bad = sb_appendf(&out, "{\"n_h0_bars\":%zu,\"h0_bars\":[", out_n_h0_bars);
+    for (size_t i = 0; i < out_n_h0_bars && !bad; i++)
+        bad = sb_appendf(&out, "%s{\"birth\":%.10f,\"death\":%.10f}",
+                         i ? "," : "", bars[i].birth, bars[i].death);
+    if (!bad) {
+        if (max_dim >= 1)
+            bad = sb_appendf(&out, "],\"betti1\":%zu}", out_betti1);
+        else
+            bad = sb_append(&out, "],\"betti1\":null}");
+    }
+    free(bars);
+    if (bad) { free(out.s); sqlite3_result_error_nomem(ctx); return; }
+    sb_result(ctx, &out);
+}
+
+/* ------------------------------------------------------------------
  * Registration
  * ------------------------------------------------------------------ */
 
@@ -1493,6 +1961,48 @@ int fsql_sovereign_register(sqlite3 *db, FsqlState *st) {
         rc = reg_fn(db, "fractal_optimize_portfolio_multimodal_pareto",
                     pareto_arities[i], f_run, st,
                     (void *)portfolio_pareto_fn);
+        if (rc != SQLITE_OK) return rc;
+    }
+
+    /* v2.0.25 primitives: same "same name at every supported arity"
+     * convention as the portfolio family above. All deterministic +
+     * innocuous, including fractal_cycle_detect (its json_each() use
+     * is a pure function of its own TEXT argument, not table state). */
+    static const int change_point_arities[] = { 3, 4 };
+    static const int periodogram_arities[]  = { 1, 2 };
+    static const int subset_arities[]       = { 3, 4, 5, 6 };
+    static const int fingerprint_arities[]  = { 2, 3 };
+    static const int cycle_detect_arities[] = { 2, 3 };
+    static const int tda_arities[]          = { 4, 5 };
+
+    for (size_t i = 0; i < sizeof(change_point_arities) / sizeof(int); i++) {
+        rc = reg_fn(db, "fractal_change_point_detect", change_point_arities[i],
+                    f_pure, st, (void *)change_point_fn);
+        if (rc != SQLITE_OK) return rc;
+    }
+    for (size_t i = 0; i < sizeof(periodogram_arities) / sizeof(int); i++) {
+        rc = reg_fn(db, "fractal_periodogram", periodogram_arities[i],
+                    f_pure, st, (void *)periodogram_fn);
+        if (rc != SQLITE_OK) return rc;
+    }
+    for (size_t i = 0; i < sizeof(subset_arities) / sizeof(int); i++) {
+        rc = reg_fn(db, "fractal_optimize_subset", subset_arities[i],
+                    f_pure, st, (void *)optimize_subset_fn);
+        if (rc != SQLITE_OK) return rc;
+    }
+    for (size_t i = 0; i < sizeof(fingerprint_arities) / sizeof(int); i++) {
+        rc = reg_fn(db, "fractal_state_fingerprint", fingerprint_arities[i],
+                    f_pure, st, (void *)state_fingerprint_fn);
+        if (rc != SQLITE_OK) return rc;
+    }
+    for (size_t i = 0; i < sizeof(cycle_detect_arities) / sizeof(int); i++) {
+        rc = reg_fn(db, "fractal_cycle_detect", cycle_detect_arities[i],
+                    f_pure, st, (void *)cycle_detect_fn);
+        if (rc != SQLITE_OK) return rc;
+    }
+    for (size_t i = 0; i < sizeof(tda_arities) / sizeof(int); i++) {
+        rc = reg_fn(db, "fractal_tda_persistence_diagram", tda_arities[i],
+                    f_pure, st, (void *)tda_persistence_fn);
         if (rc != SQLITE_OK) return rc;
     }
 

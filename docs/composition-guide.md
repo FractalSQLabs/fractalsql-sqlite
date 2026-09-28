@@ -38,7 +38,7 @@ here is the pick-list.
 | `fractal_sql_agent` | NL → SQL with self-correction on parse-check/exec failure | You need structured answers from tables, not vector prose |
 | `fractal_agent_plan_explore` | MCTS-style diverse strategy trajectories | You need *multiple* non-overlapping plans, not one answer |
 | `fractal_agent_trajectory_predict` | Forecast state by matching a drift delta-vector in history | You need "where is this heading, based on past drift?" |
-| `fractal_agent_detect_loop` | DFA-based infinite-loop / repetition detector | You need a safety monitor on an autonomous agent's state log |
+| `fractal_agent_detect_loop` | SimHash + Brent cycle detector over a state-vector log | You need a safety monitor on an autonomous agent's state log |
 
 Underneath these, the **Discovery primitives** (`fractal_search`,
 `fractal_search_explore`, `fractal_search_trajectory`, `fractal_search_telemetry`,
@@ -60,8 +60,8 @@ A composition is a pipeline with up to four stages:
    rows' non-vector columns by `rowid` and pass that compact JSON to the LLM).
 3. **Act** (optional): `fractal_sql_agent` with `auto_execute` set when
    the agent must run a query, under a guardrailed connection (below).
-4. **Guard** (optional): `fractal_agent_detect_loop` on the agent's state-hash
-   log, and/or `fractal_agent_outlier_intercept`-style screening of a proposed
+4. **Guard** (optional): `fractal_agent_detect_loop` on the agent's
+   state-vector log, and/or `fractal_agent_outlier_intercept`-style screening of a proposed
    action against known-bad states.
 
 Stages 1–2 are the common case (most "answer my data" agents). Add 3 when the
@@ -147,13 +147,22 @@ SELECT fractal_reason('...',
     (SELECT json_group_array(json_object('title', title, 'body', body))
        FROM incident_notes WHERE incident_id = 42));
 
--- 4. GUARD: check the state-hash log for a loop (hashes as JSON/CSV array TEXT)
-SELECT fractal_agent_detect_loop('[101, 102, 101, 102, 101]');
+-- 4. GUARD: check the agent's state-vector log for a loop
+-- (state_log is a JSON/CSV TEXT array of state vectors flattened
+--  row-major: n_states * dim doubles, `dim` doubles per state)
+SELECT fractal_agent_detect_loop(
+    'devops-resolver',
+    '[1,0,0, 0.98,0.02,0, 1.01,-0.01,0, 0.97,0.03,0]',
+    3) AS loop_check;
+-- -> {"agent_id":"devops-resolver","dfa_exponent":..,"is_loop_detected":..}
 ```
 
-> The skeleton is illustrative. Your state-hash scheme is yours
-> to define (SQLite has no built-in hash function — hash in your host language
-> and store the value). The wiring (retrieve, fall back to `fractal_sql_agent`, reason,
+> The skeleton is illustrative. The state-vector scheme is yours
+> to define (real vectors work best; the SimHash fingerprint inside
+> `fractal_agent_detect_loop` is direction-based, so encode scalar states
+> into a distinguishable direction, for example one-hot, rather than
+> casting them to 1-dimensional vectors). The wiring (retrieve, fall back
+> to `fractal_sql_agent`, reason,
 > then `fractal_agent_detect_loop` on the state log) is the part to copy. The
 > shipped `route_task` + `outlier_intercept` +
 > `detect_loop` composition in
@@ -182,7 +191,7 @@ you'd treat any NL→SQL surface:
   the connection and allowlist already locked down.
 
 For autonomous agents (Pattern C), add the **safety barriers** the DevOps
-blueprint uses: `fractal_agent_detect_loop` on the state-hash log to catch
+blueprint uses: `fractal_agent_detect_loop` on the state-vector log to catch
 infinite loops, and an `outlier_intercept`-style screen that checks a proposed
 action's state vector against known-bad state clusters before the action runs.
 
@@ -193,12 +202,14 @@ action's state vector against known-bad state clusters before the action runs.
 Two issues surfaced while building these composition patterns, and apply equally to any composition you write.
 
 - **`id_col` must be an integer key.** The table-searching agents
-  (`recall_hybrid`, `recommend_diverse`, `patient_deterioration_triage`,
-  `schedule_workload`, `rebalance_sibling`, `detour_classify`,
-  `track_anomaly`) resolve the C code's 0-indexed row position to your named
-  id column via `row_number() OVER (ORDER BY rowid) - 1` (there is no
-  separate physical-row-identifier pseudo-column here — `rowid` fills that
-  role). A text label column
+  (`route_task`, `recall_hybrid`, `recommend_diverse`,
+  `patient_deterioration_triage`, `schedule_workload`) resolve the returned
+  `doc_id` — the row's SQLite `rowid`, a real row locator — to your named id
+  column via a direct `rowid = doc_id` predicate. The three trajectory-backed
+  agents (`rebalance_sibling`, `detour_classify`, `track_anomaly`) still map
+  through `row_number() OVER (ORDER BY rowid) - 1`, because
+  `fractal_search_trajectory` keeps a 0-indexed scan position as its
+  `doc_id`. A text label column
   won't do; pass the numeric PK. See
   [api-agency.md → A note on id resolution](api-agency.md#a-note-on-id-resolution).
 - **Diversify is connection-global.** `recommend_diverse` calls

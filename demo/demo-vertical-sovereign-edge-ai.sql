@@ -36,9 +36,11 @@
 --   * The deployment grid is flattened into one CSV TEXT string via a
 --     recursive pass (the boxcount fixture is the same shape
 --     demo/demo-vertical-smart-cities-iot.sql uses).
---   * doc_id is the row's 0-based scan position; nodes' rowid aliases
---     the INTEGER PRIMARY KEY id, so doc_id = id - 1 exactly (rowid
---     tables keep their physical position).
+--   * telemetry/hybrid doc_id IS the row's rowid (with the raw 0-indexed
+--     scan position alongside as scan_pos); nodes' rowid aliases
+--     the INTEGER PRIMARY KEY id, so the telemetry joins below resolve
+--     doc_id back to the node id directly (rowid tables keep their
+--     physical position).
 --
 -- Safe to re-run: vse_* tables are dropped and recreated each time.
 
@@ -142,7 +144,7 @@ SELECT n.id  AS assigned_node,
        json_extract(je.value, '$.distance') AS distance,
        1.0 / (1.0 + json_extract(je.value, '$.distance')) AS confidence
 FROM tj, json_each(tj.rj) je
-JOIN vse_nodes n ON n.id - 1 = json_extract(je.value, '$.doc_id')
+JOIN vse_nodes n ON n.rowid = json_extract(je.value, '$.doc_id')
 ORDER BY json_extract(je.value, '$.distance');
 SELECT fractal_reason('placement rationale for the nearest edge node to this refined workload profile');
 

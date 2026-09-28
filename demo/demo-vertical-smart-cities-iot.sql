@@ -29,9 +29,11 @@
 --     _recommend_diverse presets are blueprint compositions over the
 --     primitives (morphology+drift; dfa+drift; explore+scores) -- see
 --     demo-agents.sql for the pattern.
---   * doc_id is the row's 0-based scan position; sensors' rowid aliases
---     the INTEGER PRIMARY KEY id, so doc_id = id - 1 exactly (rowid
---     tables keep their physical position).
+--   * telemetry/hybrid doc_id IS the row's rowid (with the raw 0-indexed
+--     scan position alongside as scan_pos); sensors' rowid aliases
+--     the INTEGER PRIMARY KEY id, so the telemetry joins resolve doc_id
+--     back to the sensor id directly (rowid tables keep their physical
+--     position).
 --
 -- Safe to re-run: vsc_* tables are dropped and recreated each time.
 

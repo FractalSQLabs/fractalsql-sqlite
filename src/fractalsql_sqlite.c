@@ -66,6 +66,31 @@ FsqlState *fsql_state_create(sqlite3 *db, char **pzErrMsg) {
     }
     st->db = db;
 
+    /* Capture the operator's process-level FSQL_REASONING_HTTP_RESPONSE_MODE
+     * once, at state creation -- the analog of the pg wrapper's _PG_init
+     * capture (g_response_mode_boot in the pg repo's src/fractalsql.c).
+     * Plain malloc+memcpy, not strdup (MSVC deprecates strdup; see
+     * fsql_config.c's matching comment). The CHAT tier re-applies this
+     * value on every reasoning load (env_apply in fsql_reasoning.c),
+     * which both restores the operator's lever -- without the capture
+     * the tier would unsetenv it, since nothing else ever populates
+     * cfg->response_mode -- and re-asserts it after a T2S-tier load
+     * that failed partway could otherwise leave that tier's forced
+     * "code" value sitting in the process environment. Env-only by
+     * design (no fractalsql_set key), matching the pg GUC story:
+     * docs/reasoning-setup.md's "Not a GUC: set ... in the service
+     * environment". A new connection (new FsqlState) picks up a changed
+     * value; a live one keeps the value it booted with. */
+    {
+        const char *rm = getenv("FSQL_REASONING_HTTP_RESPONSE_MODE");
+        if (rm && *rm) {
+            size_t len = strlen(rm) + 1;
+            st->cfg.response_mode = (char *)malloc(len);
+            if (st->cfg.response_mode)
+                memcpy(st->cfg.response_mode, rm, len);
+        }
+    }
+
 #ifdef FSQL_SQLITE_SOVEREIGN
     /* Sovereign build: ledger storage VFS (fractalsql_ledger table on
      * the same connection) wired in before ctx construction, since
@@ -467,7 +492,7 @@ static void fractal_search_explore_final(sqlite3_context *ctx) {
  * module compiled in ("no such function: sin"/"sqrt") even though
  * every other SQL surface this extension needs (JSON1, window
  * functions) works fine there — verified directly against each. Only
- * sin() and sqrt() are registered because grepping every shipped
+ * sin(), sqrt(), and cos() are registered because grepping every shipped
  * demo SQL script found no other math function actually called
  * anywhere; add more here only if a demo starts using one. Registered
  * unconditionally on every host, including ones that already have the
@@ -498,6 +523,15 @@ static void math_sqrt_fn(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
         return;
     }
     sqlite3_result_double(ctx, sqrt(x));
+}
+
+static void math_cos_fn(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    (void)argc;
+    if (sqlite3_value_type(argv[0]) == SQLITE_NULL) {
+        sqlite3_result_null(ctx);
+        return;
+    }
+    sqlite3_result_double(ctx, cos(sqlite3_value_double(argv[0])));
 }
 
 /* -------------------------------------------------------------------
@@ -537,15 +571,18 @@ int sqlite3_fractalsql_init(sqlite3 *db, char **pzErrMsg,
         fractal_search_fn, NULL, NULL, fsql_state_destroy);
     if (rc != SQLITE_OK) { fsql_state_destroy(st); return rc; }
 
-    /* sin/sqrt: self-contained even on hosts missing
+    /* sin/sqrt/cos: self-contained even on hosts missing
      * SQLITE_ENABLE_MATH_FUNCTIONS (see the registrations' own comment
-     * above). Best-effort: a failure here would only affect demo SQL
-     * that calls sin()/sqrt() directly, never the extension's own
-     * registered functions, so it does not abort init. */
+     * above). cos() arrived with demo-vertical-biotech-genomics's
+     * bridging-ring fixture. Best-effort: a failure here would only
+     * affect demo SQL that calls sin()/sqrt()/cos() directly, never the
+     * extension's own registered functions, so it does not abort init. */
     sqlite3_create_function_v2(
         db, "sin", 1, flags, NULL, math_sin_fn, NULL, NULL, NULL);
     sqlite3_create_function_v2(
         db, "sqrt", 1, flags, NULL, math_sqrt_fn, NULL, NULL, NULL);
+    sqlite3_create_function_v2(
+        db, "cos", 1, flags, NULL, math_cos_fn, NULL, NULL, NULL);
 
     /* fractal_search_explore — Scout Mode aggregate (xStep + xFinal). Shares
      * the same per-connection state as fractal_search. NOT marked

@@ -220,7 +220,7 @@ function Invoke-Sqlite {
 }
 
 # --- Phase B: install the package (default-on, confirmed) ------------------
-function Install-Package {
+function Install-FractalSqlPackage {
     if (Test-Installed) { return }
     if ($NoInstall) {
         Write-Die "FractalSQL isn't installed yet. Grab the matching .msi from https://github.com/$Repo/releases and install it, then re-run this script (or drop -NoInstall)."
@@ -390,7 +390,9 @@ function Invoke-Wizard {
                 Write-Host "  $reply"
             } catch {
                 Write-Warn2 "smoke error: $($_.Exception.Message)"
-                Write-Warn2 "That failed. If it looks like a timeout on a slow/cold local model, give the model a minute and retry, or raise the plugin's wait ceiling first (FSQL_REASONING_HTTP_TIMEOUT_MS / FSQL_REASONING_HTTP_LOW_SPEED_SECS in the shell before starting sqlite3), or see docs/reasoning-setup.md's 'Handling Constrained Hardware' section."
+                # Include the underlying error so a refusal, timeout, or
+                # plugin load failure is distinguishable on its own.
+                Write-Warn2 "That failed: $($_.Exception.Message). If it looks like a timeout on a slow/cold local model, give the model a minute and retry, or raise the plugin's wait ceiling first (FSQL_REASONING_HTTP_TIMEOUT_MS / FSQL_REASONING_HTTP_LOW_SPEED_SECS in the shell before starting sqlite3), or see docs/reasoning-setup.md's 'Handling Constrained Hardware' section."
             }
         }
     }
@@ -437,5 +439,5 @@ if ($Uninstall) {
     exit 0
 }
 
-Install-Package
+Install-FractalSqlPackage
 Invoke-Wizard $sqliteBin

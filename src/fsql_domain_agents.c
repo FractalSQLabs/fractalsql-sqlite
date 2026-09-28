@@ -27,11 +27,19 @@
  * round-trip for the one step every engine makes keeps sixteen
  * engines' worth of prompt-building code a little lighter.
  *
- * doc_id resolution: the C primitives' 0-indexed scan position is
- * mapped back to a caller-named id column via `row_number() OVER
- * (ORDER BY rowid) - 1` (see fsql_agents.c's AgentCorpus comment: the
- * same "ORDER BY rowid" convention is what doc_id already means for
- * every primitive these engines compose).
+ * doc_id resolution: the telemetry/hybrid searches (fractal_search_
+ * telemetry, fractal_hybrid_clinical_search) report doc_id as the
+ * row's real rowid -- SQLite's physical row locator, the analog of the
+ * server edition's ctid -- so the engines that consume them
+ * (route_task, recall_hybrid, recommend_diverse, patient_deterioration_
+ * triage, schedule_workload) resolve ids with a direct rowid predicate
+ * (da_resolve_rowid / `rowid AS __rid` joins). The trajectory-backed
+ * engines (rebalance_sibling, detour_classify, track_anomaly) keep the
+ * `row_number() OVER (ORDER BY rowid) - 1` mapping because
+ * fractal_search_trajectory's doc_id is still the 0-indexed scan
+ * position (da_resolve_id); feedback_audit reads scan_pos, not doc_id,
+ * because the result handle it feeds fractal_isolate_background is the
+ * scan-position convention.
  *
  * SQLite has no schemas or search path; every function name is a
  * single, unshadowable global registered by this same .so.
@@ -260,17 +268,20 @@ static void sb_sql_ident(StrBuf *sql, const char *ident) {
     sb_puts(sql, "\"");
 }
 
-/* For values fractal_hybrid_clinical_search reads back with
- * sqlite3_value_text() (its table_name/vector_col args are strings,
- * not identifiers to resolve) -- a double-quoted sb_sql_ident() there
- * only worked by accident, via SQLite's legacy double-quoted-string
- * fallback for an unresolvable identifier; that fallback is
- * build-dependent (off by default in some SQLite builds), where it
- * fails clean with "no such column: ... - should this be a string
- * literal in single-quotes?". Every caller already passes plain
- * [A-Za-z_][A-Za-z0-9_]* names (da_ident_ok-checked before this is
- * ever reached), so no embedded quote can occur; escaping doubles any
- * anyway for defense in depth. */
+/* For values the search primitives read back with sqlite3_value_text()
+ * (fractal_search_telemetry / fractal_search_trajectory /
+ * fractal_hybrid_clinical_search all take their table/vector-column
+ * arguments as TEXT, not identifiers to resolve) -- a double-quoted
+ * sb_sql_ident() there only works by accident, via SQLite's legacy
+ * double-quoted-string fallback for an unresolvable identifier; that
+ * fallback is build-dependent (off by default in some SQLite builds,
+ * including recent sqlite3 shells), where it fails clean with "no such
+ * column: ... - should this be a string literal in single-quotes?".
+ * sb_sql_ident stays correct ONLY for genuine identifier positions
+ * (FROM clauses, SELECT-list columns). Every caller already passes
+ * plain [A-Za-z_][A-Za-z0-9_]* names (da_ident_ok-checked before this
+ * is ever reached), so no embedded quote can occur; escaping doubles
+ * any anyway for defense in depth. */
 static void sb_sql_lit(StrBuf *sql, const char *lit) {
     sb_puts(sql, "'");
     for (const char *p = lit; *p; p++) {
@@ -422,9 +433,51 @@ static char *da_resolve_id(FsqlState *st, const char *table, const char *id_col,
     return out;
 }
 
+/* Resolves a real rowid (the telemetry/hybrid searches' doc_id -- the
+ * physical row locator, the analog of the server edition's ctid)
+ * directly back to the named id column's value via WHERE rowid = ?1.
+ * No scan-position mapping is needed: the rowid IS the locator. Same
+ * contract as da_resolve_id (NULL = not found, distinguish real errors
+ * by err[0]). */
+static char *da_resolve_rowid(FsqlState *st, const char *table,
+                              const char *id_col, int64_t rowid,
+                              char *err, size_t err_cap) {
+    StrBuf sql; sb_init(&sql);
+    sb_puts(&sql, "SELECT ");
+    sb_sql_ident(&sql, id_col);
+    sb_puts(&sql, " FROM ");
+    sb_sql_ident(&sql, table);
+    sb_puts(&sql, " WHERE rowid = ?1");
+    if (sb_failed(&sql)) {
+        sb_free(&sql);
+        da_set_err(err, err_cap, "fractalsql: out of memory");
+        return NULL;
+    }
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(st->db, sql.buf, -1, &stmt, NULL);
+    sb_free(&sql);
+    if (rc != SQLITE_OK) {
+        da_set_err(err, err_cap, "fractalsql: %s", sqlite3_errmsg(st->db));
+        return NULL;
+    }
+    sqlite3_bind_int64(stmt, 1, (sqlite3_int64)rowid);
+    rc = sqlite3_step(stmt);
+    char *out = NULL;
+    if (rc == SQLITE_ROW) {
+        const unsigned char *t = sqlite3_column_text(stmt, 0);
+        if (t) out = strdup((const char *)t);
+    } else if (rc != SQLITE_DONE) {
+        da_set_err(err, err_cap, "fractalsql: %s", sqlite3_errmsg(st->db));
+    }
+    sqlite3_finalize(stmt);
+    return out;
+}
+
 /* Runs a nearest-1 style search (fractal_search_telemetry or
- * fractal_search_trajectory shape) and extracts doc_id/distance from
- * its top-1 JSON result via json_extract. `fn_sql` is the full
+ * fractal_search_trajectory shape) and extracts the result's doc_id
+ * field (res_field: "doc_id", or "scan_pos" when the caller wants the
+ * result_handle convention rather than the row locator) and distance
+ * from its top-1 JSON result via json_extract. `fn_sql` is the full
  * "fractal_search_X(...)" call text with ?1.. placeholders already
  * substituted by the caller (identifiers pre-validated/quoted; the
  * caller binds any remaining value params before calling this via
@@ -435,12 +488,13 @@ static char *da_resolve_id(FsqlState *st, const char *table, const char *id_col,
 static int da_nearest1(FsqlState *st, const char *fn_sql,
                        void (*bind_extra)(sqlite3_stmt *, void *),
                        void *bind_ctx,
+                       const char *res_field,
                        int64_t *out_doc_id, double *out_dist,
                        char *err, size_t err_cap) {
     StrBuf sql; sb_init(&sql);
-    sb_puts(&sql, "SELECT json_extract(r.j,'$[0].doc_id'), "
-                  "json_extract(r.j,'$[0].distance') "
-                  "FROM (SELECT ");
+    sb_printf(&sql, "SELECT json_extract(r.j,'$[0].%s'), "
+                    "json_extract(r.j,'$[0].distance') "
+                    "FROM (SELECT ", res_field);
     sb_puts(&sql, fn_sql);
     sb_puts(&sql, " AS j) r");
     if (sb_failed(&sql)) {
@@ -473,8 +527,8 @@ static int da_nearest1(FsqlState *st, const char *fn_sql,
     return 0;
 }
 
-/* Builds a JSON array of every row's 0-indexed scan position
- * (row_number() OVER (ORDER BY rowid) - 1), optionally restricted by
+/* Builds a JSON array of the rows' real rowids (the hybrid searches'
+ * doc_id convention), optionally restricted by
  * `filter_col = ?1` (filter_col may be NULL for "every row"). Returns
  * a malloc'd JSON-array TEXT ("[0,1,4,...]", caller frees) or NULL
  * (empty match, not an error) or NULL with err filled on a real
@@ -482,17 +536,15 @@ static int da_nearest1(FsqlState *st, const char *fn_sql,
 static char *da_build_cohort(FsqlState *st, const char *table,
                              const char *filter_col, const char *filter_val,
                              char *err, size_t err_cap) {
-    /* The row_number() MUST be computed over the FULL, unfiltered table
-     * in an inner subquery, with filter_col = ?1 applied only in the
-     * outer query: SQL evaluates WHERE before window functions, so
-     * putting the filter in the SAME FROM clause as the row_number()
-     * call would number only the filtered rows (0, 1, 2, ...) instead
-     * of their true positions in the full table-scan order, silently
-     * building the wrong cohort. */
+    /* The cohort holds the rows' real rowids -- the same physical row
+     * locator the hybrid search's result doc_id reports (the analog of
+     * the server edition's ctid cohort, built with array_agg(ctid)).
+     * A rowid needs no scan-position numbering, so the old
+     * row_number()-over-the-FULL-table subtlety disappears: the filter
+     * can filter directly. */
     StrBuf sql; sb_init(&sql);
-    sb_puts(&sql, "SELECT '[' || group_concat(__doc_id) || ']' FROM "
-                  "(SELECT __doc_id FROM (SELECT row_number() OVER "
-                  "(ORDER BY rowid) - 1 AS __doc_id");
+    sb_puts(&sql, "SELECT '[' || group_concat(__rid) || ']' FROM "
+                  "(SELECT rowid AS __rid");
     if (filter_col) {
         sb_puts(&sql, ", ");
         sb_sql_ident(&sql, filter_col);
@@ -502,7 +554,6 @@ static char *da_build_cohort(FsqlState *st, const char *table,
     sb_sql_ident(&sql, table);
     sb_puts(&sql, ")");
     if (filter_col) sb_puts(&sql, " WHERE __fc = ?1");
-    sb_puts(&sql, ")");
     if (sb_failed(&sql)) {
         sb_free(&sql);
         da_set_err(err, err_cap, "fractalsql: out of memory");
@@ -863,14 +914,15 @@ static void agent_route_task_fn(sqlite3_context *ctx, int argc,
 
     StrBuf fnsql; sb_init(&fnsql);
     sb_puts(&fnsql, "fractal_search_telemetry(");
-    sb_sql_ident(&fnsql, cap_table);
+    sb_sql_lit(&fnsql, cap_table);
     sb_puts(&fnsql, ",");
-    sb_sql_ident(&fnsql, cap_emb_col);
+    sb_sql_lit(&fnsql, cap_emb_col);
     sb_puts(&fnsql, ",?1,1)");
     if (sb_failed(&fnsql)) { sb_free(&fnsql); free(task_json); sqlite3_result_error_nomem(ctx); return; }
     OneText bind = { task_json };
     int64_t doc_id = -1; double dist = 0.0;
-    int rc = da_nearest1(st, fnsql.buf, bind_one_text, &bind, &doc_id, &dist, err, sizeof err);
+    int rc = da_nearest1(st, fnsql.buf, bind_one_text, &bind, "doc_id",
+                         &doc_id, &dist, err, sizeof err);
     sb_free(&fnsql);
     free(task_json);
     if (rc != 0) { da_result_err(ctx, err); return; }
@@ -882,7 +934,10 @@ static void agent_route_task_fn(sqlite3_context *ctx, int argc,
         return;
     }
 
-    char *routed_to = da_resolve_id(st, cap_table, cap_id_col, doc_id, err, sizeof err);
+    /* doc_id is the row's real rowid (the telemetry search's row
+     * locator), so resolve it with a direct rowid predicate -- the
+     * analog of the server edition's direct ctid predicate. */
+    char *routed_to = da_resolve_rowid(st, cap_table, cap_id_col, doc_id, err, sizeof err);
     if (!routed_to && err[0]) { da_result_err(ctx, err); return; }
 
     StrBuf prompt; sb_init(&prompt);
@@ -928,16 +983,16 @@ static void agent_route_task_fn(sqlite3_context *ctx, int argc,
 
 /* ======================================================================
  * Engine D: fractal_agent_outlier_intercept(state_vec, history_table,
- *   emb_col, threshold) -> TEXT JSON {intercepted, reason}
+ *   emb_col, threshold [, metric]) -> TEXT JSON {intercepted, metric, reason}
  * ====================================================================== */
 static void agent_outlier_intercept_fn(sqlite3_context *ctx, int argc,
                                        sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
     char err[512];
-    if (argc != 4) {
+    if (argc != 4 && argc != 5) {
         sqlite3_result_error(ctx,
             "fractal_agent_outlier_intercept(state_vec, history_table, emb_col, "
-            "threshold) expects 4 args", -1);
+            "threshold [, metric]) expects 4 to 5 args", -1);
         return;
     }
     if (sqlite3_value_type(argv[0]) == SQLITE_NULL ||
@@ -947,6 +1002,28 @@ static void agent_outlier_intercept_fn(sqlite3_context *ctx, int argc,
         sqlite3_result_error(ctx,
             "fractal_agent_outlier_intercept: all arguments are required", -1);
         return;
+    }
+    /* The distance metric is an explicit argument. A threshold is
+     * calibrated against one metric, so the metric must be chosen by
+     * the caller. The default is 'cosine', the metric existing callers
+     * were calibrated against. Any other value, including NULL, is a
+     * hard error, never a fallback. */
+    const char *metric = "cosine";
+    if (argc == 5) {
+        if (sqlite3_value_type(argv[4]) == SQLITE_NULL) {
+            sqlite3_result_error(ctx,
+                "fractal_agent_outlier_intercept: metric must be 'cosine' "
+                "or 'l2'", -1);
+            return;
+        }
+        metric = (const char *)sqlite3_value_text(argv[4]);
+        if (!metric || (strcmp(metric, "cosine") != 0 &&
+                        strcmp(metric, "l2") != 0)) {
+            sqlite3_result_error(ctx,
+                "fractal_agent_outlier_intercept: metric must be 'cosine' "
+                "or 'l2'", -1);
+            return;
+        }
     }
     const char *history_table = (const char *)sqlite3_value_text(argv[1]);
     const char *emb_col       = (const char *)sqlite3_value_text(argv[2]);
@@ -975,36 +1052,97 @@ static void agent_outlier_intercept_fn(sqlite3_context *ctx, int argc,
     free(state);
     if (!state_json) { sqlite3_result_error_nomem(ctx); return; }
 
-    StrBuf fnsql; sb_init(&fnsql);
-    sb_puts(&fnsql, "fractal_search_telemetry(");
-    sb_sql_ident(&fnsql, history_table);
-    sb_puts(&fnsql, ",");
-    sb_sql_ident(&fnsql, emb_col);
-    sb_puts(&fnsql, ",?1,1)");
-    if (sb_failed(&fnsql)) { sb_free(&fnsql); free(state_json); sqlite3_result_error_nomem(ctx); return; }
-    OneText bind = { state_json };
-    int64_t doc_id = -1; double dist = 0.0;
-    int rc = da_nearest1(st, fnsql.buf, bind_one_text, &bind, &doc_id, &dist, err, sizeof err);
-    sb_free(&fnsql);
-    free(state_json);
-    if (rc != 0) { da_result_err(ctx, err); return; }
-    if (doc_id < 0) {
-        char msg[256];
-        snprintf(msg, sizeof msg,
-                 "fractal_agent_outlier_intercept: no bad-state rows in %s", history_table);
-        sqlite3_result_error(ctx, msg, -1);
-        return;
+    /* 1. Real Analytics: distance from the proposed state to the
+     * nearest known-bad state in the history table, under the
+     * caller's metric. 'cosine' uses the exact telemetry engine and
+     * works for CSV/JSON-TEXT and fractal_vector BLOB columns. 'l2'
+     * finds the nearest bad state with an exact ORDER BY over the
+     * extension's own fractal_vector_l2_distance function (there is
+     * no operator syntax in SQLite; the function IS the operator),
+     * and the captured rowid — SQLite's physical row locator, the
+     * analog of the server edition's ctid — keeps resolving to the
+     * correct row even if the table is rewritten between the search
+     * and any followup lookup. The telemetry call takes its
+     * table/column names as string values (sb_sql_lit, NOT
+     * identifiers), and the state vector is a bound parameter, so no
+     * caller data is interpolated unquoted. */
+    double dist = 0.0;
+    int64_t doc_id = -1;
+    if (strcmp(metric, "cosine") == 0) {
+        StrBuf fnsql; sb_init(&fnsql);
+        sb_puts(&fnsql, "fractal_search_telemetry(");
+        sb_sql_lit(&fnsql, history_table);
+        sb_puts(&fnsql, ",");
+        sb_sql_lit(&fnsql, emb_col);
+        sb_puts(&fnsql, ",?1,1)");
+        if (sb_failed(&fnsql)) { sb_free(&fnsql); free(state_json); sqlite3_result_error_nomem(ctx); return; }
+        OneText bind = { state_json };
+        int rc = da_nearest1(st, fnsql.buf, bind_one_text, &bind, "doc_id",
+                             &doc_id, &dist, err, sizeof err);
+        sb_free(&fnsql);
+        free(state_json);
+        if (rc != 0) { da_result_err(ctx, err); return; }
+        if (doc_id < 0) {
+            char msg[256];
+            snprintf(msg, sizeof msg,
+                     "fractal_agent_outlier_intercept: no bad-state rows in %s", history_table);
+            sqlite3_result_error(ctx, msg, -1);
+            return;
+        }
+    } else {   /* 'l2', validated above */
+        StrBuf l2sql; sb_init(&l2sql);
+        sb_puts(&l2sql, "SELECT rowid, fractal_vector_l2_distance(");
+        sb_sql_ident(&l2sql, emb_col);
+        sb_puts(&l2sql, ", ?1) AS dist FROM ");
+        sb_sql_ident(&l2sql, history_table);
+        sb_puts(&l2sql, " WHERE ");
+        sb_sql_ident(&l2sql, emb_col);
+        sb_puts(&l2sql, " IS NOT NULL ORDER BY dist LIMIT 1");
+        if (sb_failed(&l2sql)) {
+            sb_free(&l2sql); free(state_json);
+            sqlite3_result_error_nomem(ctx);
+            return;
+        }
+        sqlite3_stmt *lstmt = NULL;
+        int rc = sqlite3_prepare_v2(st->db, l2sql.buf, -1, &lstmt, NULL);
+        sb_free(&l2sql);
+        if (rc == SQLITE_OK) {
+            sqlite3_bind_text(lstmt, 1, state_json, -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(lstmt) == SQLITE_ROW) {
+                dist = sqlite3_column_double(lstmt, 1);
+                doc_id = sqlite3_column_int64(lstmt, 0);
+            }
+        }
+        if (rc != SQLITE_OK) {
+            char l2err[256];
+            snprintf(l2err, sizeof l2err, "fractalsql: %s", sqlite3_errmsg(st->db));
+            sqlite3_finalize(lstmt);
+            free(state_json);
+            da_result_err(ctx, l2err);
+            return;
+        }
+        sqlite3_finalize(lstmt);
+        free(state_json);
+        if (doc_id < 0) {
+            char msg[256];
+            snprintf(msg, sizeof msg,
+                     "fractal_agent_outlier_intercept: no bad-state rows in %s", history_table);
+            sqlite3_result_error(ctx, msg, -1);
+            return;
+        }
     }
 
     int intercepted = dist < threshold;
     StrBuf prompt; sb_init(&prompt);
     sb_printf(&prompt,
-             "Outlier intercept: nearest known-bad state is at cosine distance "
+             "Outlier intercept: nearest known-bad state is at %s distance "
              "%.10f, threshold %.10f, so %s. Justify the decision in one sentence.",
-             dist, threshold, intercepted ? "INTERCEPT" : "allow");
+             metric, dist, threshold, intercepted ? "INTERCEPT" : "allow");
     StrBuf cjson; sb_init(&cjson);
-    sb_printf(&cjson, "{\"threshold\":%.10f,\"intercepted\":%s}",
-             threshold, intercepted ? "true" : "false");
+    sb_printf(&cjson, "{\"threshold\":%.10f,\"metric\":", threshold);
+    sb_json_string(&cjson, metric);
+    sb_printf(&cjson, ",\"intercepted\":%s}",
+             intercepted ? "true" : "false");
     if (sb_failed(&prompt) || sb_failed(&cjson)) {
         sb_free(&prompt); sb_free(&cjson);
         sqlite3_result_error_nomem(ctx);
@@ -1017,8 +1155,10 @@ static void agent_outlier_intercept_fn(sqlite3_context *ctx, int argc,
 
     StrBuf audit; sb_init(&audit);
     sb_printf(&audit, "{\"intercepted\":%s,\"nearest_distance\":%.10f,"
-                      "\"threshold\":%.10f,\"reason\":",
+                      "\"threshold\":%.10f,\"metric\":",
              intercepted ? "true" : "false", dist, threshold);
+    sb_json_string(&audit, metric);
+    sb_puts(&audit, ",\"reason\":");
     sb_json_string(&audit, reason);
     sb_puts(&audit, "}");
     if (!sb_failed(&audit))
@@ -1026,7 +1166,9 @@ static void agent_outlier_intercept_fn(sqlite3_context *ctx, int argc,
     sb_free(&audit);
 
     StrBuf out; sb_init(&out);
-    sb_printf(&out, "{\"intercepted\":%s,\"reason\":", intercepted ? "true" : "false");
+    sb_printf(&out, "{\"intercepted\":%s,\"metric\":", intercepted ? "true" : "false");
+    sb_json_string(&out, metric);
+    sb_puts(&out, ",\"reason\":");
     sb_json_string(&out, reason);
     sb_puts(&out, "}");
     free(reason);
@@ -1109,9 +1251,11 @@ static void agent_recall_hybrid_fn(sqlite3_context *ctx, int argc,
     sb_sql_ident(&sql, id_col);
     sb_puts(&sql, " AS idv, ");
     if (content_col) sb_sql_ident(&sql, content_col); else sb_puts(&sql, "NULL");
-    sb_puts(&sql, " AS cnt, row_number() OVER (ORDER BY rowid) - 1 AS __doc_id FROM ");
+    /* doc_id is the search's row locator (the row's real rowid), so the
+     * join is a direct rowid predicate -- no scan-position mapping. */
+    sb_puts(&sql, " AS cnt, rowid AS __rid FROM ");
     sb_sql_ident(&sql, mem_table);
-    sb_puts(&sql, ") x ON x.__doc_id = json_extract(r.j,'$.doc_id') "
+    sb_puts(&sql, ") x ON x.__rid = json_extract(r.j,'$.doc_id') "
                  "ORDER BY json_extract(r.j,'$.distance')");
     if (sb_failed(&sql)) {
         sb_free(&sql); free(cohort); free(qv_json);
@@ -1201,15 +1345,17 @@ static void agent_recommend_diverse_fn(sqlite3_context *ctx, int argc,
     sb_puts(&sql, "SELECT '[' || group_concat(json_object('item_id', x.idv, "
                   "'score', (1.0 - json_extract(r.j,'$.distance')))) || ']' FROM "
                   "(SELECT value AS j FROM json_each(fractal_search_telemetry(");
-    sb_sql_ident(&sql, catalog_table);
+    sb_sql_lit(&sql, catalog_table);
     sb_puts(&sql, ",");
-    sb_sql_ident(&sql, emb_col);
+    sb_sql_lit(&sql, emb_col);
     sb_printf(&sql, ",?1,%d))) r JOIN "
              "(SELECT ", k);
     sb_sql_ident(&sql, id_col);
-    sb_puts(&sql, " AS idv, row_number() OVER (ORDER BY rowid) - 1 AS __doc_id FROM ");
+    /* doc_id is the search's row locator (the row's real rowid), so the
+     * join is a direct rowid predicate -- no scan-position mapping. */
+    sb_puts(&sql, " AS idv, rowid AS __rid FROM ");
     sb_sql_ident(&sql, catalog_table);
-    sb_puts(&sql, ") x ON x.__doc_id = json_extract(r.j,'$.doc_id') "
+    sb_puts(&sql, ") x ON x.__rid = json_extract(r.j,'$.doc_id') "
                  "ORDER BY json_extract(r.j,'$.distance')");
     if (sb_failed(&sql)) { sb_free(&sql); free(qv_json); sqlite3_result_error_nomem(ctx); return; }
     OneText bind = { qv_json };
@@ -1419,9 +1565,11 @@ static void agent_patient_deterioration_triage_fn(sqlite3_context *ctx, int argc
     sb_printf(&sql, ",?1,?2,%d))) r JOIN "
              "(SELECT ", k);
     sb_sql_ident(&sql, id_col);
-    sb_puts(&sql, " AS idv, row_number() OVER (ORDER BY rowid) - 1 AS __doc_id FROM ");
+    /* doc_id is the search's row locator (the row's real rowid), so the
+     * join is a direct rowid predicate -- no scan-position mapping. */
+    sb_puts(&sql, " AS idv, rowid AS __rid FROM ");
     sb_sql_ident(&sql, patient_table);
-    sb_puts(&sql, ") x ON x.__doc_id = json_extract(r.j,'$.doc_id') "
+    sb_puts(&sql, ") x ON x.__rid = json_extract(r.j,'$.doc_id') "
                  "ORDER BY json_extract(r.j,'$.distance')");
     if (sb_failed(&sql) || !qv_json) {
         sb_free(&sql); free(cohort); free(qv_json);
@@ -1458,9 +1606,9 @@ static void agent_patient_deterioration_triage_fn(sqlite3_context *ctx, int argc
     free(bv); free(cv);
     StrBuf trajsql; sb_init(&trajsql);
     sb_puts(&trajsql, "fractal_search_trajectory(");
-    sb_sql_ident(&trajsql, patient_table);
+    sb_sql_lit(&trajsql, patient_table);
     sb_puts(&trajsql, ",");
-    sb_sql_ident(&trajsql, vec_col);
+    sb_sql_lit(&trajsql, vec_col);
     sb_puts(&trajsql, ",?1,?2,1)");
     if (sb_failed(&trajsql) || !bv_json || !cv_json) {
         sb_free(&trajsql); free(bv_json); free(cv_json); free(matches); free(resolved_id);
@@ -1469,8 +1617,8 @@ static void agent_patient_deterioration_triage_fn(sqlite3_context *ctx, int argc
     }
     TwoText tbind = { bv_json, cv_json };
     int64_t traj_doc = -1; double traj_dist = 0.0;
-    int rc = da_nearest1(st, trajsql.buf, bind_two_text, &tbind, &traj_doc, &traj_dist,
-                         err, sizeof err);
+    int rc = da_nearest1(st, trajsql.buf, bind_two_text, &tbind, "doc_id",
+                         &traj_doc, &traj_dist, err, sizeof err);
     sb_free(&trajsql); free(bv_json); free(cv_json);
     if (rc != 0) { free(matches); free(resolved_id); da_result_err(ctx, err); return; }
 
@@ -1602,9 +1750,9 @@ static void agent_feedback_audit_fn(sqlite3_context *ctx, int argc,
                     if (!vtxt) continue;
                     StrBuf tsql; sb_init(&tsql);
                     sb_puts(&tsql, "SELECT fractal_search_telemetry(");
-                    sb_sql_ident(&tsql, catalog_table);
+                    sb_sql_lit(&tsql, catalog_table);
                     sb_puts(&tsql, ",");
-                    sb_sql_ident(&tsql, emb_col);
+                    sb_sql_lit(&tsql, emb_col);
                     sb_printf(&tsql, ",?1,%d)", k);
                     if (!sb_failed(&tsql)) {
                         sqlite3_stmt *tstmt = NULL;
@@ -1631,14 +1779,20 @@ static void agent_feedback_audit_fn(sqlite3_context *ctx, int argc,
     if (!qv_json) { sqlite3_result_error_nomem(ctx); return; }
     StrBuf tsql; sb_init(&tsql);
     sb_puts(&tsql, "fractal_search_telemetry(");
-    sb_sql_ident(&tsql, catalog_table);
+    sb_sql_lit(&tsql, catalog_table);
     sb_puts(&tsql, ",");
-    sb_sql_ident(&tsql, emb_col);
+    sb_sql_lit(&tsql, emb_col);
     sb_puts(&tsql, ",?1,1)");
     if (sb_failed(&tsql)) { sb_free(&tsql); free(qv_json); sqlite3_result_error_nomem(ctx); return; }
     OneText bind = { qv_json };
     int64_t target_doc = -1; double target_dist = 0.0;
-    int rc = da_nearest1(st, tsql.buf, bind_one_text, &bind, &target_doc, &target_dist,
+    /* The audit target feeds fractal_isolate_background, which expects
+     * the result_handle convention (the 0-indexed scan position), NOT
+     * the rowid doc_id -- so read scan_pos here (pg parity: the
+     * server edition's feedback_audit reads scan_pos after its ctid
+     * remap for exactly the same reason). */
+    int rc = da_nearest1(st, tsql.buf, bind_one_text, &bind, "scan_pos",
+                         &target_doc, &target_dist,
                          err, sizeof err);
     sb_free(&tsql); free(qv_json);
     if (rc != 0) { da_result_err(ctx, err); return; }
@@ -1753,14 +1907,15 @@ static void agent_schedule_workload_fn(sqlite3_context *ctx, int argc,
     /* 2. Nearest node to the refined task vector. */
     StrBuf fnsql; sb_init(&fnsql);
     sb_puts(&fnsql, "fractal_search_telemetry(");
-    sb_sql_ident(&fnsql, node_table);
+    sb_sql_lit(&fnsql, node_table);
     sb_puts(&fnsql, ",");
-    sb_sql_ident(&fnsql, node_emb_col);
+    sb_sql_lit(&fnsql, node_emb_col);
     sb_puts(&fnsql, ",?1,1)");
     if (sb_failed(&fnsql)) { sb_free(&fnsql); free(refined_json); sqlite3_result_error_nomem(ctx); return; }
     OneText bind = { refined_json };
     int64_t doc_id = -1; double dist = 0.0;
-    int rc = da_nearest1(st, fnsql.buf, bind_one_text, &bind, &doc_id, &dist, err, sizeof err);
+    int rc = da_nearest1(st, fnsql.buf, bind_one_text, &bind, "doc_id",
+                         &doc_id, &dist, err, sizeof err);
     sb_free(&fnsql); free(refined_json);
     if (rc != 0) { da_result_err(ctx, err); return; }
     if (doc_id < 0) {
@@ -1771,7 +1926,10 @@ static void agent_schedule_workload_fn(sqlite3_context *ctx, int argc,
         return;
     }
 
-    char *assigned = da_resolve_id(st, node_table, node_id_col, doc_id, err, sizeof err);
+    /* doc_id is the row's real rowid (the telemetry search's row
+     * locator), so resolve it with a direct rowid predicate -- the
+     * analog of the server edition's direct ctid predicate. */
+    char *assigned = da_resolve_rowid(st, node_table, node_id_col, doc_id, err, sizeof err);
     if (!assigned && err[0]) { da_result_err(ctx, err); return; }
 
     StrBuf prompt; sb_init(&prompt);
@@ -1902,9 +2060,9 @@ static void agent_rebalance_sibling_fn(sqlite3_context *ctx, int argc,
 
     StrBuf trajsql; sb_init(&trajsql);
     sb_puts(&trajsql, "fractal_search_trajectory(");
-    sb_sql_ident(&trajsql, alloc_table);
+    sb_sql_lit(&trajsql, alloc_table);
     sb_puts(&trajsql, ",");
-    sb_sql_ident(&trajsql, alloc_emb_col);
+    sb_sql_lit(&trajsql, alloc_emb_col);
     sb_puts(&trajsql, ",?1,?2,1)");
     if (sb_failed(&trajsql) || !bv_json) {
         sb_free(&trajsql); free(bv_json); free(opt); free(weights_vec_json);
@@ -1913,8 +2071,8 @@ static void agent_rebalance_sibling_fn(sqlite3_context *ctx, int argc,
     }
     TwoText tbind = { bv_json, weights_vec_json };
     int64_t nearest_doc = -1; double nearest_dist = 0.0;
-    int rc = da_nearest1(st, trajsql.buf, bind_two_text, &tbind, &nearest_doc, &nearest_dist,
-                         err, sizeof err);
+    int rc = da_nearest1(st, trajsql.buf, bind_two_text, &tbind, "doc_id",
+                         &nearest_doc, &nearest_dist, err, sizeof err);
     sb_free(&trajsql); free(bv_json);
     if (rc != 0) { free(opt); free(weights_vec_json); da_result_err(ctx, err); return; }
     if (nearest_doc < 0) {
@@ -2030,9 +2188,9 @@ static void agent_detour_classify_fn(sqlite3_context *ctx, int argc,
 
     StrBuf trajsql; sb_init(&trajsql);
     sb_puts(&trajsql, "fractal_search_trajectory(");
-    sb_sql_ident(&trajsql, vehicle_table);
+    sb_sql_lit(&trajsql, vehicle_table);
     sb_puts(&trajsql, ",");
-    sb_sql_ident(&trajsql, emb_col);
+    sb_sql_lit(&trajsql, emb_col);
     sb_puts(&trajsql, ",?1,?2,1)");
     if (sb_failed(&trajsql) || !bv_json || !cv_json) {
         sb_free(&trajsql); free(bv_json); free(cv_json);
@@ -2041,8 +2199,8 @@ static void agent_detour_classify_fn(sqlite3_context *ctx, int argc,
     }
     TwoText tbind = { bv_json, cv_json };
     int64_t nearest_doc = -1; double nearest_dist = 0.0;
-    int rc = da_nearest1(st, trajsql.buf, bind_two_text, &tbind, &nearest_doc, &nearest_dist,
-                         err, sizeof err);
+    int rc = da_nearest1(st, trajsql.buf, bind_two_text, &tbind, "doc_id",
+                         &nearest_doc, &nearest_dist, err, sizeof err);
     sb_free(&trajsql); free(bv_json); free(cv_json);
     if (rc != 0) { da_result_err(ctx, err); return; }
     if (nearest_doc < 0) {
@@ -2172,9 +2330,9 @@ static void agent_track_anomaly_fn(sqlite3_context *ctx, int argc,
 
     StrBuf trajsql; sb_init(&trajsql);
     sb_puts(&trajsql, "fractal_search_trajectory(");
-    sb_sql_ident(&trajsql, track_table);
+    sb_sql_lit(&trajsql, track_table);
     sb_puts(&trajsql, ",");
-    sb_sql_ident(&trajsql, emb_col);
+    sb_sql_lit(&trajsql, emb_col);
     sb_puts(&trajsql, ",?1,?2,1)");
     if (sb_failed(&trajsql) || !bv_json || !cv_json) {
         sb_free(&trajsql); free(bv_json); free(cv_json);
@@ -2183,8 +2341,8 @@ static void agent_track_anomaly_fn(sqlite3_context *ctx, int argc,
     }
     TwoText tbind = { bv_json, cv_json };
     int64_t nearest_doc = -1; double nearest_dist = 0.0;
-    int rc = da_nearest1(st, trajsql.buf, bind_two_text, &tbind, &nearest_doc, &nearest_dist,
-                         err, sizeof err);
+    int rc = da_nearest1(st, trajsql.buf, bind_two_text, &tbind, "doc_id",
+                         &nearest_doc, &nearest_dist, err, sizeof err);
     sb_free(&trajsql); free(bv_json); free(cv_json);
     if (rc != 0) { da_result_err(ctx, err); return; }
     if (nearest_doc < 0) {
@@ -2649,6 +2807,7 @@ int fsql_domain_agents_register(sqlite3 *db, FsqlState *st) {
         { "fractal_agent_allocate",                      -1, agent_allocate_fn                      },
         { "fractal_agent_route_task",                    -1, agent_route_task_fn                    },
         { "fractal_agent_outlier_intercept",               4, agent_outlier_intercept_fn             },
+        { "fractal_agent_outlier_intercept",               5, agent_outlier_intercept_fn             },
         { "fractal_agent_recall_hybrid",                 -1, agent_recall_hybrid_fn                 },
         { "fractal_agent_recommend_diverse",             -1, agent_recommend_diverse_fn             },
         { "fractal_agent_data_analyst",                  -1, agent_data_analyst_fn                  },

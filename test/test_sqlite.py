@@ -5,7 +5,7 @@ Exercises the three assertions every release must pass:
 
     1. The extension loads.
     2. fractalsql_edition() returns 'Community'.
-       fractalsql_version() returns '2.0.0'.
+       fractalsql_version() returns '2.0.4'.
     3. fractal_search(vector, query) returns a sensible distance
        ordering: the vector literally equal to the query scores a
        small distance; random far-away vectors score a larger one
@@ -46,7 +46,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 EXPECTED_EDITION = "Community"
-EXPECTED_VERSION = "2.0.0"
+EXPECTED_VERSION = "2.0.4"
 
 
 def find_extension() -> Path:

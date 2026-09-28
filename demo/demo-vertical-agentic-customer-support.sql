@@ -10,8 +10,8 @@
 --     in SQLite.)
 --   * fractal_search_explore                   -- pure-C Scout search on a literal vector
 --   * hybrid cohort recall blueprint    -- the fractal_agent_recall_hybrid
---                                         composition (hybrid search + doc_id
---                                         -> row key mapping)
+--                                         composition (hybrid search + rowid
+--                                         doc_id join)
 --   * recommend_diverse blueprint       -- the fractal_agent_recommend_diverse
 --                                         composition (diversify + telemetry)
 --   * fractal_diversify_enable
@@ -98,23 +98,19 @@ SELECT fractal_agent_trajectory_predict('customer_sessions', 'state_vector',
            AS forecast;
 
 -- 6. Hybrid Memory Recall (the recall_hybrid composition: cohort-restricted
--- hybrid search over the playbook, doc_id mapped back to case_id)
+-- hybrid search over the playbook, doc_id IS the rowid)
 -- Recall past playbook cases whose state vector, at intervention time, was
 -- close to this customer's current drifting state (session 103).
 .print
 .print === 6. Hybrid memory recall over the playbook ===
 WITH hs AS (SELECT fractal_hybrid_clinical_search(
                     'customer_playbook', 'state_vector', '0.8,0.2,0.1',
-                    (SELECT group_concat(pos, ',') FROM
-                       (SELECT row_number() OVER (ORDER BY rowid) - 1 AS pos
-                          FROM customer_playbook)), 5) AS rj)
+                    (SELECT group_concat(rowid, ',') FROM customer_playbook), 5) AS rj)
 SELECT m.case_id  AS mem_id,
        m.resolution AS content
   FROM hs, json_each(hs.rj) je
-  JOIN (SELECT case_id, resolution,
-               (row_number() OVER (ORDER BY rowid) - 1) AS doc_id
-          FROM customer_playbook) m
-    ON m.doc_id = json_extract(je.value, '$.doc_id')
+  JOIN customer_playbook m
+    ON m.rowid = json_extract(je.value, '$.doc_id')
  ORDER BY json_extract(je.value, '$.distance');
 .print --- the shipped agent: same composition, one call ---
 SELECT fractal_agent_recall_hybrid(
@@ -136,8 +132,8 @@ SELECT value AS particle
 
 -- 8. Diverse Recommendations (the recommend_diverse composition)
 -- Repulsion-diverse top-k retention offers for this customer's current
--- state. item_id is the REAL catalog id (doc_id resolved back via the
--- rowid ordering); score is 1-cosine_distance (real, from the primitive).
+-- state. item_id is the REAL catalog id (doc_id IS the rowid); score is
+-- 1-cosine_distance (real, from the primitive).
 .print
 .print === 8. Repulsion-diverse retention offers ===
 WITH t AS (SELECT json_extract(value, '$.doc_id')   AS doc_id,
@@ -148,8 +144,7 @@ SELECT m.item_id     AS item_id,
        m.name        AS name,
        1.0 - t.dist  AS score
 FROM t
-JOIN (SELECT item_id, name, (row_number() OVER (ORDER BY rowid) - 1) AS doc_id
-        FROM product_catalog) m USING (doc_id)
+JOIN product_catalog m ON m.rowid = t.doc_id
 ORDER BY t.dist;
 .print --- the shipped agent: same composition, one call ---
 SELECT fractal_agent_recommend_diverse('product_catalog', 'emb', '0.8,0.2,0.1', 5, 'item_id');
