@@ -50,7 +50,7 @@ sqlite3 :memory: \
 You should see:
 
 ```
-Community|2.0.0
+Community|2.0.4
 ```
 
 > **No `sqlite3` on your host?** Any SQLite host that permits
@@ -228,7 +228,7 @@ sudo dnf install ./fractalsql-sqlite-*.rpm   # or: sudo zypper install ./fractal
 ```
 
 ```powershell
-# Windows: run the matching .msi (e.g. FractalSQL-SQLite-2.0.0-x64.msi)
+# Windows: run the matching .msi (e.g. FractalSQL-SQLite-2.0.4-x64.msi)
 # It installs to C:\Program Files\FractalSQL\fractalsql.dll.
 ```
 
@@ -247,7 +247,7 @@ On **macOS** there is no `.deb`/`.rpm` equivalent, so releases ship a
 per-arch tarball:
 
 ```bash
-tar xzf fractalsql-sqlite-2.0.0-darwin-arm64.tar.gz
+tar xzf fractalsql-sqlite-2.0.4-darwin-arm64.tar.gz
 sudo mkdir -p /usr/local/lib/sqlite3
 sudo install -m0755 fractalsql.dylib /usr/local/lib/sqlite3/
 sudo install -m0755 fractalsql-reasoning-http.so /usr/local/lib/sqlite3/

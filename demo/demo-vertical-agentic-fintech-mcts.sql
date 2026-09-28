@@ -146,18 +146,16 @@ SELECT fractal_sql_agent(
 -- n_assets^2 -- the 2x2 identity here is '1,0,0,1' row-major, see
 -- demo-vertical-quant-finance.sql for the pattern at real scale), then finds
 -- the nearest prior allocation to an equal-weight baseline via
--- fractal_search_telemetry (doc_id mapped back to alloc_id), then reasons
--- over both.
+-- fractal_search_trajectory (baseline -> optimizer weights; doc_id is a
+-- 0-indexed scan position, mapped back to alloc_id), then reasons over both.
 .print
 .print === 7. Portfolio rebalance (optimizer + nearest prior allocation) ===
 WITH opt AS (SELECT fractal_optimize_portfolio('0.05,0.1', '1,0,0,1', 2, 42) AS j),
      t AS (SELECT json_extract(value, '$.doc_id')   AS doc_id,
                   json_extract(value, '$.distance') AS dist
-             FROM json_each(fractal_search_telemetry(
-                      'historical_allocations', 'weights',
-                      (SELECT json_extract(j, '$.weights') FROM opt), 5))
-            ORDER BY json_extract(value, '$.distance')
-            LIMIT 1)
+             FROM json_each(fractal_search_trajectory(
+                    'historical_allocations', 'weights', '0.5,0.5',
+                    (SELECT json_extract(j, '$.weights') FROM opt), 1)))
 SELECT (SELECT json_extract(j, '$.sharpe') FROM opt)   AS sharpe,
        (SELECT json_extract(j, '$.weights') FROM opt)  AS weights,
        m.alloc_id     AS nearest_alloc_id,
@@ -167,9 +165,7 @@ JOIN (SELECT alloc_id, (row_number() OVER (ORDER BY rowid) - 1) AS doc_id
         FROM historical_allocations) m USING (doc_id);
 .print --- rationale (fractal_reason over both halves) ---
 SELECT fractal_reason('one-line rebalance rationale for this portfolio');
-.print --- the shipped agent: same idea, one call (fractal_search_trajectory's
-.print baseline->current drift in place of the blueprint's plain telemetry
-.print search on the optimizer's own weights) ---
+.print --- the shipped agent: same composition, one call ---
 SELECT fractal_agent_rebalance_sibling(
     '0.05,0.1', '1,0,0,1', 2, 'historical_allocations', 'weights', '0.5,0.5', 42, 5, 'alloc_id');
 

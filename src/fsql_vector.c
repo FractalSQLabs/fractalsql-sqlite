@@ -338,6 +338,154 @@ static void fv_normalize_fn(sqlite3_context *ctx, int argc,
     free(out);
 }
 
+/* fractal_vector_lp_distance(a, b, p) -> REAL. p == 2 matches
+ * fractal_vector_l2_distance mathematically but not bit-for-bit (core's
+ * own doc note: different code path, pow-based double accumulation).
+ * p must be > 0; for 0 < p < 1 the result is a real, correctly-computed
+ * Lp value but the triangle inequality does not hold for that range --
+ * a property of Lp spaces themselves, not an approximation here. */
+static void fv_lp_distance_fn(sqlite3_context *ctx, int argc,
+                              sqlite3_value **argv) {
+    (void)argc;
+    if (sqlite3_value_type(argv[0]) == SQLITE_NULL ||
+        sqlite3_value_type(argv[1]) == SQLITE_NULL ||
+        sqlite3_value_type(argv[2]) == SQLITE_NULL) {
+        sqlite3_result_null(ctx); return;
+    }
+    float *pa = NULL, *pb = NULL; int da = 0, db = 0;
+    int drc = decode_pair(argv[0], argv[1], &pa, &da, &pb, &db);
+    if (drc == -2) {
+        sqlite3_result_error(ctx, "fractalsql: vector dim mismatch", -1);
+        return;
+    }
+    if (drc != 0) {
+        sqlite3_result_error(ctx, "fractalsql: malformed vector", -1);
+        return;
+    }
+    float p = (float)sqlite3_value_double(argv[2]);
+    if (!(p > 0.0f)) {
+        free(pa); free(pb);
+        sqlite3_result_error(ctx, "fractalsql: p must be > 0", -1);
+        return;
+    }
+    float out = 0.0f;
+    int rc = fsql_vector_lp_distance(pa, pb, (size_t)da, p, &out);
+    free(pa); free(pb);
+    if (rc != FSQL_OK) {
+        sqlite3_result_error(ctx, "fractalsql: vector op failed", -1);
+        return;
+    }
+    sqlite3_result_double(ctx, (double)out);
+}
+
+/* fractal_vector_quantize_int8(vec) -> TEXT JSON
+ * {"scale":S,"codes":[...]}. Symmetric per-vector int8 quantization
+ * (4x compression); v[i] ~= codes[i] * scale to dequantize. Plain
+ * JSON, not the canonical float32 BLOB shape (codes are int8, a
+ * different element type entirely -- no existing packed-BLOB
+ * convention for it in this codebase, and the caller needs `scale`
+ * alongside the codes to make any use of them). */
+static void fv_quantize_int8_fn(sqlite3_context *ctx, int argc,
+                                sqlite3_value **argv) {
+    (void)argc;
+    if (sqlite3_value_type(argv[0]) == SQLITE_NULL) {
+        sqlite3_result_null(ctx); return;
+    }
+    float *pa = NULL; int da = 0;
+    if (fsql_vec_decode(argv[0], &pa, &da) != 0) {
+        sqlite3_result_error(ctx, "fractalsql: malformed vector", -1);
+        return;
+    }
+    int8_t *codes = (int8_t *)malloc((size_t)da * sizeof(int8_t));
+    if (!codes) { free(pa); sqlite3_result_error_nomem(ctx); return; }
+    float scale = 0.0f;
+    int rc = fsql_vector_quantize_int8(pa, (size_t)da, codes, &scale);
+    free(pa);
+    if (rc != FSQL_OK) {
+        free(codes);
+        sqlite3_result_error(ctx, "fractalsql: vector op failed", -1);
+        return;
+    }
+    size_t cap = 64 + (size_t)da * 6;
+    char *json = (char *)malloc(cap);
+    if (!json) { free(codes); sqlite3_result_error_nomem(ctx); return; }
+    char *p = json;
+    p += snprintf(p, (size_t)(json + cap - p), "{\"scale\":%.10g,\"codes\":[", (double)scale);
+    for (int i = 0; i < da; i++)
+        p += snprintf(p, (size_t)(json + cap - p), "%s%d", i ? "," : "", (int)codes[i]);
+    snprintf(p, (size_t)(json + cap - p), "]}");
+    free(codes);
+    sqlite3_result_text(ctx, json, -1, SQLITE_TRANSIENT);
+    free(json);
+}
+
+/* fractal_vector_quantize_binary(vec) -> BLOB, (dim+7)/8 bytes, sign
+ * of v[i] packed MSB-first. Plain BLOB (not the canonical float32
+ * shape -- this is packed bits, a different wire format entirely).
+ * Pairs with fractal_vector_hamming_distance below. */
+static void fv_quantize_binary_fn(sqlite3_context *ctx, int argc,
+                                  sqlite3_value **argv) {
+    (void)argc;
+    if (sqlite3_value_type(argv[0]) == SQLITE_NULL) {
+        sqlite3_result_null(ctx); return;
+    }
+    float *pa = NULL; int da = 0;
+    if (fsql_vec_decode(argv[0], &pa, &da) != 0) {
+        sqlite3_result_error(ctx, "fractalsql: malformed vector", -1);
+        return;
+    }
+    size_t nbytes = ((size_t)da + 7) / 8;
+    uint8_t *out = (uint8_t *)malloc(nbytes);
+    if (!out) { free(pa); sqlite3_result_error_nomem(ctx); return; }
+    int rc = fsql_vector_quantize_binary(pa, (size_t)da, out);
+    free(pa);
+    if (rc != FSQL_OK) {
+        free(out);
+        sqlite3_result_error(ctx, "fractalsql: vector op failed", -1);
+        return;
+    }
+    sqlite3_result_blob(ctx, out, (int)nbytes, SQLITE_TRANSIENT);
+    free(out);
+}
+
+/* fractal_vector_hamming_distance(a, b) -> INTEGER. a/b are packed-bit
+ * BLOBs of equal length, as produced by fractal_vector_quantize_binary
+ * -- NOT canonical float32 vectors, so this does not go through
+ * fsql_vec_decode. */
+static void fv_hamming_distance_fn(sqlite3_context *ctx, int argc,
+                                   sqlite3_value **argv) {
+    (void)argc;
+    if (sqlite3_value_type(argv[0]) == SQLITE_NULL ||
+        sqlite3_value_type(argv[1]) == SQLITE_NULL) {
+        sqlite3_result_null(ctx); return;
+    }
+    if (sqlite3_value_type(argv[0]) != SQLITE_BLOB ||
+        sqlite3_value_type(argv[1]) != SQLITE_BLOB) {
+        sqlite3_result_error(ctx,
+            "fractalsql: fractal_vector_hamming_distance expects two "
+            "packed-bit BLOBs (see fractal_vector_quantize_binary)", -1);
+        return;
+    }
+    int na = sqlite3_value_bytes(argv[0]);
+    int nb = sqlite3_value_bytes(argv[1]);
+    if (na != nb || na <= 0) {
+        sqlite3_result_error(ctx,
+            "fractalsql: fractal_vector_hamming_distance: BLOBs must be "
+            "non-empty and the same length", -1);
+        return;
+    }
+    size_t out = 0;
+    int rc = fsql_vector_hamming_distance(
+        (const uint8_t *)sqlite3_value_blob(argv[0]),
+        (const uint8_t *)sqlite3_value_blob(argv[1]),
+        (size_t)na, &out);
+    if (rc != FSQL_OK) {
+        sqlite3_result_error(ctx, "fractalsql: vector op failed", -1);
+        return;
+    }
+    sqlite3_result_int64(ctx, (sqlite3_int64)out);
+}
+
 /* ------------------------------------------------------------------
  * Registration
  * ------------------------------------------------------------------ */
@@ -387,6 +535,10 @@ int fsql_vector_register(sqlite3 *db, FsqlState *st) {
         { "fractal_vector_scale",      2, (void *)fv_scale_fn      },
         { "fractal_vector_norm",       1, (void *)fv_norm_fn       },
         { "fractal_vector_normalize",  1, (void *)fv_normalize_fn  },
+        { "fractal_vector_lp_distance",      3, (void *)fv_lp_distance_fn     },
+        { "fractal_vector_quantize_int8",    1, (void *)fv_quantize_int8_fn   },
+        { "fractal_vector_quantize_binary",  1, (void *)fv_quantize_binary_fn },
+        { "fractal_vector_hamming_distance", 2, (void *)fv_hamming_distance_fn},
     };
     for (size_t i = 0; i < sizeof(plain)/sizeof(plain[0]); i++) {
         rc = sqlite3_create_function_v2(db, plain[i].name, plain[i].narg,

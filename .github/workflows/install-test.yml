@@ -290,7 +290,7 @@ jobs:
           VERSION=$("${SQLITE3_BIN}" :memory: ".load /usr/local/lib/sqlite3/fractalsql" "SELECT fractalsql_version();")
           echo "edition=${EDITION} version=${VERSION}"
           test "${EDITION}" = "Community"
-          test "${VERSION}" = "2.0.0"
+          test "${VERSION}" = "2.0.4"
 
           # Search works with no further config.
           "${SQLITE3_BIN}" :memory: \
@@ -384,7 +384,7 @@ jobs:
           VERSION=$(sqlite3 :memory: ".read /usr/local/lib/sqlite3/load_fractalsql.sql" "SELECT fractalsql_version();" | tail -1)
           echo "edition=${EDITION} version=${VERSION}"
           test "${EDITION}" = "Community"
-          test "${VERSION}" = "2.0.0"
+          test "${VERSION}" = "2.0.4"
           echo "ok: easy_install.sh end-to-end (Debian)"
           SCRIPT
           chmod +x test-easy-install.sh

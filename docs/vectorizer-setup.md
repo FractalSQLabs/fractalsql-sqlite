@@ -112,6 +112,10 @@ functions):
 | `fractal_vector_cosine_similarity(a, b)` | same | Cosine *similarity* (1 − cosine distance) |
 | `fractal_vector_norm(a)` / `fractal_vector_normalize(a)` | same | L2 norm / unit vector |
 | `a + b`, `a - b`, `a * s` | `fractal_vector_add(a, b)` / `fractal_vector_sub(a, b)` / `fractal_vector_scale(v, s)` | Element-wise add / subtract / scalar-multiply |
+| `fractal_vector_lp_distance(a, b, p)` | same | Generalized $L_p$ distance, any $p > 0$ (for $0 < p < 1$ this is not a proper metric; use explicitly, never as a silent L2 substitute) |
+| — | `fractal_vector_quantize_int8(a)` | Symmetric int8 quantization, 4x compression, returns `{"scale":S,"codes":[..]}` as TEXT (JSON) |
+| — | `fractal_vector_quantize_binary(a)` | 1-bit quantization, 32x compression, `(dim + 7) / 8` BLOB of MSB-first sign bits |
+| — | `fractal_vector_hamming_distance(a, b)` | Hamming distance between two quantized BLOBs (cheap candidate filtering ahead of a full-precision L2/cosine re-rank) |
 | — | `fractal_vector_dims(v)` / `fractal_vector_to_json(v)` | Dimension / JSON-array dump of a stored vector |
 
 ### Constructors
@@ -128,8 +132,7 @@ SELECT fractal_vector_dims(embedding) FROM docs LIMIT 1;
 Write your embeddings through `fractal_vector_from_text()` (or read them back
 with `fractal_vector_to_json()`), and a wrong-width vector fails decode with a
 clean `malformed vector` error rather than silently poisoning the index. See
-the dimension-mismatch assertions in `demo/demo-fractal-vector.sql`, already
-adapted to this integration's real syntax (not carried over unmodified from the original port).
+the dimension-mismatch assertions in `demo/demo-fractal-vector.sql`.
 
 ---
 

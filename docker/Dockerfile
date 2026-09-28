@@ -193,9 +193,43 @@ ARG OUTPUT_SUFFIX
 # preinstalls libcurl-minimal, which conflicts with full libcurl; this
 # swaps it for the full package (the dnf-documented remedy for exactly
 # this conflict).
+# gcc make curl: the sqlite3-shell build below (the amalgamation needs a
+# compiler and make; curl fetches it).
 RUN dnf install -y --setopt=install_weak_deps=False --allowerasing \
-        sqlite python3 python3-pip libcurl \
+        gcc make curl sqlite python3 python3-pip libcurl \
  && dnf clean all
+# Rocky 9's `sqlite` package is 3.34.1 — too old for two things the demo
+# corpus uses, and neither is fixable from an extension:
+#   * the built-in math functions the fixtures call directly
+#     (SQLITE_ENABLE_MATH_FUNCTIONS, SQLite >= 3.35),
+#   * ORDER BY inside an aggregate (group_concat(x ORDER BY ...),
+#     SQLite >= 3.44 — used throughout the demo fixtures and text-to-sql
+#     spool patterns).
+# (The extension itself registers only sin/sqrt/cos — see
+# fractalsql_sqlite.c — so the demo fixtures stay self-contained on
+# those hosts; a parser feature like aggregate ORDER BY is beyond that
+# mechanism.) Build a current shell from the sqlite.org amalgamation
+# into /usr/local/bin, which precedes /usr/bin in PATH. This also puts
+# sqlite3_stmt_readonly()'s data-modifying-CTE handling (>= 3.35) in
+# place for the text-to-sql allowlist demos. The extension .so is
+# unaffected: it takes its SQLite API through the sqlite3_api_routines
+# pointer of whatever host it loads into.
+RUN set -eux; \
+    SQLITE_VER=3450100; \
+    curl -fsSL "https://www.sqlite.org/2024/sqlite-autoconf-${SQLITE_VER}.tar.gz" \
+        -o /tmp/sqlite-autoconf.tgz; \
+    tar -xzf /tmp/sqlite-autoconf.tgz -C /tmp; \
+    cd "/tmp/sqlite-autoconf-${SQLITE_VER}"; \
+    ./configure --prefix=/usr/local --disable-readline --disable-editline \
+        CFLAGS="-O2 -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_FTS5"; \
+    make -j"$(nproc)" sqlite3; \
+    cp sqlite3 /usr/local/bin/sqlite3; \
+    /usr/local/bin/sqlite3 --version; \
+    /usr/local/bin/sqlite3 ":memory:" \
+        "SELECT cos(0), sin(0), sqrt(4);"; \
+    /usr/local/bin/sqlite3 ":memory:" \
+        "SELECT group_concat(v ORDER BY v) FROM (SELECT 2 AS v UNION SELECT 1);"; \
+    rm -rf /tmp/sqlite-autoconf*
 COPY --from=builder /fractalsql${OUTPUT_SUFFIX}.so /usr/local/lib/sqlite3/fractalsql.so
 # Bundled reasoning plugin (vendored prebuilt .so from include/). include/
 # carries the plugin for every supported platform (linux-x86_64,

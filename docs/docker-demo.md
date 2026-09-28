@@ -60,7 +60,7 @@ Confirm the extension is alive and which edition it is:
 ```bash
 docker compose exec demo sqlite3 fractalsql_demo.sqlite \
   -init demo_init.sql "SELECT fractalsql_edition(), fractalsql_version();"
-# expect: Community|2.0.0
+# expect: Community|2.0.4
 ```
 
 Run any demo (re-runnable; each recreates its own fixture tables):
@@ -156,7 +156,7 @@ Discovery demos do not.)
 
 ### Level 3: Autonomous Agency
 *Focus: Building self-correcting, safe, and predictive agentic workflows.*
-- **Goal**: Learn to use loop detection (DFA), trajectory prediction, self-correcting SQL agents, and the sixteen installable agents built on top of them — all register at `.load` time, no install step. See [api-agency.md](api-agency.md).
+- **Goal**: Learn to use loop detection (SimHash fingerprints + cycle detection), trajectory prediction, self-correcting SQL agents, and the sixteen installable agents built on top of them — all register at `.load` time, no install step. See [api-agency.md](api-agency.md).
 - **Demos**:
   ```bash
   # DevOps: Autonomous Incident Triage & Self-Healing
@@ -167,6 +167,8 @@ Discovery demos do not.)
   docker compose exec demo sqlite3 fractalsql_demo.sqlite -init demo_init.sql ".read /demo/demo-vertical-agentic-fintech-mcts.sql"
   # Cyber: Threat Detection & Triage
   docker compose exec demo sqlite3 fractalsql_demo.sqlite -init demo_init.sql ".read /demo/demo-vertical-cybersecurity-threat-detection.sql"
+  # Edge Swarm: quantized swarm memory, loop detection, task routing (no reasoning needed)
+  docker compose exec demo sqlite3 fractalsql_demo.sqlite -init demo_init.sql ".read /demo/demo-vertical-agentic-edge-swarm.sql"
   # The sixteen agents (already in the loaded extension — no install step)
   docker compose exec demo sqlite3 fractalsql_demo.sqlite -init demo_init.sql ".read /demo/demo-agents.sql"
   ```
@@ -178,7 +180,10 @@ does and when to use it.
 
 `/demo/` also contains `demo.sql` (the base walkthrough), `response-modes.sql`,
 `demo-text-to-sql.sql`, the `text-to-sql-spike-*.sql` series,
-`demo-fractal-vector.sql`, `benchmark.sql`, `benchmark-api-reference.sql`,
+`demo-fractal-vector.sql`,
+`demo-vertical-biotech-genomics.sql` (TDA + L_p on a cyclic peptide and
+single-cell expression profiles, no reasoning needed),
+`benchmark.sql`, `benchmark-api-reference.sql`,
 and the enterprise-tier `enterprise-qtl-audit.sql` / `enterprise-stress.sql`.
 Run any the same way. `demo/demo-workload.sh` (the sustained concurrent-load
 tester) is also in the image at `/demo/` — it is a bash script, not SQL, so

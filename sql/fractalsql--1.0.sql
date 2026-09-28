@@ -21,12 +21,12 @@
 -- See sql/load_extension.sql for install paths.
 --
 -- ---------------------------------------------------------------------
--- 2. Function surface (2.0.0, Community sovereign build)
+-- 2. Function surface (2.0.4, Community sovereign build)
 -- ---------------------------------------------------------------------
 --
 -- Smoke + search:
 --   fractalsql_edition() -> TEXT                        -- 'Community'
---   fractalsql_version() -> TEXT                        -- '2.0.0'
+--   fractalsql_version() -> TEXT                        -- '2.0.4'
 --   fractal_search(vector, query) -> REAL               -- Sniper, memoized
 --   fractal_search_explore(emb, query[, params]) -> TEXT       -- Scout aggregate
 --
@@ -84,7 +84,10 @@
 --                                                        -> TEXT
 --   fractal_agent_trajectory_predict(table, col, baseline_id,
 --     forecast_steps)                                    -> TEXT
---   fractal_agent_detect_loop(series)                    -> TEXT
+--   fractal_agent_detect_loop(agent_id, state_log, dim
+--     [, n_bits, seed, hamming_threshold])               -> TEXT
+--     (SimHash state fingerprints + Brent's cycle detector, with a
+--      DFA drift check over the per-state L2-norm trajectory)
 --   fractal_search_telemetry(table, col, query, k)       -> TEXT
 --   fractal_search_trajectory(table, col, baseline, current, k)  -> TEXT
 --   fractal_cross_modal_search(tbl, col, morph, clinic, alpha, k)-> TEXT
@@ -100,6 +103,22 @@
 --     current_dq/overhead_p99_us
 --   fractal_feedback_report(handle, kind[, dwell_ms])    -> (null)
 --   fractal_isolate_background(handle)                   -> (null)
+--   fractal_change_point_detect(series, window, threshold
+--     [, max_points])                                    -> TEXT JSON
+--   fractal_periodogram(series[, max_peaks])             -> TEXT JSON
+--   fractal_tda_persistence_diagram(points, dim, max_dim,
+--     max_thresh[, max_h0_bars])                         -> TEXT JSON
+--   fractal_state_fingerprint(vec, n_bits[, seed])       -> BLOB
+--   fractal_cycle_detect(fingerprints_hex_json, n_bits
+--     [, hamming_threshold])                             -> TEXT JSON
+--   fractal_optimize_subset(item_values, upper_bounds, k
+--     [, prev_weights, turnover_penalty, seed])          -> TEXT JSON
+--   fractal_vector_lp_distance(a, b, p)                  -> REAL
+--     (available on BOTH builds: registered in the same TU as the
+--      other fractal_vector_* functions, not the sovereign block)
+--   fractal_vector_quantize_int8(v)                      -> TEXT JSON
+--   fractal_vector_quantize_binary(v)                    -> BLOB
+--   fractal_vector_hamming_distance(a, b)                -> INT
 --   fractal_ledger_flush/load/compact/reset_soft/reset_hard -> TEXT
 --   fractal_ledger_truth_count/shadow_count              -> INT
 --   fractal_ledger_verify([kind])                        -> TEXT JSON

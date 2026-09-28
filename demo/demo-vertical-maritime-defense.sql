@@ -29,11 +29,13 @@
 --     still a hard write-time error.
 --   * The fractal_agent_* preset is a blueprint composition over the
 --     primitives (see demo-agents.sql for the pattern).
---   * doc_id is the row's 0-based position in the search's own scan
---     order, and in SQLite that order IS rowid order (UPDATE keeps a
---     rowid table's physical position on UPDATE);
---     vmd_vessels' rowid aliases its INTEGER PRIMARY KEY id, so doc_id
---     = id - 1 exactly, stable across the section-1 UPDATE.
+--   * telemetry/hybrid doc_id IS the row's rowid (with the raw 0-indexed
+--     scan position alongside as scan_pos); trajectory doc_id stays a
+--     0-indexed scan position, and in SQLite that order IS rowid order
+--     (UPDATE keeps a rowid table's physical position on UPDATE);
+--     vmd_vessels' rowid aliases its INTEGER PRIMARY KEY id, so the
+--     trajectory joins still use doc_id = id - 1 exactly, stable across
+--     the section-1 UPDATE.
 --
 -- Safe to re-run: vmd_* tables are dropped and recreated each time.
 
@@ -138,8 +140,7 @@ WITH t AS (SELECT json_extract(value, '$.doc_id')   AS doc_id,
                       'vmd_vessels', 'current', '0.2,0.2,0.5,0.0', 5)))
 SELECT v.mmsi, t.dist AS distance
 FROM t
-JOIN (SELECT mmsi, (row_number() OVER (ORDER BY rowid) - 1) AS doc_id
-        FROM vmd_vessels) v ON v.doc_id = t.doc_id
+JOIN vmd_vessels v ON v.rowid = t.doc_id
 ORDER BY t.dist;
 
 .print
@@ -167,8 +168,7 @@ SELECT v.id       AS item_id,
        v.mmsi     AS mmsi,
        1.0 - t.dist AS score
 FROM t
-JOIN (SELECT id, mmsi, (row_number() OVER (ORDER BY rowid) - 1) AS doc_id
-        FROM vmd_vessels) v ON v.doc_id = t.doc_id;
+JOIN vmd_vessels v ON v.rowid = t.doc_id;
 SELECT fractal_diversify_disable();
 
 -- ------------------------------------------------------------------

@@ -28,11 +28,13 @@
 --     still a hard write-time error.
 --   * The fractal_agent_* presets are blueprint compositions over the
 --     primitives (see demo-agents.sql for the pattern).
---   * doc_id is the row's 0-based position in the search's own scan
---     order, and in SQLite that order IS rowid order (UPDATE keeps a
---     rowid table's physical position on UPDATE);
---     vfl_vehicles' rowid aliases its INTEGER PRIMARY KEY id, so doc_id
---     = id - 1 exactly, stable across the section-1 UPDATE.
+--   * telemetry/hybrid doc_id IS the row's rowid (with the raw 0-indexed
+--     scan position alongside as scan_pos); trajectory doc_id stays a
+--     0-indexed scan position, and in SQLite that order IS rowid order
+--     (UPDATE keeps a rowid table's physical position on UPDATE);
+--     vfl_vehicles' rowid aliases its INTEGER PRIMARY KEY id, so the
+--     trajectory joins still use doc_id = id - 1 exactly, stable across
+--     the section-1 UPDATE.
 --
 -- Safe to re-run: vfl_* tables are dropped and recreated each time.
 
@@ -120,8 +122,7 @@ SELECT m.id       AS item_id,
        m.van_id   AS van_id,
        1.0 - t.dist AS score
 FROM t
-JOIN (SELECT id, van_id, (row_number() OVER (ORDER BY rowid) - 1) AS doc_id
-        FROM vfl_vehicles) m USING (doc_id)
+JOIN vfl_vehicles m ON m.rowid = t.doc_id
 ORDER BY t.dist;
 SELECT fractal_diversify_disable();
 
@@ -129,11 +130,9 @@ SELECT fractal_diversify_disable();
 -- 3. Cohort-restricted search: "today's route-3 vehicles only" -- a
 -- cohort filter composes by searching a filtered temp table (the same
 -- cohort-then-search shape fractal_hybrid_clinical_search uses
--- internally for its doc_ids allowlist). doc_id is the row's 0-based
--- position in the search's own scan, which for a rowid table is rowid
--- order -- and the temp cohort carries the real ids (SELECT * keeps
--- them), so the row_number mapping below resolves doc_id back to
--- van_id without assuming id - 1.
+-- internally for its doc_ids allowlist). doc_id IS the row's rowid --
+-- and the temp cohort carries the real ids (SELECT * keeps them), so
+-- the rowid join below resolves doc_id back to van_id.
 -- ------------------------------------------------------------------
 .print
 .print === 3. Cohort-restricted search: route-3 vehicles only ===
@@ -148,8 +147,7 @@ WITH t AS (SELECT json_extract(value, '$.doc_id')   AS doc_id,
                       'vfl_route3_cohort', 'current', '0.3,-0.3,0.2,0.1', 5)))
 SELECT v.van_id, t.dist AS distance
 FROM t
-JOIN (SELECT van_id, (row_number() OVER (ORDER BY rowid) - 1) AS doc_id
-        FROM vfl_route3_cohort) v ON v.doc_id = t.doc_id
+JOIN vfl_route3_cohort v ON v.rowid = t.doc_id
 ORDER BY t.dist;
 
 -- ------------------------------------------------------------------

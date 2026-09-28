@@ -112,7 +112,7 @@ fractal_search_telemetry(
     vector_col  text,
     query       TEXT-or-BLOB,
     k           int
-) RETURNS TEXT (JSON)   -- [{"doc_id":..,"distance":..}, ...] in nearest-first order
+) RETURNS TEXT (JSON)   -- [{"doc_id":..,"distance":..,"scan_pos":..}, ...] in nearest-first order
 ```
 
 ### Arguments
@@ -123,7 +123,21 @@ fractal_search_telemetry(
 | `query` | TEXT / BLOB | The target vector. |
 | `k` | `int` | Number of nearest neighbors to return. |
 
-*SQLite difference:* `doc_id` values are the 0-indexed scan positions (`row_number() OVER (ORDER BY rowid) - 1`), not primary keys — see [api-agency.md's id-resolution note](api-agency.md#a-note-on-id-resolution).
+*SQLite difference:* `doc_id` is the row's SQLite `rowid` — a real row
+locator. Resolve back to the row with `WHERE rowid = doc_id` — see
+[api-agency.md's id-resolution note](api-agency.md#a-note-on-id-resolution).
+
+| Field | Description |
+| --- | --- |
+| `doc_id` | The row's SQLite `rowid`: a real row locator. Resolve back to the row with `WHERE rowid = doc_id`. |
+| `distance` | Exact cosine distance from the query (brute-force scan, not approximate). Diversify/Repulsion applies if enabled on the session. |
+| `scan_pos` | The raw 0-indexed position within this call's corpus scan. Distinct from `doc_id`: it identifies a result within this call (for example the `result_handle` argument of `fractal_isolate_background`), not a database row. |
+
+**Why `doc_id` is a `rowid` and not an index.** A SQLite `rowid` is stable
+under `UPDATE` (only `VACUUM` rewrites can renumber) and still resolves to the
+correct row between this search and a followup lookup, unlike a 0-indexed
+scan position. This is the analog of the server edition's `ctid`-based
+`doc_id`.
 
 ---
 
@@ -138,15 +152,33 @@ fractal_hybrid_clinical_search(
     table_name  text,
     vector_col  text,
     query       TEXT-or-BLOB,
-    doc_ids     text,           -- JSON or CSV array of 0-indexed row positions
+    doc_ids     text,           -- JSON or CSV array of rowids
     k           int
-) RETURNS TEXT (JSON)   -- [{"doc_id":..,"distance":..}, ...]
+) RETURNS TEXT (JSON)   -- [{"doc_id":..,"distance":..,"scan_pos":..}, ...]
 ```
 
 ### Arguments
 | Argument | Type | Description |
 | --- | --- | --- |
-| `doc_ids` | `text` | The subset of 0-indexed row positions to search, as a JSON or CSV array (e.g. `SELECT json_group_array(doc_id) FROM ...`). |
+| `doc_ids` | `text` | The cohort: a JSON or CSV array of `rowid`s, computed by ordinary SQL, for example `SELECT json_group_array(rowid) FROM patients WHERE age > 65 AND condition = 'sepsis'`. Deliberately a row-id array rather than a raw SQL filter string, so no dynamic-SQL injection surface exists here. |
+
+`doc_id`, `distance`, and `scan_pos` have the same semantics as
+`fractal_search_telemetry`, with `scan_pos` counted within this call's
+cohort-filtered corpus rather than the whole table. Errors with `doc_ids
+cohort matched no rows` if the cohort matches zero rows.
+
+### Example
+```sql
+SELECT t.doc_id, d.id, t.distance
+  FROM (SELECT value AS j FROM json_each(fractal_hybrid_clinical_search(
+           'patients', 'vitals',
+           '0.4,0.1,0.2',
+           (SELECT json_group_array(rowid)
+              FROM patients WHERE age > 65 AND condition = 'sepsis'),
+           5))) t,
+       json_each(t.j)
+  JOIN patients d ON d.rowid = json_extract(je.value, '$.doc_id');
+```
 
 ---
 
@@ -165,6 +197,10 @@ fractal_search_trajectory(
     k                int
 ) RETURNS TEXT (JSON)   -- [{"doc_id":..,"distance":..}, ...]
 ```
+
+**Note.** `doc_id` here is still the 0-indexed scan position, not the
+rowid. Only `fractal_search_telemetry` and `fractal_hybrid_clinical_search`
+return `doc_id` as the row's `rowid` (plus `scan_pos`).
 
 ### Overloads
 The server edition's `float8[]` and `fractal_vector` overloads collapse into one 5-arg registration here: `fsql_vec_decode` accepts both the CSV/JSON-text and canonical-BLOB forms, and the input storage class picks the arithmetic path (BLOB pair → float32 math, otherwise double math) exactly as the server edition's two bodies did.
@@ -187,6 +223,10 @@ fractal_cross_modal_search(
     k                  int
 ) RETURNS TEXT (JSON)   -- [{"doc_id":..,"distance":..}, ...]
 ```
+
+**Note.** `doc_id` here is still the 0-indexed scan position, not the
+rowid. Only `fractal_search_telemetry` and `fractal_hybrid_clinical_search`
+return `doc_id` as the row's `rowid` (plus `scan_pos`).
 
 ### Arguments
 | Argument | Type | Range | Description |
@@ -257,7 +297,7 @@ registered.
 
 | Argument | Type | Description |
 | --- | --- | --- |
-| `result_handle` | `int` | The 0-based corpus row index the result came from (matches the `doc_id` returned by the telemetry search functions). |
+| `result_handle` | `int` | The 0-based corpus row index the result came from (matches the `scan_pos` returned by the telemetry search functions, not their `doc_id`). |
 | `kind` | `text` | One of `'dwell'`, `'positive'`, `'negative'`. Anything else raises `kind must be one of ...`. |
 | `dwell_ms` | `int` | Optional dwell time in ms (omitted for a bare negative report). |
 

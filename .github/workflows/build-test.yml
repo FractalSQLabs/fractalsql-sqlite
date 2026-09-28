@@ -183,7 +183,7 @@ jobs:
           conn.enable_load_extension(False)
           cur = conn.cursor()
           assert cur.execute("SELECT fractalsql_edition()").fetchone()[0] == "Community"
-          assert cur.execute("SELECT fractalsql_version()").fetchone()[0] == "2.0.0"
+          assert cur.execute("SELECT fractalsql_version()").fetchone()[0] == "2.0.4"
           d = cur.execute("SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0')").fetchone()[0]
           assert abs(d) < 1e-6
           print("asan/ubsan smoke OK")

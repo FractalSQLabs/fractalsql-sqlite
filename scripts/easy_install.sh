@@ -234,14 +234,14 @@ phase_b_install() {
         debian)
             local asset="sqlite3-fractalsql-${ARCH_DEB}.deb"
             log "Downloading ${asset}..."
-            curl -fsSL "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
+            curl -fsSL --proto '=https' "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
             log "sudo apt-get install -y ${TMP_DIR}/${asset}"
             [[ "${DRY_RUN}" -eq 1 ]] || sudo apt-get install -y "${TMP_DIR}/${asset}"
             ;;
         rhel)
             local asset="fractalsql-sqlite-${ARCH_DEB}.rpm"
             log "Downloading ${asset}..."
-            curl -fsSL "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
+            curl -fsSL --proto '=https' "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
             if [[ "${PKG_MGR}" == "zypper" ]]; then
                 # zypper enforces signature checks by default, even for a
                 # locally-supplied file; dnf/yum don't.
@@ -255,7 +255,7 @@ phase_b_install() {
         alpine)
             local asset="fractalsql-sqlite-musl-${ARCH_DEB}.apk"
             log "Downloading ${asset}..."
-            curl -fsSL "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
+            curl -fsSL --proto '=https' "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
             # apk enforces signature checks for locally-supplied files
             # (like zypper), and the community packages are unsigned --
             # hence --allow-untrusted.
@@ -265,7 +265,7 @@ phase_b_install() {
         darwin)
             local asset="fractalsql-sqlite-${INSTALL_VERSION}-darwin-${ARCH_DARWIN}.tar.gz"
             log "Downloading ${asset}..."
-            curl -fsSL "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
+            curl -fsSL --proto '=https' "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
             tar xzf "${TMP_DIR}/${asset}" -C "${TMP_DIR}"
             log "Installing into ${INSTALL_DIR} (sudo)..."
             [[ "${DRY_RUN}" -eq 1 ]] || sudo mkdir -p "${INSTALL_DIR}"
@@ -275,6 +275,9 @@ phase_b_install() {
                 "${TMP_DIR}/${asset%.tar.gz}/fractalsql.dylib" "${INSTALL_DIR}/"
             [[ "${DRY_RUN}" -eq 1 ]] || sudo install -m0755 \
                 "${TMP_DIR}/${asset%.tar.gz}/fractalsql-reasoning-http.so" "${INSTALL_DIR}/"
+            ;;
+        *)
+            die "unsupported OS family: ${OS_FAMILY}"
             ;;
     esac
     ok "Package installed."
@@ -470,6 +473,9 @@ uninstall_flow() {
             fi ;;
         alpine) echo "  To remove the package: sudo apk del fractalsql-sqlite-musl" ;;
         darwin) : ;;  # tarball install: the file removal above is the whole uninstall
+        *)
+            die "unsupported OS family: ${OS_FAMILY}"
+            ;;
     esac
 }
 

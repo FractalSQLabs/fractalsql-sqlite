@@ -34,7 +34,7 @@ Common paths include:
 - **Windows**: `C:\Program Files\FractalSQL\fractalsql-reasoning-http.dll`
 
 ### 2. Technical Requirements
-- **Extension Version**: `fractalsql-sqlite` 2.0.0+ (`SELECT fractalsql_version();`).
+- **Extension Version**: `fractalsql-sqlite` 2.0.4+ (`SELECT fractalsql_version();`).
 - **Plugin Version**: `fractalsql-reasoning-http` v1.2.1+ (required for Response Modes and System Tags).
 - **Host Dependencies**: `libcurl` 7.75.0+ (required for AWS SigV4 auth).
 - **Endpoint**: An LLM provider (Ollama, AWS Bedrock, Azure OpenAI, GCP Vertex, or any OpenAI-compatible API).

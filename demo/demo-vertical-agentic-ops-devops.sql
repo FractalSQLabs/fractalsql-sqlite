@@ -2,10 +2,12 @@
 -- FractalSQL Industry Vertical Demo: Autonomous Incident Triage & Self-Healing
 -- =============================================================================
 -- End-to-end demo for the embed-coupled agents. Exercises:
---   * fractal_agent_detect_loop   -- period-2 loop detection (a REAL installed
---                                    agent function; the state_hash toggle
---                                    flags via the short-period check even
---                                    though its DFA alpha is ~0.04)
+--   * fractal_agent_detect_loop   -- period-2 loop detection via SimHash +
+--                                    Brent's cycle detection (the state_hash
+--                                    toggle, one-hot encoded into
+--                                    2-dimensional directions, flags via the
+--                                    fingerprint-cycle check even though its
+--                                    DFA alpha is 0)
 --   * fractal_search_agent        -- real call, gated on the reasoning plugin
 --                                    (clean hint without one; without the
 --                                    plugin the analytic sections still run)
@@ -55,8 +57,10 @@ CREATE TABLE incident_logs (
 
 -- Simulate a deployment bot stuck in an infinite retry loop: the state_hash
 -- toggles 12345<->67890 every cycle (a clean period-2 sequence -- detect_loop
--- flags it via the short-period check even though its DFA alpha is ~0.04,
--- well below the 0.9 threshold). The latency_ms series is a genuinely
+-- flags it via the fingerprint-cycle check even though its DFA alpha is 0,
+-- well below the 0.9 threshold; see section 4 below for the one-hot
+-- encoding the new state-vector signature needs). The latency_ms series is
+-- a genuinely
 -- drifting (non-degenerate) signal -- a baseline ~50ms for the first 64
 -- cycles, then a +30ms step-up over the most recent 32 cycles (the loop
 -- degrading latency) -- so fractal_dimension_drift succeeds with a 32-point
@@ -92,7 +96,13 @@ INSERT INTO incident_logs (id, agent_id, state_hash, latency_ms, body, event_ts,
 -- way the script completes.
 .print === 2. Vectorize the incident body text ===
 SELECT fractal_vectorizer_create('incident_logs', 'body', 'embedding') AS vectorizer_id;
-SELECT fractal_vectorizer_process_queue();   -- returns the number of rows embedded
+-- Each process_queue call claims at most ~85 queue ids (the claim's
+-- id-list SQL renders into a 2 KiB scratch, 21 bytes per id), so the
+-- 96-cycle corpus needs two passes; drain until it returns 0.
+.print --- pass 1 (claims the first ~85 ids) ---
+SELECT fractal_vectorizer_process_queue();
+.print --- drain pass (the remainder) ---
+SELECT fractal_vectorizer_process_queue();
 
 -- 3. Setup capabilities map for routing
 CREATE TABLE agent_capabilities (
@@ -120,21 +130,45 @@ INSERT INTO known_bad_states (state_id, description, state_vec) VALUES
 -- DEMONSTRATION
 -- -----------------------------------------------------------------------------
 
--- 4. Loop Detection via DFA + short-period check
--- The state_hash sequence is a clean 12345<->67890 period-2 toggle. Its DFA
--- scaling exponent is ~0.04 (below the 0.9 threshold), so the DFA path alone
--- would NOT flag it -- but the short-period check does. Result:
--- is_loop_detected = true.
+-- 4. Loop Detection via SimHash-fingerprinted cycle detection + DFA
+-- (fractal_agent_detect_loop now fingerprints real state vectors and
+-- streams them through Brent's cycle detector, rather than an exact-hash
+-- period scan). fsql_state_fingerprint is a cosine/direction-based SimHash
+-- (consistent with this whole extension's cosine-distance search
+-- functions) -- it is invariant to magnitude, so a raw scalar state_hash
+-- cast to a 1-dimensional vector would collapse to just its sign (both
+-- 12345 and 67890 are positive, so EVERY same-signed sequence would
+-- false-positive as "looping", not only a genuine toggle). Each state_hash
+-- is instead one-hot encoded into a 2-dimensional direction (12345 ->
+-- [1,0], 67890 -> [0,1]) so the two states are genuinely distinguishable
+-- by direction. The state_hash sequence is a clean 12345<->67890 period-2
+-- toggle, so this one-hot direction toggles cleanly too. Its DFA exponent
+-- over the L2-norm trajectory is 0 (a one-hot vector's norm never
+-- changes), well below the 0.9 threshold, so the DFA signal alone would
+-- NOT flag it -- but the fingerprint-cycle check does (a clean period-2
+-- toggle closes the cycle detector's Hamming-0 checkpoint immediately).
+-- Result: is_loop_detected = true.
 .print
-.print === 4. fractal_agent_detect_loop (period-2 state toggle) ===
+.print === 4. fractal_agent_detect_loop (period-2 state toggle, one-hot directions) ===
 SELECT fractal_agent_detect_loop(
-    '[' || (SELECT group_concat(state_hash ORDER BY event_ts)
-              FROM incident_logs WHERE agent_id = 'bot-deploy-01') || ']')
-           AS loop_scan;
+    'bot-deploy-01',
+    (SELECT '[' || group_concat(v ORDER BY event_ts, dim) || ']'
+       FROM (
+         SELECT event_ts, dim, v FROM (
+           SELECT event_ts, 1 AS dim,
+                  CASE WHEN state_hash = 12345 THEN 1.0 ELSE 0.0 END AS v
+             FROM incident_logs WHERE agent_id = 'bot-deploy-01'
+           UNION ALL
+           SELECT event_ts, 2,
+                  CASE WHEN state_hash = 67890 THEN 1.0 ELSE 0.0 END
+             FROM incident_logs WHERE agent_id = 'bot-deploy-01')
+       )),
+    2) AS loop_scan;
 
 -- 5. Task Routing (the route_task composition)
 -- Real nearest-capability search over agent_capabilities.embedding via
--- fractal_search_telemetry, doc_id mapped back to the named capability;
+-- fractal_search_telemetry, doc_id IS the row's rowid, resolved back to
+-- the named capability by the direct rowid join;
 -- confidence is 1/(1+distance) (real).
 .print
 .print === 5. Task routing over the capability map ===
@@ -148,9 +182,7 @@ SELECT m.capability_name  AS routed_to,
        1.0 / (1.0 + t.dist) AS confidence,
        1000               AS remaining_budget
 FROM t
-JOIN (SELECT capability_name,
-             (row_number() OVER (ORDER BY rowid) - 1) AS doc_id
-        FROM agent_capabilities) m USING (doc_id);
+JOIN agent_capabilities m ON m.rowid = t.doc_id;
 .print --- rationale (fractal_reason) ---
 SELECT fractal_reason('one-line rationale for this task routing decision');
 .print --- the shipped agent: same composition, one call ---

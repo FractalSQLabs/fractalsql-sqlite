@@ -7,7 +7,7 @@
 You have the extension running ([getting-started.md](getting-started.md)). Now:
 **which end-to-end example do I run for *my* problem?**
 
-FractalSQL ships eleven industry walkthroughs: eight **domain
+FractalSQL ships thirteen industry walkthroughs: ten **domain
 verticals** (mostly no-model) and three **agentic
 verticals** (composed multi-step agents, model-on). Each kit is a
 self-contained script: it builds its own synthetic dataset, runs the agents
@@ -15,10 +15,12 @@ that genuinely fit that domain, and closes with a reasoned narrative. They
 are all re-runnable (`DROP TABLE IF EXISTS` at the top of every section) and
 all ship in the repository at `demo/`.
 
-All eleven kits are real, runnable SQLite scripts (`.load` the extension, plain
+All thirteen kits are real, runnable SQLite scripts (`.load` the extension, plain
 `sqlite3` SQL, CSV/JSON vector text). The
-eight domain-vertical kits call the sixteen installable agents by name
-directly; the three agentic kits show the hand-composed blueprint first and,
+ten domain-vertical kits call the sixteen installable agents by name
+directly (the two newest, Biotech/Genomics and Agentic Edge Swarm, are
+raw-primitive showcases and run with no reasoning endpoint at all); the
+three agentic kits show the hand-composed blueprint first and,
 as of the installable agents landing in `src/fsql_domain_agents.c`, a call to
 the shipped agent doing the same composition in one line right after it.
 
@@ -33,7 +35,9 @@ the shipped agent doing the same composition in one line right after it.
 | Maritime / aviation track anomaly | `demo-vertical-maritime-defense.sql` | `fractal_agent_track_anomaly`, `fractal_search_trajectory`, `fractal_dimension_dfa`, Scout | [track_anomaly](api-agency.md#track-anomaly--fractal_agent_track_anomaly) |
 | Fleet logistics / detour detection | `demo-vertical-fleet-logistics.sql` | `fractal_agent_detour_classify`, `fractal_agent_recommend_diverse`, `fractal_search_trajectory`, `fractal_dimension_boxcount` | [detour_classify](api-agency.md#detour-classify--fractal_agent_detour_classify), [recommend_diverse](api-agency.md#recommend-diverse--fractal_agent_recommend_diverse) |
 | Smart cities / IoT sensor grids | `demo-vertical-smart-cities-iot.sql` | `fractal_agent_network_coverage_alert`, `fractal_dimension_dfa`/`_drift`/`_boxcount`, `fractal_morphological_complexity`, Scout | [network_coverage_alert](api-agency.md#network-coverage-alert--fractal_agent_network_coverage_alert) |
-| Cybersecurity / network behavior analytics | `demo-vertical-cybersecurity-threat-detection.sql` | `fractal_agent_track_anomaly`, `fractal_agent_recommend_diverse`, `fractal_search_trajectory`, `fractal_dimension_dfa`/`_drift`, Scout | [track_anomaly](api-agency.md#track-anomaly--fractal_agent_track_anomaly) |
+| Cybersecurity / network behavior analytics | `demo-vertical-cybersecurity-threat-detection.sql` | `fractal_agent_track_anomaly`, `fractal_agent_recommend_diverse`, `fractal_search_trajectory`, `fractal_dimension_dfa`/`_drift`, `fractal_periodogram`, Scout | [track_anomaly](api-agency.md#track-anomaly--fractal_agent_track_anomaly) |
+| Structural biology / single-cell genomics | `demo-vertical-biotech-genomics.sql` | `fractal_tda_persistence_diagram`, `fractal_vector_lp_distance` (raw primitives, no agents) | [api-analytics.md](api-analytics.md#time-series-and-topology) |
+| Edge swarm / robotics coordination | `demo-vertical-agentic-edge-swarm.sql` | `fractal_state_fingerprint` + `fractal_cycle_detect` (via `fractal_agent_detect_loop`), `fractal_vector_quantize_int8`/`_binary` + `fractal_vector_hamming_distance`, `fractal_optimize_subset` | [fractal_agent_detect_loop](api-agency.md#fractal_agent_detect_loop), [api-analytics.md](api-analytics.md#vector-math-and-quantization) |
 | **Agentic:** DevOps / SRE dispatch + safety | `demo-vertical-agentic-ops-devops.sql` | `fractal_agent_route_task`, `fractal_agent_outlier_intercept`, `fractal_agent_anomaly_triage` + `fractal_agent_detect_loop` | [route_task](api-agency.md#route-task--fractal_agent_route_task), [outlier_intercept](api-agency.md#outlier-intercept--fractal_agent_outlier_intercept), [anomaly_triage](api-agency.md#anomaly-triage--fractal_agent_anomaly_triage) |
 | **Agentic:** FinTech portfolio rebalance + MCTS | `demo-vertical-agentic-fintech-mcts.sql` | `fractal_agent_rebalance_sibling`, `fractal_agent_plan_explore`, `fractal_optimize_portfolio` | [rebalance_sibling](api-agency.md#rebalance-sibling--fractal_agent_rebalance_sibling), [plan_explore](api-agency.md#building-blocks-the-six-universal-agents) |
 | **Agentic:** Customer support recall + recommend | `demo-vertical-agentic-customer-support.sql` | `fractal_agent_recall_hybrid`, `fractal_agent_recommend_diverse`, `fractal_agent_trajectory_predict`, Scout | [recall_hybrid](api-agency.md#recall-hybrid--fractal_agent_recall_hybrid), [recommend_diverse](api-agency.md#recommend-diverse--fractal_agent_recommend_diverse) |
@@ -45,10 +49,14 @@ the shipped agent doing the same composition in one line right after it.
 
 ## Domain kits (run with no model)
 
-These eight run almost entirely **without a reasoning endpoint**: only the
-closing `fractal_reason()` narrative needs one, so you can see the
-retrieval/optimization/geometry results immediately and pull a model later
-just for the summary. Four (MedTech, Maritime, Fleet, Cybersecurity) store
+These ten run almost entirely **without a reasoning endpoint**: only the
+closing `fractal_reason()` narrative needs one in the reasoning-bearing
+kits, so you can see the retrieval/optimization/geometry results
+immediately and pull a model later
+just for the summary (the two newest verticals, Biotech/Genomics and
+Agentic Edge Swarm, are raw-primitive showcases with no reasoning
+endpoint at all). Five (MedTech, Maritime, Fleet, Cybersecurity,
+Biotech/Genomics) store
 vectors in the canonical `fractal_vector` BLOB form (add a
 `CHECK (fractal_vector_dims(embedding) = n)` for dimension-drift
 protection). See [vectorizer-setup.md](vectorizer-setup.md).
@@ -56,7 +64,8 @@ protection). See [vectorizer-setup.md](vectorizer-setup.md).
 ### Quantitative Finance — `demo-vertical-quant-finance.sql`
 A 25-asset factor-model portfolio where `fractal_optimize_portfolio` picks the
 best 8, and a 300-point price series with a deliberate volatility regime
-change at t=150 that `fractal_dimension_dfa`/`_drift` detect automatically.
+change at t=150 that `fractal_dimension_dfa`/`_drift` detect automatically and
+`fractal_change_point_detect` localizes to the boundary.
 `fractal_search_trajectory` then finds which of 10 historical quarterly
 rebalances the new allocation most resembles: the productized form is
 `fractal_agent_rebalance_sibling` and `fractal_agent_regime_triage`.
@@ -112,9 +121,32 @@ A 35-host fleet across three zones (4-dim vectors as CSV TEXT / `fractal_vector`
 stealthy compromise: outbound connections, destination ports, and DNS query
 volume all spike while failed-auth stays flat (not a brute-force signature).
 Diverse traffic-profile clustering for threat hunting, a zone-restricted
-("DMZ only") search, compromise detection via `fractal_search_trajectory`, and
-beaconing-onset regime detection via `fractal_dimension_dfa`/`_drift`.
+("DMZ only") search, compromise detection via `fractal_search_trajectory`,
+beaconing-onset regime detection via `fractal_dimension_dfa`/`_drift`, with
+`fractal_periodogram` reading the beacon interval itself out of the
+post-shift traffic.
 Productized form: `fractal_agent_track_anomaly` and `fractal_agent_recommend_diverse`.
+
+### Biotech / Structural Biology & Genomics — `demo-vertical-biotech-genomics.sql`
+A 40-residue synthetic cyclic peptide backbone (Calpha coordinates traced
+around a closed ring in 3D) analyzed by `fractal_tda_persistence_diagram`:
+exact 0-dim persistence (cluster birth/death bars) plus the graph-cycle-rank
+Betti-1, which flags the closed loop the shape actually has. Then
+`fractal_vector_lp_distance` over synthetic scRNA-seq-style per-cell
+expression vectors (`fractal_vector(32)`), contrasting p=2 Euclidean against
+a fractional p=0.5 (sharper high-dimensionality contrast) between two related
+cell states. Raw primitives only, no reasoning endpoint needed.
+
+### Agentic Edge / Robotics Swarm — `demo-vertical-agentic-edge-swarm.sql`
+A battery- and bandwidth-constrained 20-node edge swarm:
+`fractal_vector_quantize_int8` (4x) and `_quantize_binary` (32x) for
+compressed peer-state memory with `fractal_vector_hamming_distance` as the
+cheap candidate filter ahead of a full-precision re-rank,
+`fractal_agent_detect_loop` on a node stuck oscillating between two headings
+vs. one genuinely exploring (the SimHash + Brent cycle detector exercised on
+its actual use case), and `fractal_optimize_subset`'s value-weighted
+allocation for battery-constrained task routing. Raw primitives and shipped
+presets only, no reasoning endpoint needed.
 
 ## Agentic kits (model-on, composed agents)
 

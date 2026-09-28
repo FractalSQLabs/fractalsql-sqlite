@@ -514,6 +514,145 @@ FSQL_API int fsql_dimension_drift(const double *series, size_t n, size_t window,
 FSQL_API int fsql_dimension_boxcount(const double *points, size_t n_points,
                                      size_t dim, double *out_dimension);
 
+/* DFA's complement: DFA characterizes long-range correlation
+ * structure, this localizes WHERE a series' mean and/or variance
+ * actually shifted. Sliding two-sample test over adjacent windows of
+ * `window` samples; flags a boundary when the mean differs by more
+ * than `threshold` pooled-stddev units or the variance ratio exceeds
+ * threshold^2. Writes up to max_points ascending boundary indices to
+ * out_indices and the count written to *out_n.
+ *
+ * Returns FSQL_OK on success, FSQL_ERR_INVALID on NULL input,
+ * window==0, n < 2*window, threshold<=0, or max_points==0. */
+FSQL_API int fsql_change_point_detect(const double *series, size_t n, size_t window,
+                                      double threshold, size_t *out_indices,
+                                      size_t max_points, size_t *out_n);
+
+/* Classical periodogram: power at each positive Fourier frequency
+ * k/n (k = 1..floor(n/2)), returning only the `max_peaks` bins with
+ * the highest power (sorted descending) -- what a caller looking for
+ * network-beaconing or retry-loop cadence actually wants, not the
+ * full spectrum. out_freqs[i] is a normalized frequency in (0, 0.5]
+ * (cycles per sample); 1.0 / out_freqs[i] is samples per cycle.
+ *
+ * Returns FSQL_OK on success (*out_n_peaks = min(max_peaks,
+ * floor(n/2))), FSQL_ERR_INVALID on NULL/n<4/max_peaks==0 input,
+ * FSQL_ERR_OOM on allocation failure. */
+FSQL_API int fsql_periodogram(const double *series, size_t n,
+                              double *out_freqs, double *out_power,
+                              size_t max_peaks, size_t *out_n_peaks);
+
+/* ----- Topological Data Analysis (experimental) ---------------------
+ *
+ * Size-capped (FSQL_TDA_MAX_POINTS) 0-dim persistence diagram plus a
+ * graph-theoretic Betti-1 count over a point cloud's Vietoris-Rips
+ * filtration. Read src/fractal_dim/persistence.h's scope note before
+ * using this: the 0-dim diagram (birth/death bars) is an exact,
+ * complete persistence computation, but the Betti-1 number is the
+ * bare 1-skeleton GRAPH's cycle rank, NOT full simplicial H1 of the
+ * Vietoris-Rips complex (a real TDA library like Ripser/GUDHI would
+ * compute the latter via boundary-matrix reduction; this module
+ * deliberately doesn't attempt that). Downstream SQL layers should
+ * gate this behind an explicit experimental opt-in (e.g. a GUC/
+ * pragma), matching this codebase's "new v2.x capabilities default to
+ * sovereign-tier, tiering/experimental-status decisions made at the
+ * SQL layer" convention used throughout this section.
+ *
+ * points: n_points x dim, row-major, 2 <= n_points <=
+ *   FSQL_TDA_MAX_POINTS. max_dim: 0 (birth/death bars only) or 1
+ *   (also computes *out_betti1). max_thresh: filtration cutoff, > 0.
+ *
+ * out_h0_bars: caller-owned, max_h0_bars fsql_tda_bar_t entries,
+ *   sorted by death ascending; *out_n_h0_bars receives the count
+ *   actually written (bars beyond max_h0_bars are dropped from the
+ *   array but still counted internally, so *out_betti1 stays correct
+ *   regardless of the cap).
+ *
+ * Returns FSQL_OK on success, FSQL_ERR_INVALID on invalid input
+ * (including n_points out of range, max_dim not 0/1, max_dim>=1 with
+ * out_betti1==NULL, or any non-finite (NaN/Inf) coordinate),
+ * FSQL_ERR_OOM on allocation failure. */
+#define FSQL_TDA_MAX_POINTS 512
+
+typedef struct fsql_tda_bar {
+    double birth;
+    double death;
+} fsql_tda_bar_t;
+
+FSQL_API int fsql_tda_persistence_diagram(const double *points, size_t n_points, size_t dim,
+                                          int max_dim, double max_thresh,
+                                          fsql_tda_bar_t *out_h0_bars, size_t max_h0_bars,
+                                          size_t *out_n_h0_bars, size_t *out_betti1);
+
+/* ----- State Fingerprinting ----------------------------------------
+ *
+ * Random-hyperplane SimHash: projects a double-precision state vector
+ * onto n_bits random hyperplanes (deterministic from `seed`) and packs
+ * the sign of each projection MSB-first into out ((n_bits + 7) / 8
+ * bytes). Two nearly-identical state vectors collapse to the same or
+ * a very low Hamming-distance fingerprint, unlike an exact hash's
+ * all-or-nothing sensitivity to floating-point noise -- useful for
+ * "have I basically been in this state before" checks (e.g. agent
+ * loop detection) that an exact-match hash is too brittle for.
+ *
+ * Returns FSQL_OK on success, FSQL_ERR_INVALID on NULL/dim==0/
+ * n_bits==0 input. */
+FSQL_API int fsql_state_fingerprint(const double *v, size_t dim, size_t n_bits,
+                                    double seed, uint8_t *out);
+
+/* ----- Cycle Detection -----------------------------------------------
+ *
+ * Streaming Brent's-algorithm cycle detection over a sequence of
+ * fsql_state_fingerprint outputs -- upgrades an exact-hash "have I
+ * seen this exact state before" check into one that catches periodic
+ * loops of any length, tolerating near-identical states via a
+ * Hamming-distance threshold rather than requiring byte-exact
+ * fingerprint matches. See src/diversify/cycle_detect.h for the
+ * online adaptation of the textbook algorithm (fingerprints arrive
+ * one at a time from a live agent, so there is no random access to
+ * "jump ahead" the way the classic algorithm assumes).
+ *
+ * Stateful, unlike this section's other functions -- init once,
+ * fsql_cycle_detect_feed once per fingerprint, free when done. */
+typedef struct fsql_cycle_state {
+    uint8_t *checkpoint;        /* internal: the tortoise's saved fingerprint */
+    size_t   n_bytes;
+    size_t   hamming_threshold; /* max Hamming distance to call two
+                                    fingerprints "the same state" (0 =
+                                    exact match only) */
+    size_t   power;             /* internal: next lam value that triggers
+                                    a checkpoint move */
+    size_t   lam;               /* internal: steps since the last
+                                    checkpoint move */
+    int      has_checkpoint;    /* internal: 0 until the first fingerprint
+                                    is fed */
+} fsql_cycle_state_t;
+
+/* Allocates the internal checkpoint buffer (n_bytes bytes, matching
+ * the fingerprint size fsql_cycle_detect_feed will be called with).
+ * Returns FSQL_OK on success, FSQL_ERR_INVALID on NULL/n_bytes==0
+ * input, FSQL_ERR_OOM on allocation failure. Caller must
+ * fsql_cycle_detect_free when done. */
+FSQL_API int fsql_cycle_detect_init(fsql_cycle_state_t *cs, size_t n_bytes,
+                                    size_t hamming_threshold);
+
+FSQL_API void fsql_cycle_detect_free(fsql_cycle_state_t *cs);
+
+/* Feeds the next fingerprint in the stream (n_bytes bytes, matching
+ * the size passed to fsql_cycle_detect_init). The first call after
+ * init just seeds the checkpoint.
+ *
+ * Returns FSQL_OK with *out_cycle_len left unset if no cycle closed
+ * yet. When a cycle closes (this fingerprint matches the current
+ * checkpoint within the configured Hamming threshold), returns
+ * FSQL_OK, writes the cycle length to *out_cycle_len, AND writes 1 to
+ * *out_detected (0 otherwise) -- the detector then re-arms from this
+ * point so later, independent cycles in the same stream can still be
+ * found. Returns FSQL_ERR_INVALID on NULL/uninitialized-detector
+ * input. */
+FSQL_API int fsql_cycle_detect_feed(fsql_cycle_state_t *cs, const uint8_t *fingerprint,
+                                    int *out_detected, size_t *out_cycle_len);
+
 /* ----- Portfolio Optimization -------------------------------------
  *
  * Cardinality-constrained Sharpe-ratio maximization: "at most k of
@@ -641,6 +780,47 @@ FSQL_API int fsql_optimize_portfolio_multimodal_pareto(const double *mu, const d
                                                         double *out_risks,
                                                         int *out_n_found);
 
+/* Caller-supplied objective over a PROJECTED weight vector: at most k
+ * of n_items nonzero, each in [0, upper_bounds[i]], summing to 1.0.
+ * Lower is better. `ctx` is the caller's opaque cookie, passed through
+ * unchanged. */
+typedef double (*fsql_subset_objective_fn)(const double *weights, size_t n, void *ctx);
+
+/* Generalizes fsql_optimize_portfolio's project-then-evaluate
+ * cardinality-constrained search into a pluggable optimizer: any
+ * scalar objective over a size-n_items, at-most-k-nonzero, sum-to-1
+ * weight vector, subject to explicit per-item upper bounds and an
+ * optional turnover penalty against a reference weight vector.
+ *
+ * lower_bounds/upper_bounds: n_items doubles each, or NULL for the
+ * portfolio default of [0.0, 1.0] per item. lower_bounds[i] is a soft
+ * floor used only for selection scoring -- it is NOT guaranteed to
+ * appear as a minimum in the final weights. upper_bounds[i] IS
+ * enforced exactly via capped-simplex redistribution. Every
+ * 0.0 <= lower_bounds[i] <= upper_bounds[i] <= 1.0 is required, and
+ * the sum of the k largest upper_bounds must reach 1.0 (otherwise no
+ * k-subset can ever sum its weights to 1.0; checked up front).
+ *
+ * prev_weights: n_items doubles, or NULL to disable the turnover
+ * penalty (turnover_penalty is then ignored, must be >= 0.0
+ * otherwise). When set, the search is steered by objective(weights) +
+ * turnover_penalty * sum(|weights[i] - prev_weights[i]|) -- useful for
+ * rebalancing use cases where reallocating has a cost.
+ *
+ * On success (FSQL_OK), *out_weights (caller-owned, n_items doubles)
+ * holds the best projected weight vector found and *out_score holds
+ * objective(*out_weights) alone (the turnover penalty only steers the
+ * search, it is not part of the reported quality metric).
+ *
+ * Returns FSQL_ERR_INVALID on invalid/infeasible input, FSQL_ERR_OOM
+ * on allocation failure. */
+FSQL_API int fsql_optimize_subset(fsql_subset_objective_fn objective, void *objective_ctx,
+                                  size_t n_items, size_t k,
+                                  const double *lower_bounds, const double *upper_bounds,
+                                  const double *prev_weights, double turnover_penalty,
+                                  uint64_t seed,
+                                  double *out_weights, double *out_score);
+
 /* ----- Domain-specific geometric/topological metrics ---------------
  *
  * Full real implementations over PRE-EXTRACTED geometry (vessel
@@ -756,6 +936,25 @@ FSQL_API int fsql_vector_scale(const float *v, size_t dim, float scalar, float *
 FSQL_API int fsql_vector_weighted_concat(const float *a, size_t dim_a, float alpha,
                                          const float *b, size_t dim_b, float beta,
                                          float *out);
+
+/* L_p distance ((sum(|a[i]-b[i]|^p))^(1/p), p > 0). p == 2 matches
+ * fsql_vector_l2 mathematically but not bit-for-bit. */
+FSQL_API int fsql_vector_lp_distance(const float *a, const float *b, size_t dim,
+                                     float p, float *out_dist);
+
+/* Per-vector symmetric int8 quantization (4x compression). Writes the
+ * chosen scale so the caller can dequantize: v[i] ~= out[i] * scale. */
+FSQL_API int fsql_vector_quantize_int8(const float *v, size_t dim,
+                                       int8_t *out, float *out_scale);
+
+/* Binary (1-bit) quantization (32x compression), sign of v[i] packed
+ * MSB-first. out needs (dim + 7) / 8 bytes. Pairs with
+ * fsql_vector_hamming_distance for cheap candidate filtering. */
+FSQL_API int fsql_vector_quantize_binary(const float *v, size_t dim, uint8_t *out);
+
+/* Hamming distance between two binary-quantized vectors. */
+FSQL_API int fsql_vector_hamming_distance(const uint8_t *a, const uint8_t *b,
+                                          size_t n_bytes, size_t *out_dist);
 
 #ifdef __cplusplus
 }  /* extern "C" */

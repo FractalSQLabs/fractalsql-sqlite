@@ -32,11 +32,13 @@
 --     at write time, not silently corrupting a patient record.
 --   * The fractal_agent_* preset is a blueprint composition over the
 --     primitives (see demo-agents.sql for the pattern).
---   * doc_id is the row's 0-based position in the search's own scan
---     order, and in SQLite that order IS rowid order (UPDATE keeps a
---     rowid table's physical position on UPDATE);
---     vmc_patients' rowid aliases its INTEGER PRIMARY KEY id, so doc_id
---     = id - 1 exactly, stable across the section-1 cohort-force UPDATE.
+--   * telemetry/hybrid doc_id IS the row's rowid (with the raw 0-indexed
+--     scan position alongside as scan_pos); trajectory doc_id stays a
+--     0-indexed scan position, and in SQLite that order IS rowid order
+--     (UPDATE keeps a rowid table's physical position on UPDATE);
+--     vmc_patients' rowid aliases its INTEGER PRIMARY KEY id, so the
+--     trajectory joins below still use doc_id = id - 1 exactly, stable
+--     across the section-1 cohort-force UPDATE.
 --
 -- Safe to re-run: the vmc_* tables are dropped and recreated each time
 -- (the TEMP tables evaporate with the connection).
@@ -99,13 +101,13 @@ UPDATE vmc_patients SET age = 70, condition = 'sepsis'
 
 WITH hs AS (SELECT fractal_hybrid_clinical_search(
                     'vmc_patients', 'vitals', '1,-1,1,1,0.5',
-                    (SELECT group_concat(id - 1, ',') FROM vmc_patients
+                    (SELECT group_concat(id, ',') FROM vmc_patients
                       WHERE age > 65 AND condition = 'sepsis'), 5) AS rj)
 SELECT p.id          AS patient_id,
        p.condition   AS condition,
        json_extract(je.value, '$.distance') AS distance
 FROM hs, json_each(hs.rj) je
-JOIN vmc_patients p ON p.id - 1 = json_extract(je.value, '$.doc_id')
+JOIN vmc_patients p ON p.rowid = json_extract(je.value, '$.doc_id')
 ORDER BY json_extract(je.value, '$.distance');
 
 -- ------------------------------------------------------------------
@@ -137,7 +139,7 @@ ORDER BY json_extract(je.value, '$.distance');
 -- is caller-built from age>65 AND condition='sepsis' (the two-predicate
 -- cohort a single filter pair can't express).
 .print --- deterioration_triage composition (hybrid + trajectory + reason) ---
-WITH cohort AS (SELECT group_concat(id - 1, ',') AS ids
+WITH cohort AS (SELECT group_concat(id, ',') AS ids
                   FROM vmc_patients
                  WHERE age > 65 AND condition = 'sepsis'),
      hs AS (SELECT fractal_hybrid_clinical_search(
@@ -147,7 +149,7 @@ WITH cohort AS (SELECT group_concat(id - 1, ',') AS ids
                     'vmc_patients', 'vitals',
                     '0.1,0.05,0.0,0.0,0.0', '1.4,-1.1,0.9,0.7,1.2', 5) AS tj)
 SELECT (SELECT p.id FROM hs, json_each(hs.rj) je
-         JOIN vmc_patients p ON p.id - 1 = json_extract(je.value, '$.doc_id')
+         JOIN vmc_patients p ON p.rowid = json_extract(je.value, '$.doc_id')
         ORDER BY json_extract(je.value, '$.distance') LIMIT 1) AS nearest_cohort_id,
        (SELECT json_extract(je.value, '$.distance') FROM hs, json_each(hs.rj) je
         ORDER BY json_extract(je.value, '$.distance') LIMIT 1) AS cohort_distance,
