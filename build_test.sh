@@ -133,11 +133,20 @@
 #                      modal guards, explain_result/detect_collapse/
 #                      diversify (feature-store functions are a
 #                      documented N/A — they belong to reasoning/
-#                      feature-store TUs that are not ported)
+#                      feature-store TUs that are not ported), the
+#                      v2.0.25-core analytics surface (change_point_
+#                      detect/periodogram/tda_persistence_diagram/state_
+#                      fingerprint/cycle_detect/optimize_subset) and the
+#                      vector-math quartet (lp_distance/quantize_int8/
+#                      quantize_binary/hamming_distance)
 #   23  agents         the registered C agents with a reasoning canary:
 #                      search_agent/rag_agent (embed -> scout ->
 #                      reason composition), sql_agent, plan_explore,
-#                      trajectory_predict, detect_loop, telemetry,
+#                      trajectory_predict, detect_loop (the
+#                      (agent_id, state_log, dim[, n_bits, seed,
+#                      hamming_threshold]) signature: a period-2
+#                      one-hot toggle flagged, a distinct-direction
+#                      stream cleared, the short-log guard), telemetry,
 #                      search_trajectory, hybrid, cross_modal,
 #                      explain_result/detect_collapse (re-aim:
 #                      SQLite has no server-side procedural language,
@@ -172,7 +181,10 @@
 #                      Agent engines (src/fsql_domain_agents.c): three
 #                      representative engines (anomaly_triage,
 #                      recall_hybrid, regime_triage) run end-to-end
-#                      against the real primitives they compose
+#                      against the real primitives they compose, plus
+#                      outlier_intercept's metric surface (cosine
+#                      default, exact-L2 path, unknown-metric hard
+#                      error)
 #   31  ledger_chain   fractalsql_ledger's append-only hash chain
 #                      (src/fsql_ledger.c): a built chain verifies
 #                      clean, a mutated row and a deleted middle row
@@ -865,9 +877,9 @@ gate_01_build() {
 
 gate_02_smoke() {
   local ver; ver=$(sqlq "SELECT fractalsql_version();")
-  [[ "$ver" = "2.0.0" ]] \
+  [[ "$ver" = "2.0.4" ]] \
     && pass "02 smoke: version=$ver" \
-    || fail "02 smoke: version='$ver' (want 2.0.0)"
+    || fail "02 smoke: version='$ver' (want 2.0.4)"
   # fractal_search convergence: self-distance ~0
   local d; d=$(sqlq "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');")
   if [[ "$d" = "0.0" ]] || python_abs_lt_1e6 "$d"; then
@@ -2072,12 +2084,22 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
   else
     fail "22 v2_functions: diversify: $r"
   fi
-  r=$(sqlq "SELECT fractal_search_telemetry(
-              'bt_telemetry', 'vec', '0.6,0.8,0.0,0.0', 2);")
-  if [[ $? -eq 0 ]] && grep <<< "$r" -q "id"; then
-    pass "22 v2_functions: search_telemetry returns ground-truth rows"
+  r=$(sqlq "SELECT d.id, json_extract(je.j,'\$.distance') AS distance FROM
+            (SELECT value AS j FROM json_each(fractal_search_telemetry(
+               'bt_telemetry', 'vec', '0.6,0.8,0.0,0.0', 2))) je
+            JOIN bt_telemetry d ON d.rowid = json_extract(je.j,'\$.doc_id')
+            ORDER BY json_extract(je.j,'\$.distance') LIMIT 1;")
+  if [[ $? -eq 0 ]] && grep <<< "$r" -q "^1|"; then
+    pass "22 v2_functions: search_telemetry doc_id resolves to the real row (rowid = doc_id)"
   else
-    fail "22 v2_functions: telemetry: $r"
+    fail "22 v2_functions: telemetry rowid-join: $r"
+  fi
+  r=$(sqlq "SELECT json_extract(fractal_search_telemetry(
+              'bt_telemetry', 'vec', '0.6,0.8,0.0,0.0', 2), '\$[0].scan_pos');")
+  if [[ $? -eq 0 ]] && [[ "$(echo "$r" | tr -d '[:space:]')" = "0" ]]; then
+    pass "22 v2_functions: search_telemetry reports scan_pos alongside the rowid doc_id"
+  else
+    fail "22 v2_functions: telemetry scan_pos: $r"
   fi
   if expect_err "k must be > 0" \
       "SELECT fractal_search_telemetry('bt_telemetry','vec',
@@ -2085,6 +2107,27 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
     pass "22 v2_functions: telemetry k<=0 rejected"
   else
     fail "22 v2_functions: telemetry k<=0 accepted"
+  fi
+  # hybrid: the cohort holds real rowids (the same locator the result
+  # doc_id reports); the join asserts the returned doc_ids are real
+  # row ids, not scan positions.
+  r=$(sqlq "SELECT group_concat(d.id) FROM
+            (SELECT value AS j FROM json_each(fractal_hybrid_clinical_search(
+               'bt_telemetry', 'vec', '0.0,1.0,0.0,0.0',
+               (SELECT json_group_array(rowid) FROM bt_telemetry
+                 WHERE id IN (2,4,5)), 3))) r
+            JOIN bt_telemetry d ON d.rowid = json_extract(r.j,'\$.doc_id');")
+  if [[ $? -eq 0 ]] && grep <<< "$r" -q "2" && grep <<< "$r" -q "4" && grep <<< "$r" -q "5"; then
+    pass "22 v2_functions: hybrid restricts to the rowid cohort and returns real row ids"
+  else
+    fail "22 v2_functions: hybrid rowid cohort: $r"
+  fi
+  if expect_err "cohort matched no rows" \
+      "SELECT fractal_hybrid_clinical_search('bt_telemetry','vec',
+        '0.0,1.0,0.0,0.0', '[999999]', 1);"; then
+    pass "22 v2_functions: hybrid rejects a cohort matching zero rows"
+  else
+    fail "22 v2_functions: hybrid zero-cohort accepted"
   fi
   r=$(sqlq "SELECT fractal_search_trajectory(
               'bt_traj', 'vec', '0.0,0.0,0.0,0.0',
@@ -2100,6 +2143,103 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
     pass "22 v2_functions: explain_result/detect_collapse respond"
   else
     fail "22 v2_functions: explain/detect_collapse: $r"
+  fi
+  # --- v2.0.25-core analytics surface (10 functions) ------------------
+  # change_point_detect: 40-point mean step at t=20, window 10 ->
+  # boundary index 20 (the exact fixture demo/benchmark-api-reference.sql
+  # uses, scaled down to stay inline here).
+  r=$(sqlq "SELECT fractal_change_point_detect(
+              '1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,
+               1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,
+               3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,
+               3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0',
+              10, 1.0);")
+  if [[ $? -eq 0 ]] && grep <<< "$r" -q '"indices"'; then
+    pass "22 v2_functions: change_point_detect returns boundary indices"
+  else
+    fail "22 v2_functions: change_point_detect: $r"
+  fi
+  # periodogram: the same 32-point sin(i/4) series -> peak lists.
+  r=$(sqlq "SELECT fractal_periodogram('$s32', 3);")
+  if [[ $? -eq 0 ]] && grep <<< "$r" -q '"freqs"' \
+      && grep <<< "$r" -q '"power"'; then
+    pass "22 v2_functions: periodogram returns the peak lists"
+  else
+    fail "22 v2_functions: periodogram: $r"
+  fi
+  # TDA: an 8-point square ring at spacing 2 (threshold 2.5 admits the
+  # 8 ring edges, excludes the 2.83 corner diagonals) -> E-V+C = 1.
+  r=$(sqlq "SELECT fractal_tda_persistence_diagram(
+              '0,0,2,0,4,0,4,2,4,4,2,4,0,4,0,2', 2, 1, 2.5);")
+  if [[ $? -eq 0 ]] && grep <<< "$r" -q '"betti1":1'; then
+    pass "22 v2_functions: TDA flags the single ring cycle (betti1=1)"
+  else
+    fail "22 v2_functions: TDA: $r"
+  fi
+  # state_fingerprint: 64 bits -> (64+7)/8 = 8 bytes -> 16 hex chars.
+  r=$(sqlq "SELECT length(hex(fractal_state_fingerprint('1.0,0.0,0.0', 64)));")
+  if [[ "$r" == "16" ]]; then
+    pass "22 v2_functions: state_fingerprint returns a 64-bit (16-hex-char) BLOB"
+  else
+    fail "22 v2_functions: state_fingerprint: $r"
+  fi
+  # cycle_detect: a clean period-2 one-hot fingerprint stream closes
+  # (one-hot states, so the two directions are distinguishable).
+  r=$(sqlq "
+    WITH RECURSIVE g(t) AS (VALUES(0) UNION ALL SELECT t+1 FROM g WHERE t<9)
+    SELECT fractal_cycle_detect(
+        (SELECT json_group_array(f) FROM
+           (SELECT hex(fractal_state_fingerprint(
+              CASE WHEN t % 2 = 0 THEN '1.0,0.0,0.0' ELSE '0.0,1.0,0.0' END, 64)) AS f
+              FROM g)),
+        64) AS cycle_detect;")
+  if [[ $? -eq 0 ]] && grep <<< "$r" -q '"detected":true'; then
+    pass "22 v2_functions: cycle_detect closes the period-2 fingerprint stream"
+  else
+    fail "22 v2_functions: cycle_detect: $r"
+  fi
+  # optimize_subset: best 5 of 10 scored items (bounds <= 1.0).
+  r=$(sqlq "SELECT fractal_optimize_subset(
+              '10,9,8,7,6,5,4,3,2,1',
+              '1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0',
+              5);")
+  if [[ $? -eq 0 ]] && grep <<< "$r" -q '"weights"'; then
+    pass "22 v2_functions: optimize_subset returns the value-weighted allocation"
+  else
+    fail "22 v2_functions: optimize_subset: $r"
+  fi
+  # Vector math quartet (registered in the common TU -- both builds).
+  r=$(sqlq "SELECT fractal_vector_lp_distance('1,0,0', '0.5,0,0', 2.0) AS lp2;" \
+            "SELECT fractal_vector_lp_distance('1,0,0', '0.5,0,0', 0.5) AS lp05;")
+  if [[ $? -eq 0 ]]; then
+    pass "22 v2_functions: fractal_vector_lp_distance (p=2 and fractional p=0.5)"
+  else
+    fail "22 v2_functions: lp_distance: $r"
+  fi
+  r=$(sqlq "SELECT fractal_vector_quantize_int8('0.5,-0.25,0.75,0.0');")
+  if [[ $? -eq 0 ]] && grep <<< "$r" -q '"scale"'; then
+    pass "22 v2_functions: quantize_int8 returns the scale+codes document"
+  else
+    fail "22 v2_functions: quantize_int8: $r"
+  fi
+  r=$(sqlq "SELECT length(fractal_vector_quantize_binary(
+           '1,-1,1,1,-1,1,-1,-1,1,1'));")
+  if [[ "$r" == "2" ]]; then   # (10 + 7) / 8 = 2 sign bytes
+    pass "22 v2_functions: quantize_binary returns (dim+7)/8 sign bytes"
+  else
+    fail "22 v2_functions: quantize_binary: $r"
+  fi
+  r=$(sqlq "SELECT fractal_vector_hamming_distance(
+           fractal_vector_quantize_binary('1,-1,1,1,-1,1,-1,-1,1,1'),
+           fractal_vector_quantize_binary('1,-1,1,1,-1,1,-1,-1,1,1'));" \
+            "SELECT fractal_vector_hamming_distance(
+           fractal_vector_quantize_binary('1,-1,1,1,-1,1,-1,-1,1,1'),
+           fractal_vector_quantize_binary('-1,-1,1,1,-1,1,-1,-1,1,1'));")
+  if [[ "$r" == "0
+1" ]]; then
+    pass "22 v2_functions: hamming_distance (same pair=0, one bit=1)"
+  else
+    fail "22 v2_functions: hamming_distance: $r"
   fi
 }
 
@@ -2183,13 +2323,42 @@ gate_23_agents() {
     || fail "23 plan_explore JSON: $LAST_AGENT_OUT"
   agent "trajectory_predict over telemetry" \
     "SELECT fractal_agent_trajectory_predict('bt_traj','vec',3,2);"
-  agent "detect_loop monitors a series" \
-    "SELECT fractal_agent_detect_loop(
-       '0.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,0.0,0.1,
-        0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,0.0,0.1,0.2,0.3');"
-  grep -Eq '"is_loop_detected":(true|false)' <<< "$LAST_AGENT_OUT" \
-    && pass "23 detect_loop returns the verdict" \
-    || fail "23 detect_loop JSON: $LAST_AGENT_OUT"
+  # detect_loop: the v2.0.25-core signature (agent_id, state_log, dim
+  # [, n_bits, seed, hamming_threshold]) -- SimHash state fingerprints
+  # streamed through Brent's cycle detector, plus a DFA drift check over
+  # the per-state L2 norms. Both fixtures are 16 states (the DFA step
+  # needs >= 16 states, checked first). One-hot encoding keeps the two
+  # toggle states distinguishable by direction (a same-signed scalar
+  # stream would collapse to one fingerprint and false-positive).
+  agent "detect_loop flags a period-2 one-hot toggle" \
+    "SELECT fractal_agent_detect_loop('agent-t1',
+       '1.0,0.0,0.0,1.0,1.0,0.0,0.0,1.0,1.0,0.0,0.0,1.0,
+        1.0,0.0,0.0,1.0,1.0,0.0,0.0,1.0,1.0,0.0,0.0,1.0,
+        1.0,0.0,0.0,1.0,1.0,0.0,0.0,1.0', 2, 64, 42.0, 0);"
+  grep <<< "$LAST_AGENT_OUT" -q '"is_loop_detected":true' \
+    && grep <<< "$LAST_AGENT_OUT" -q '"agent_id":"agent-t1"' \
+    && pass "23 detect_loop flags the period-2 toggle (fingerprint cycle, 6-arity form)" \
+    || fail "23 detect_loop loop-case JSON: $LAST_AGENT_OUT"
+  agent "detect_loop clears a distinct-direction stream" \
+    "SELECT fractal_agent_detect_loop('agent-t2',
+       '1.0,0.0, 0.8,0.6, 0.6,0.8, 0.0,1.0, 0.6,-0.8, 0.8,-0.6,
+       -0.6,0.8, -0.8,0.6, -1.0,0.0, -0.8,-0.6, -0.6,-0.8, 0.0,-1.0,
+        0.28,0.96, 0.96,0.28, -0.28,0.96, -0.96,0.28', 2);"
+  grep <<< "$LAST_AGENT_OUT" -q '"is_loop_detected":false' \
+    && pass "23 detect_loop clears the 16-state stream (distinct directions, unit norms)" \
+    || fail "23 detect_loop drift-case JSON: $LAST_AGENT_OUT"
+  # A 2-state log clears the ">= 2 states" floor but is far short of
+  # DFA's own >= 24-point requirement; DFA is best-effort (matching the
+  # pg wrapper), so this returns cleanly with dfa_exponent 0 rather than
+  # erroring — the cycle check still runs and correctly finds no cycle
+  # in a 2-state stream.
+  agent "detect_loop short log is best-effort (DFA declines, no cycle)" \
+    "SELECT fractal_agent_detect_loop('agent-t3', '1.0,0.0,0.0,1.0', 2);"
+  grep <<< "$LAST_AGENT_OUT" -q '"agent_id":"agent-t3"' \
+    && grep <<< "$LAST_AGENT_OUT" -q '"dfa_exponent":0' \
+    && grep <<< "$LAST_AGENT_OUT" -q '"is_loop_detected":false' \
+    && pass "23 detect_loop short-log JSON shape" \
+    || fail "23 detect_loop short-log JSON: $LAST_AGENT_OUT"
   agent "telemetry + trajectory + hybrid + cross_modal + explain" \
     "SELECT fractal_search_telemetry('bt_agent_docs','emb',
        '1.0,0.0,0.0', 2);" \
@@ -2672,6 +2841,43 @@ gate_29_domain_agents() {
   grep <<< "$r4b" -q 'domain-agent-canary' \
     && pass "29 domain_agents: regime_triage composes dfa+drift -> reason (reason step ran)" \
     || fail "29 domain_agents: expected the reasoning canary in rationale, got: $r4b"
+
+  # --- 4: fractal_agent_outlier_intercept (the metric-arg surface) ----
+  # 'cosine' (default) via the telemetry engine; 'l2' via the exact
+  # ORDER BY over fractal_vector_l2_distance; any other value is a hard
+  # error, never a fallback.
+  sqlq "
+    CREATE TABLE bt_da_badstates(state_id INTEGER PRIMARY KEY, state_vec TEXT);
+    INSERT INTO bt_da_badstates VALUES (1,'1.0,0.0,0.0'),(2,'0.0,1.0,0.0');
+  " >/dev/null 2>&1 \
+    || { fail "29 domain_agents: bad-state fixture setup failed"; return; }
+  local r5; r5=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_agent_outlier_intercept('0.95,0.05,0.0',
+       'bt_da_badstates', 'state_vec', 0.5);")
+  grep <<< "$r5" -q '"intercepted":true' \
+    && grep <<< "$r5" -q 'cosine' \
+    && pass "29 domain_agents: outlier_intercept intercepts the near-parallel state (cosine default)" \
+    || fail "29 domain_agents: outlier_intercept cosine: $r5"
+  # The small-magnitude state is ~0.95 away in Euclidean terms even
+  # though cosine would call it near -- the exact-L2 path allows it.
+  local r5b; r5b=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_agent_outlier_intercept('0.05,0.0,0.0',
+       'bt_da_badstates', 'state_vec', 0.8, 'l2');")
+  grep <<< "$r5b" -q '"intercepted":false' \
+    && grep <<< "$r5b" -q 'l2' \
+    && pass "29 domain_agents: outlier_intercept l2 metric allows the small-magnitude state" \
+    || fail "29 domain_agents: outlier_intercept l2: $r5b"
+  # Any other metric value (including 'euclid' and NULL) is a hard error.
+  if expect_err "metric must be 'cosine' or 'l2'" \
+      "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+      "SELECT fractal_agent_outlier_intercept('1.0,0.0,0.0',
+        'bt_da_badstates','state_vec', 0.5, 'euclid');"; then
+    pass "29 domain_agents: outlier_intercept unknown metric rejected"
+  else
+    fail "29 domain_agents: unknown metric accepted"
+  fi
 
   printf 'SELECT 1' > "$SQLTXT"
 }

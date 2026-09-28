@@ -2,8 +2,9 @@
 -- Runnable walkthrough of the canonical fractal_vector BLOB type
 -- (u16 dim LE + u16 reserved + packed little-endian float32 payload):
 -- dimension enforcement, the vectorizer writing into a guarded
--- fractal_vector column, fractal_search_trajectory's BLOB reads, and a
--- storage comparison against the same vectors in CSV-TEXT form.
+-- fractal_vector column, fractal_search_trajectory's BLOB reads, a
+-- storage comparison against the same vectors in CSV-TEXT form, and
+-- the L_p-distance / int8+binary quantization surface (Section 7).
 -- See ../docs/vectorizer-setup.md's "Storage" section for the full
 -- writeup this demo walks through interactively.
 --
@@ -183,6 +184,46 @@ SELECT
 .print is ~4 bytes/dim regardless of magnitude, while CSV-TEXT spends
 .print roughly 8-20 characters per float. See docs/vectorizer-setup.md's
 .print Storage section, and bench/ for the same comparison at 100k-row scale.)
+
+.print
+.print === Section 7: L_p distance and quantization ===
+.print The compressed-vector surface: generalized L_p distance for any
+.print p > 0, and the two quantizers for cheap storage + candidate
+.print filtering ahead of a full-precision re-rank.
+.print (For 0 < p < 1 the L_p "distance" is not a proper metric -- use it
+.print explicitly, never as a silent L2 substitute.)
+SELECT
+    fractal_vector_lp_distance(a.embedding, b.embedding, 2.0) AS lp2_euclidean,
+    fractal_vector_lp_distance(a.embedding, b.embedding, 1.0) AS lp1_manhattan,
+    fractal_vector_lp_distance(a.embedding, b.embedding, 0.5) AS lp05_fractional
+FROM docs_fv a, docs_fv b
+WHERE a.id = 1 AND b.id = 2;
+
+-- int8 quantization: 4x compression, returns {"scale":S,"codes":[..]}
+-- as TEXT (JSON) -- dequantize with codes * scale.
+SELECT fractal_vector_quantize_int8(a.embedding) AS int8_doc
+FROM docs_fv a
+WHERE a.id = 1;
+
+-- binary quantization: 32x compression, a (dim + 7) / 8 BLOB of
+-- MSB-first sign bits.
+SELECT hex(fractal_vector_quantize_binary(a.embedding)) AS binary_code,
+       length(fractal_vector_quantize_binary(a.embedding)) AS binary_bytes
+FROM docs_fv a
+WHERE a.id = 1;
+
+-- Hamming distance between binary codes: the cheap candidate filter.
+-- Same pair, both bits identical -> 0.
+SELECT fractal_vector_hamming_distance(
+           fractal_vector_quantize_binary(a.embedding),
+           fractal_vector_quantize_binary(b.embedding)) AS hamming_dist
+FROM docs_fv a, docs_fv b
+WHERE a.id = 1 AND b.id = 2;
+
+.print (Pattern: Hamming filter over quantize_binary codes narrows
+.print candidates cheaply, then an exact fractal_vector_l2_distance
+.print re-rank scores only the survivors. See docs/api-analytics.md's
+.print "Vector Math and Quantization" section.)
 
 .print
 .print ================================================================

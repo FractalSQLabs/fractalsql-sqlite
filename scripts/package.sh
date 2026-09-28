@@ -6,7 +6,7 @@
 #   Linux: builds fractalsql.deb + fractalsql.rpm from dist/${arch}/
 #          fractalsql.so (already produced by ../build.sh). Install
 #          target path is /usr/local/lib/sqlite3/fractalsql.so per
-#          the v2.0.0 Community brief. The fractalsql-reasoning-http
+#          the v2.0.4 Community brief. The fractalsql-reasoning-http
 #          plugin is shipped alongside when present (sovereign-tier
 #          reasoning/embedding support).
 #
@@ -27,7 +27,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-VERSION="2.0.0"
+VERSION="2.0.4"
 ITERATION="1"
 DIST_DIR="dist/packages"
 mkdir -p "${DIST_DIR}"
@@ -97,7 +97,7 @@ Quick start:
       -cmd "SELECT fractalsql_edition();"      -- 'Community'
   sqlite3 mydb.sqlite \\
       -cmd ".load ./fractalsql" \\
-      -cmd "SELECT fractalsql_version();"      -- '2.0.0'
+      -cmd "SELECT fractalsql_version();"      -- '2.0.4'
 
 SQL surface (2.0):
   fractalsql_edition()               TEXT

@@ -20,7 +20,9 @@
  *                     [, meta_filter])                  -> TEXT (JSON)
  *   fractal_agent_plan_explore(state, table, col, N)    -> TEXT (JSON)
  *   fractal_agent_trajectory_predict(table, col, id, N) -> TEXT (JSON)
- *   fractal_agent_detect_loop(series)                   -> TEXT (JSON)
+ *   fractal_agent_detect_loop(agent_id, state_log, dim
+ *                             [, n_bits, seed, hamming_threshold])
+ *                                         -> TEXT (JSON)
  *   fractal_search_telemetry(table, col, query, k)      -> TEXT (JSON)
  *   fractal_search_trajectory(table, col, baseline,
  *                             current, k)               -> TEXT (JSON)
@@ -38,7 +40,13 @@
  *   - SQLite scalar functions can't return composite types or SETOF
  *     tables, so every composite comes back as one TEXT JSON document,
  *     and every (doc_id, distance) / plan-branch result set as a JSON
- *     array in result order.
+ *     array in result order. fractal_search_telemetry and
+ *     fractal_hybrid_clinical_search report doc_id as the row's real
+ *     rowid (the physical row locator, the analog of the server
+ *     edition's ctid) with the raw 0-indexed scan position alongside
+ *     as scan_pos; the trajectory/cross-modal searches and the
+ *     internal result_handle callers keep doc_id as the 0-indexed
+ *     scan position.
  *
  *   - fractal_feedback_report / fractal_isolate_background /
  *     fractal_diversify_* are NOT here: they mutate shadow-store state
@@ -545,13 +553,23 @@ static int agents_scout_search(FsqlState *st, const AgentCorpus *c,
 }
 
 /* Table-backed top-k telemetry search.
- * Emits a JSON array of {"doc_id":N,"distance":D} ascending by
- * distance. doc_id is the 0-indexed scan position (the result_handle
- * convention), translated through doc_id_map when a cohort filter
- * reordered the corpus. Returns 0 / -1 with err set. */
+ * Emits a JSON array ascending by distance. In locator mode (the
+ * fractal_search_telemetry / fractal_hybrid_clinical_search surface,
+ * pg parity): {"doc_id":<rowid>,"distance":D,"scan_pos":<i>} -- doc_id
+ * is the row's real rowid (SQLite's physical row locator, the analog
+ * of the server edition's ctid: it keeps resolving to the correct row
+ * even if an UPDATE rewrites it between the search and the lookup),
+ * and scan_pos is the raw 0-indexed position within THIS call's corpus
+ * (the result_handle convention fractal_feedback_report shares).
+ * Outside locator mode (fractal_search_trajectory,
+ * fractal_cross_modal_search, and the internal callers that feed
+ * result handles): {"doc_id":<i>,"distance":D} with doc_id the
+ * 0-indexed scan position, unchanged. id_map translates filtered
+ * (cohort) scan positions back to per-row ids; NULL means identity.
+ * Returns 0 / -1 with err set. */
 static int agents_topk_json(FsqlState *st, const AgentCorpus *c,
                             const double *query, int k,
-                            const int64_t *doc_id_map,
+                            const int64_t *id_map, int locator,
                             StrBuf *out, char *err, size_t err_cap) {
     if (c->n_rows == 0) {
         agents_set_err(err, err_cap, "fractalsql: no corpus rows to search");
@@ -590,18 +608,29 @@ static int agents_topk_json(FsqlState *st, const AgentCorpus *c,
         return -1;
     }
 
+    int emitted = 0;
     sb_puts(out, "[");
     for (int i = 0; i < n; i++) {
-        if (i) sb_puts(out, ",");
-        if (idx[i] < 0 || (size_t)idx[i] >= c->n_rows) {
-            free(idx); free(dist);
-            agents_set_err(err, err_cap,
-                           "fractalsql: malformed top_k in search result");
-            return -1;
+        /* idx comes out of the core's result JSON, untrusted
+         * (fsql_extract_topk validates only >= 0): skip an index outside
+         * the corpus scan rather than reading doc_id_map past its n_rows
+         * entries or reporting a corpus position that was never searched
+         * (pg parity -- the reference wrapper skips and returns the rest). */
+        if (idx[i] < 0 || (size_t)idx[i] >= c->n_rows) continue;
+        if (emitted) sb_puts(out, ",");
+        emitted = 1;
+        if (locator) {
+            /* doc_id is the row's real rowid (rowid_map == corpus.rowids
+             * for an unfiltered telemetry scan, the kept-rowid map for a
+             * cohort scan); scan_pos stays the raw scan position. */
+            int64_t doc_id = id_map ? id_map[idx[i]] : c->rowids[idx[i]];
+            sb_printf(out, "{\"doc_id\":%lld,\"distance\":%.17g,\"scan_pos\":%d}",
+                      (long long)doc_id, dist[i], idx[i]);
+        } else {
+            int64_t doc_id = id_map ? id_map[idx[i]] : (int64_t)idx[i];
+            sb_printf(out, "{\"doc_id\":%lld,\"distance\":%.17g}",
+                      (long long)doc_id, dist[i]);
         }
-        int64_t doc_id = doc_id_map ? doc_id_map[idx[i]] : (int64_t)idx[i];
-        sb_printf(out, "{\"doc_id\":%lld,\"distance\":%.17g}",
-                  (long long)doc_id, dist[i]);
     }
     sb_puts(out, "]");
     free(idx);
@@ -2000,33 +2029,96 @@ static void fractal_trajectory_predict_fn(sqlite3_context *ctx, int argc,
 }
 
 /* ------------------------------------------------------------------ */
-/* fractal_agent_detect_loop(series)                                   */
+/* fractal_agent_detect_loop(agent_id, state_log, dim                   */
+/*                           [, n_bits [, seed [, hamming_threshold]]]) */
 /* ------------------------------------------------------------------ */
 
-/* Detect a tight repetition cycle in a discrete-valued series: the
- * smallest period p in [1, max_p] with series[i] == series[i+p] for
- * every i in [0, n-p). Exact equality is correct — the entries are
- * integer state hashes cast to double (within 2^53). */
-static int agents_detect_short_period(const double *s, int n, int max_p) {
-    if (max_p > n / 2) max_p = n / 2;
-    for (int p = 1; p <= max_p; p++) {
-        int ok = 1;
-        for (int i = 0; i < n - p; i++) {
-            if (s[i] != s[i + p]) { ok = 0; break; }
-        }
-        if (ok) return p;
+/* fractal_agent_detect_loop (rewritten for the v2.0.25 core): the old
+ * kernel ran detect_short_period (a brute-force O(n*max_p) exact-equality
+ * scan) over a caller-supplied array of exact state hashes, plus a
+ * DFA-alpha>0.9 heuristic over those same hash values. Two real problems
+ * with that: exact equality only catches bit-identical repeats (misses a
+ * "near enough" wobble), and DFA over arbitrary hash values has no
+ * numerical continuity to begin with — it was really just borrowing DFA
+ * as a crude randomness detector, not a principled choice. This version
+ * takes the actual state vectors (state_log, flattened row-major:
+ * n_states * dim doubles, matching this file's existing corpus-
+ * flattening convention — see agents_scan_corpus) and:
+ *
+ *   - fingerprints each state via fsql_state_fingerprint (SimHash) and
+ *     streams the fingerprints through fsql_cycle_detect_init/_feed
+ *     (Brent's), which tolerates near-identical states within
+ *     hamming_threshold instead of requiring byte-exact repeats —
+ *     replaces detect_short_period.
+ *   - runs DFA over each state's L2 norm across the trajectory instead
+ *     of over hash values — a real, continuous drift-to-chaos signal
+ *     (magnitude wander over time), still flagging alpha > 0.9 as a
+ *     random-walk-like loop the fingerprint-cycle check can miss if the
+ *     wander never closes within hamming_threshold. */
+
+/* Cap on the flattened state_log (one flat double per element, so the
+ * allocation stays a fraction of the 4 MiB input bound). */
+#define FSQL_AGENTS_MAX_LOG_ELEMS  (FSQL_MAX_INPUT_BYTES / 4)
+
+/* Decode the flattened state_log: TEXT (JSON/CSV) or float32 BLOB,
+ * mirroring fsql_sovereign.c's decode_series (the same two-pass
+ * element-count-then-parse shape, bounded by FSQL_AGENTS_MAX_LOG_ELEMS
+ * instead of the sovereign cap). */
+static int agents_decode_state_log(sqlite3_value *v, double **out_data,
+                                   int *out_n) {
+    *out_data = NULL;
+    *out_n = 0;
+
+    int type = sqlite3_value_type(v);
+    if (type == SQLITE_BLOB) {
+        int nbytes = sqlite3_value_bytes(v);
+        if (nbytes <= 0 || (nbytes & 3) != 0) return -1;
+        if (nbytes > FSQL_MAX_INPUT_BYTES) return -1;
+        int count = nbytes / 4;
+        if (count > FSQL_AGENTS_MAX_LOG_ELEMS) return -1;
+        double *data = (double *)malloc((size_t)count * sizeof(double));
+        if (!data) return -1;
+        int n = fsql_parse_blob_vector(sqlite3_value_blob(v), nbytes,
+                                       data, count);
+        if (n < 1) { free(data); return -1; }
+        *out_data = data;
+        *out_n = n;
+        return 0;
     }
+    if (type != SQLITE_TEXT) return -1;
+
+    int slen = sqlite3_value_bytes(v);
+    if (slen <= 0 || slen > FSQL_MAX_INPUT_BYTES) return -1;
+    const char *s = (const char *)sqlite3_value_text(v);
+
+    /* Count elements first (worst case: n commas + 1), same as
+     * fsql_vec_decode and decode_series. */
+    int cap = 1;
+    for (int i = 0; i < slen; i++)
+        if (s[i] == ',') cap++;
+    if (cap > FSQL_AGENTS_MAX_LOG_ELEMS) return -1;
+
+    double *data = (double *)malloc((size_t)cap * sizeof(double));
+    if (!data) return -1;
+    int n = fsql_parse_text_vector(s, slen, data, cap);
+    if (n < 1) { free(data); return -1; }
+
+    *out_data = data;
+    *out_n = n;
     return 0;
 }
 
 static void fractal_detect_loop_fn(sqlite3_context *ctx, int argc,
                                    sqlite3_value **argv) {
-    (void)argc;
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
     char err[512];
 
-    if (sqlite3_value_type(argv[0]) == SQLITE_NULL) {
-        sqlite3_result_null(ctx);   /* STRICT */
+    if (argc < 3 || sqlite3_value_type(argv[0]) == SQLITE_NULL ||
+        sqlite3_value_type(argv[1]) == SQLITE_NULL ||
+        sqlite3_value_type(argv[2]) == SQLITE_NULL) {
+        sqlite3_result_error(ctx,
+            "fractal_agent_detect_loop: agent_id, state_log, and dim "
+            "are required", -1);
         return;
     }
     if (!st || !st->ctx) {
@@ -2034,43 +2126,146 @@ static void fractal_detect_loop_fn(sqlite3_context *ctx, int argc,
         return;
     }
 
-    /* int8[] analog: a TEXT (JSON/CSV) or float32-BLOB numeric series. */
-    double *series = (double *)malloc(
-        (size_t)FSQL_ARENA_MAX_DIM * sizeof(double));
-    if (!series) { sqlite3_result_error_nomem(ctx); return; }
-    int n = fsql_parse_value_to_doubles(argv[0], series,
-                                        FSQL_ARENA_MAX_DIM);
-    if (n <= 0) {
-        free(series);
+    const char *agent_id = (const char *)sqlite3_value_text(argv[0]);
+    int dim              = sqlite3_value_int(argv[2]);
+    int n_bits           = (argc > 3 && sqlite3_value_type(argv[3]) != SQLITE_NULL)
+                               ? sqlite3_value_int(argv[3]) : 64;
+    double seed          = (argc > 4 && sqlite3_value_type(argv[4]) != SQLITE_NULL)
+                               ? sqlite3_value_double(argv[4]) : 42.0;
+    int hamming_threshold =
+        (argc > 5 && sqlite3_value_type(argv[5]) != SQLITE_NULL)
+            ? sqlite3_value_int(argv[5]) : 0;
+
+    if (dim <= 0) {
+        sqlite3_result_error(ctx, "fractal_agent_detect_loop: dim must be > 0",
+                             -1);
+        return;
+    }
+    if (n_bits <= 0) {
         sqlite3_result_error(ctx,
-            "fractal_agent_detect_loop: log_arr must be a JSON/CSV array "
-            "of state hashes (TEXT) or a float32 BLOB series", -1);
+            "fractal_agent_detect_loop: n_bits must be > 0", -1);
+        return;
+    }
+    if (hamming_threshold < 0) {
+        sqlite3_result_error(ctx,
+            "fractal_agent_detect_loop: hamming_threshold must be >= 0", -1);
         return;
     }
 
-    double alpha = 0.0;
-    int rc = fsql_dimension_dfa(series, (size_t)n, &alpha);
-    if (rc != FSQL_OK) {
-        free(series);
+    double *flat = NULL;
+    int total = 0;
+    if (agents_decode_state_log(argv[1], &flat, &total) != 0) {
+        sqlite3_result_error(ctx,
+            "fractal_agent_detect_loop: state_log must be a flattened "
+            "JSON/CSV array (TEXT) or a float32 BLOB", -1);
+        return;
+    }
+    if (total % dim != 0) {
+        free(flat);
         snprintf(err, sizeof err,
-                 "fractal_agent_detect_loop: DFA needs a longer series "
-                 "(rc=%d; >= 16 points)", rc);
+                 "fractal_agent_detect_loop: state_log length (%d) is not "
+                 "a multiple of dim (%d)", total, dim);
+        agents_result_err(ctx, err);
+        return;
+    }
+    int n_states = total / dim;
+    if (n_states < 2) {
+        free(flat);
+        agents_result_err(ctx,
+            "fractal_agent_detect_loop: state_log must contain at least "
+            "2 states");
+        return;
+    }
+
+    /* Secondary signal: DFA over each state's L2 norm across the
+     * trajectory. */
+    double *norms = (double *)malloc((size_t)n_states * sizeof(double));
+    if (!norms) {
+        free(flat);
+        sqlite3_result_error_nomem(ctx);
+        return;
+    }
+    for (int i = 0; i < n_states; i++) {
+        double sumsq = 0.0;
+        for (int j = 0; j < dim; j++) {
+            double x = flat[(size_t)i * dim + j];
+            sumsq += x * x;
+        }
+        norms[i] = sqrt(sumsq);
+    }
+    double alpha = 0.0;
+    /* Secondary signal: DFA over each state's L2 norm across the
+     * trajectory. Best-effort, matching the pg wrapper (it ignores the
+     * rc; alpha stays 0.0 when the DFA declines -- the core needs >= 24
+     * points and a non-constant series, e.g. a one-hot toggle's norm
+     * series is constant). Brent's cycle detection is the primary
+     * signal. */
+    int rc;
+    fsql_dimension_dfa(norms, (size_t)n_states, &alpha);
+    (void)rc;
+    free(norms);
+
+    /* Primary signal: fingerprint each state and stream through
+     * Brent's cycle detector; stop at the first closed cycle. */
+    size_t n_bytes = ((size_t)n_bits + 7) / 8;
+    uint8_t *fp = (uint8_t *)malloc(n_bytes);
+    if (!fp) {
+        free(flat);
+        sqlite3_result_error_nomem(ctx);
+        return;
+    }
+    fsql_cycle_state_t cs;
+    rc = fsql_cycle_detect_init(&cs, n_bytes, (size_t)hamming_threshold);
+    if (rc != FSQL_OK) {
+        free(flat); free(fp);
+        snprintf(err, sizeof err,
+                 "fractal_agent_detect_loop: fsql_cycle_detect_init rc=%d",
+                 rc);
         agents_result_err(ctx, err);
         return;
     }
 
-    int period = agents_detect_short_period(series, n, n / 4);
-    free(series);
+    int loop_found = 0;
+    for (int i = 0; i < n_states; i++) {
+        rc = fsql_state_fingerprint(flat + (size_t)i * dim, (size_t)dim,
+                                    (size_t)n_bits, seed, fp);
+        if (rc != FSQL_OK) {
+            fsql_cycle_detect_free(&cs);
+            free(flat); free(fp);
+            snprintf(err, sizeof err,
+                     "fractal_agent_detect_loop: fsql_state_fingerprint "
+                     "rc=%d", rc);
+            agents_result_err(ctx, err);
+            return;
+        }
+        int detected = 0;
+        size_t cycle_len = 0;
+        rc = fsql_cycle_detect_feed(&cs, fp, &detected, &cycle_len);
+        if (rc != FSQL_OK) {
+            fsql_cycle_detect_free(&cs);
+            free(flat); free(fp);
+            snprintf(err, sizeof err,
+                     "fractal_agent_detect_loop: fsql_cycle_detect_feed "
+                     "rc=%d", rc);
+            agents_result_err(ctx, err);
+            return;
+        }
+        if (detected) { loop_found = 1; break; }
+    }
+    fsql_cycle_detect_free(&cs);
+    free(flat);
+    free(fp);
 
     /* Flag a loop if EITHER the DFA exponent exceeds 0.9 (drift-to-
-     * chaos cycling) OR a tight discrete period was found (clean
-     * toggles like 12345<->67890 that DFA scores as low alpha). */
+     * chaos / random-walk-like cycling the cycle check can miss) OR a
+     * near-identical state cycle closed within hamming_threshold. */
     StrBuf out;
     sb_init(&out);
-    sb_printf(&out,
-              "{\"agent_id\":\"monitor\",\"dfa_exponent\":%.17g,"
+    sb_puts(&out, "{\"agent_id\":");
+    sb_json_string(&out, agent_id);
+    sb_printf(&out, ",\"dfa_exponent\":%.17g,"
               "\"is_loop_detected\":%s}",
-              alpha, (alpha > 0.9 || period > 0) ? "true" : "false");
+              alpha, (alpha > 0.9 || loop_found) ? "true" : "false");
     if (sb_failed(&out)) {
         sb_free(&out);
         sqlite3_result_error_nomem(ctx);
@@ -2105,26 +2300,35 @@ static int agents_i64_sorted_contains(const int64_t *a, int n, int64_t key) {
     return 0;
 }
 
-/* Shared body for the three table-backed top-k searches. Runs the
+/* Shared body for the table-backed top-k searches. Runs the
  * telemetry-shaped top-k over table.col; when `cohort` is non-NULL,
- * only rows whose 0-indexed scan position is in the (sorted) cohort
- * are searched, and doc_id_map translates filtered positions back to
- * real doc_ids. */
+ * only rows whose rowid (locator mode) or 0-indexed scan position
+ * (scan-position mode) is in the (sorted) cohort are searched, and the
+ * kept-id map translates filtered scan positions back to per-row ids.
+ * In locator mode (fractal_search_telemetry /
+ * fractal_hybrid_clinical_search, pg parity) the corpus is scanned
+ * with its rowids and the result's doc_id is the row's real rowid
+ * (SQLite's physical row locator, the analog of the server edition's
+ * ctid), with the raw scan position reported separately as scan_pos.
+ * In scan-position mode (fractal_search_trajectory,
+ * fractal_cross_modal_search, and the internal result_handle callers)
+ * doc_id stays the 0-indexed scan position. */
 static void agents_telemetry_run(sqlite3_context *ctx,
                                  const char *table, const char *col,
                                  const double *query, int dim,
-                                 int64_t *cohort, int n_cohort, int k) {
+                                 int64_t *cohort, int n_cohort, int k,
+                                 int locator) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
     char err[512];
 
     AgentCorpus corpus;
-    if (agents_scan_corpus(st, table, col, dim, 0, &corpus,
+    if (agents_scan_corpus(st, table, col, dim, locator, &corpus,
                            err, sizeof err) != 0) {
         agents_result_err(ctx, err);
         return;
     }
 
-    int64_t *doc_id_map = NULL;
+    int64_t *id_map = NULL;
     if (cohort) {
         double *filtered = (double *)malloc(
             (corpus.n_rows ? corpus.n_rows : 1)
@@ -2139,12 +2343,16 @@ static void agents_telemetry_run(sqlite3_context *ctx,
         }
         size_t kept_n = 0;
         for (size_t r = 0; r < corpus.n_rows; r++) {
-            if (!agents_i64_sorted_contains(cohort, n_cohort, (int64_t)r))
+            /* The cohort holds rowids in locator mode (the same
+             * physical locator the result's doc_id reports) and
+             * 0-indexed scan positions in scan-position mode. */
+            if (!agents_i64_sorted_contains(cohort, n_cohort,
+                    locator ? corpus.rowids[r] : (int64_t)r))
                 continue;
             memcpy(filtered + kept_n * (size_t)dim,
                    corpus.data + r * (size_t)dim,
                    (size_t)dim * sizeof(double));
-            map[kept_n++] = (int64_t)r;
+            map[kept_n++] = locator ? corpus.rowids[r] : (int64_t)r;
         }
         if (kept_n == 0) {
             free(filtered); free(map);
@@ -2157,14 +2365,14 @@ static void agents_telemetry_run(sqlite3_context *ctx,
         free(corpus.data);          /* the filtered copy replaces it */
         corpus.data = filtered;
         corpus.n_rows = kept_n;
-        doc_id_map = map;
+        id_map = map;
     }
 
     StrBuf out;
     sb_init(&out);
-    int trc = agents_topk_json(st, &corpus, query, k, doc_id_map, &out,
+    int trc = agents_topk_json(st, &corpus, query, k, id_map, locator, &out,
                                err, sizeof err);
-    free(doc_id_map);
+    free(id_map);
     agents_corpus_free(&corpus);
     if (trc != 0) {
         agents_result_err(ctx, err);
@@ -2228,7 +2436,7 @@ static void fractal_search_telemetry_fn(sqlite3_context *ctx, int argc,
             "canonical float32 BLOB)", -1);
         return;
     }
-    agents_telemetry_run(ctx, table, col, query, dim, NULL, 0, k);
+    agents_telemetry_run(ctx, table, col, query, dim, NULL, 0, k, 1);
     free(query);
 }
 
@@ -2263,8 +2471,10 @@ static void fractal_hybrid_clinical_search_fn(sqlite3_context *ctx, int argc,
         return;
     }
 
-    /* doc_ids arrives as a JSON/CSV array of integers as TEXT, parsed
-     * with the shared numeric-series parser. */
+    /* doc_ids arrives as a JSON/CSV array of rowids as TEXT (the same
+     * physical row locator the result's doc_id field reports -- the
+     * analog of the server edition's ctid cohort), parsed with the
+     * shared numeric-series parser. */
     double *raw = (double *)malloc(
         (size_t)FSQL_ARENA_MAX_DIM * sizeof(double));
     if (!raw) { sqlite3_result_error_nomem(ctx); return; }
@@ -2274,7 +2484,7 @@ static void fractal_hybrid_clinical_search_fn(sqlite3_context *ctx, int argc,
         free(raw);
         sqlite3_result_error(ctx,
             "fractalsql: doc_ids must be a non-empty JSON/CSV array of "
-            "doc ids", -1);
+            "rowids", -1);
         return;
     }
     int64_t *cohort = (int64_t *)malloc((size_t)n_cohort * sizeof(int64_t));
@@ -2298,7 +2508,7 @@ static void fractal_hybrid_clinical_search_fn(sqlite3_context *ctx, int argc,
             "canonical float32 BLOB)", -1);
         return;
     }
-    agents_telemetry_run(ctx, table, col, query, dim, cohort, n_cohort, k);
+    agents_telemetry_run(ctx, table, col, query, dim, cohort, n_cohort, k, 1);
     free(query);
     free(cohort);
 }
@@ -2365,7 +2575,7 @@ static void fractal_cross_modal_search_fn(sqlite3_context *ctx, int argc,
         query[mo_dim + i] = (double)cl[i] * (1.0 - alpha);
     free(mo); free(cl);
 
-    agents_telemetry_run(ctx, table, col, query, dim, NULL, 0, k);
+    agents_telemetry_run(ctx, table, col, query, dim, NULL, 0, k, 0);
     free(query);
 }
 
@@ -2472,7 +2682,7 @@ static void fractal_search_trajectory_fn(sqlite3_context *ctx, int argc,
     free(base_f);
     free(cur_f);
 
-    agents_telemetry_run(ctx, table, col, delta, base_dim, NULL, 0, k);
+    agents_telemetry_run(ctx, table, col, delta, base_dim, NULL, 0, k, 0);
     free(delta);
 }
 
@@ -2776,7 +2986,10 @@ int fsql_agents_register(sqlite3 *db, FsqlState *st) {
         { "fractal_rag_agent",                -1, fractal_rag_agent_fn              },
         { "fractal_agent_plan_explore",        4, fractal_plan_explore_fn           },
         { "fractal_agent_trajectory_predict",  4, fractal_trajectory_predict_fn     },
-        { "fractal_agent_detect_loop",         1, fractal_detect_loop_fn            },
+        { "fractal_agent_detect_loop",         3, fractal_detect_loop_fn            },
+        { "fractal_agent_detect_loop",         4, fractal_detect_loop_fn            },
+        { "fractal_agent_detect_loop",         5, fractal_detect_loop_fn            },
+        { "fractal_agent_detect_loop",         6, fractal_detect_loop_fn            },
         { "fractal_search_telemetry",          4, fractal_search_telemetry_fn       },
         { "fractal_search_trajectory",         5, fractal_search_trajectory_fn      },
         { "fractal_hybrid_clinical_search",    5, fractal_hybrid_clinical_search_fn },

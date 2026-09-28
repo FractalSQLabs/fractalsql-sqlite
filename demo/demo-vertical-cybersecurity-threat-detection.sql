@@ -33,11 +33,13 @@
 --     still a hard write-time error.
 --   * The fractal_agent_* presets are blueprint compositions over the
 --     primitives (see demo-agents.sql for the pattern).
---   * doc_id is the row's 0-based position in the search's own scan
---     order, and in SQLite that order IS rowid order (UPDATE keeps a
---     rowid table's physical position on UPDATE);
---     vcy_hosts' rowid aliases its INTEGER PRIMARY KEY id, so doc_id =
---     id - 1 exactly, stable across the section-1 UPDATE.
+--   * telemetry/hybrid doc_id IS the row's rowid (with the raw 0-indexed
+--     scan position alongside as scan_pos); trajectory doc_id stays a
+--     0-indexed scan position, and in SQLite that order IS rowid order
+--     (UPDATE keeps a rowid table's physical position on UPDATE);
+--     vcy_hosts' rowid aliases its INTEGER PRIMARY KEY id, so the
+--     trajectory joins still use doc_id = id - 1 exactly, stable across
+--     the section-1 UPDATE.
 --
 -- Safe to re-run: vcy_* tables are dropped and recreated each time.
 
@@ -134,8 +136,7 @@ SELECT m.id                     AS item_id,
        m.hostname               AS hostname,
        1.0 - t.dist             AS score
 FROM t
-JOIN (SELECT id, hostname, (row_number() OVER (ORDER BY rowid) - 1) AS doc_id
-        FROM vcy_hosts) m USING (doc_id)
+JOIN vcy_hosts m ON m.rowid = t.doc_id
 ORDER BY t.dist;
 SELECT fractal_diversify_disable();
 
@@ -143,11 +144,10 @@ SELECT fractal_diversify_disable();
 -- 3. Zone-restricted search: "DMZ hosts only" -- a zone filter composes
 -- by searching a filtered temp table (the same cohort-then-search shape
 -- fractal_hybrid_clinical_search uses internally for its doc_ids
--- allowlist). doc_id is the row's 0-based position in the search's own
--- scan, which for a rowid table is rowid order -- and vcy_dmz_cohort's
--- rowids are vcy_hosts' ids (INTEGER PRIMARY KEY aliases rowid, SELECT *
--- carries the id), so the row_number mapping below resolves doc_id back
--- to hostname without assuming id - 1.
+-- allowlist). doc_id IS the row's rowid, and vcy_dmz_cohort's rowids are
+-- vcy_hosts' ids (INTEGER PRIMARY KEY aliases rowid, SELECT * carries
+-- the id), so the rowid join below resolves doc_id back to hostname
+-- without assuming id - 1.
 -- ------------------------------------------------------------------
 .print
 .print === 3. Zone-restricted search: DMZ hosts only ===
@@ -162,8 +162,7 @@ WITH t AS (SELECT json_extract(value, '$.doc_id')   AS doc_id,
                       'vcy_dmz_cohort', 'current', '0.3,0.3,0.3,0.0', 5)))
 SELECT h.hostname, t.dist AS distance
 FROM t
-JOIN (SELECT hostname, (row_number() OVER (ORDER BY rowid) - 1) AS doc_id
-        FROM vcy_dmz_cohort) h ON h.doc_id = t.doc_id
+JOIN vcy_dmz_cohort h ON h.rowid = t.doc_id
 ORDER BY t.dist;
 
 -- ------------------------------------------------------------------
@@ -257,13 +256,43 @@ SELECT (SELECT h.id FROM tr, json_each(tr.tj) je
 SELECT fractal_reason('one-line track-anomaly read for this host');
 
 -- ------------------------------------------------------------------
--- 6. Reasoning: the SOC triage narrative for host 7 is carried by the
+-- 6. fractal_periodogram: host 7's connection-rate series (same series
+-- as Section 5) run through a direct-DFT periodogram, alongside DFA --
+-- beaconing C2 traffic characteristically shows up as a strong,
+-- regular period in the connection-rate spectrum (the post-t=220
+-- segment's higher-frequency sin(t*1.4) component vs. the baseline
+-- segment's slower sin(t*0.31)), a signal DFA's single scaling
+-- exponent doesn't surface directly. Citation: Schuster, A. (1898).
+-- "On the investigation of hidden periodicities with application to a
+-- supposed 26 day period of meteorological phenomena." Terrestrial
+-- Magnetism, 3(1), 13-41. The classical periodogram, computed here via
+-- direct DFT.
+-- ------------------------------------------------------------------
+.print
+.print === 6. Host 7 connection-rate periodogram (beaconing-interval check) ===
+.print (restricted to the post-t=220 beaconing window: over the whole
+.print series the pre-shift noise floor would dilute the peak.)
+
+WITH s AS (SELECT '[' || group_concat(printf('%.4f', conn_rate) ORDER BY t) || ']' AS sj
+             FROM vcy_conn_series WHERE t >= 220)
+SELECT fractal_periodogram((SELECT sj FROM s), 5) AS periodogram;
+
+.print --- dominant frequency + power (top peak) ---
+WITH s AS (SELECT '[' || group_concat(printf('%.4f', conn_rate) ORDER BY t) || ']' AS sj
+             FROM vcy_conn_series WHERE t >= 220),
+p AS (SELECT fractal_periodogram((SELECT sj FROM s), 5) AS pj)
+SELECT json_extract(p.pj, '$.freqs[0]') AS dominant_freq,
+       json_extract(p.pj, '$.power[0]') AS dominant_power
+FROM p;
+
+-- ------------------------------------------------------------------
+-- 7. Reasoning: the SOC triage narrative for host 7 is carried by the
 -- two composition rationales above (track_anomaly's baseline->current
 -- drift + connection-rate DFA, and regime_triage's regime change
 -- itself).
 -- ------------------------------------------------------------------
 .print
-.print === 6. Reasoning: carried by the two composition rationales above ===
+.print === 7. Reasoning: carried by the two composition rationales above ===
 
 .print
 .print === Demo complete ===

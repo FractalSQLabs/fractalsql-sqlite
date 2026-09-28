@@ -62,7 +62,7 @@
 
 /* Extension version. Single source of truth for fractalsql_version()
  * and the smoke gate; bumped in lockstep with packaging scripts. */
-#define FSQL_SQLITE_VERSION_STR   "2.0.0"
+#define FSQL_SQLITE_VERSION_STR   "2.0.4"
 #define FSQL_SQLITE_EDITION_STR   "Community"
 
 /* SFS tuning: same values the pre-2.x path used. */

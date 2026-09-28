@@ -105,8 +105,8 @@ SELECT (SELECT count(*) FROM vqf_assets) AS assets,
 .print === 2. fractal_optimize_portfolio: best 8-of-25 asset book ===
 
 -- The engine here IS the shipped optimizer (productized into the
--- fractal_agent_rebalance_sibling preset, composed in Section 4's
--- rebalance blueprint over the Section 4 snapshot fixture). mu/cov are
+-- fractal_agent_rebalance_sibling preset, composed in Section 5's
+-- rebalance blueprint over the Section 5 snapshot fixture). mu/cov are
 -- flat CSV: row-major n*n for cov, one mu per asset in asset_id order.
 DROP TABLE IF EXISTS vqf_result;
 CREATE TEMP TABLE vqf_result AS
@@ -168,13 +168,28 @@ SELECT json_extract(fractal_dimension_drift(series, 64), '$.drift') > 0.5
   FROM vqf_price_series;
 
 -- ------------------------------------------------------------------
--- 4. fractal_search_trajectory: which of 10 historical quarterly
+-- 4. fractal_change_point_detect: localize the Section 3 volatility-
+-- regime shift directly, rather than only characterizing overall
+-- scaling behavior via DFA/drift. A windowed two-sample mean/variance
+-- comparison over the same 300-point series -- expected to land near
+-- t=240, the deliberate regime boundary. Original work, not a port of
+-- a specific published algorithm (e.g. not CUSUM/Page-Hinkley), so no
+-- citation.
+-- ------------------------------------------------------------------
+.print
+.print === 4. fractal_change_point_detect: localizing the regime shift ===
+
+WITH s AS (SELECT series FROM vqf_price_series)
+SELECT fractal_change_point_detect((SELECT series FROM s), 20, 1.5, 8) AS change_points;
+
+-- ------------------------------------------------------------------
+-- 5. fractal_search_trajectory: which of 10 historical quarterly
 -- rebalance snapshots does THIS rebalance (equal-weight baseline ->
 -- the optimized book from Section 2) most resemble? "What changed",
 -- not "what's closest" -- the natural query shape for drift.
 -- ------------------------------------------------------------------
 .print
-.print === 4. fractal_search_trajectory: nearest historical rebalance pattern ===
+.print === 5. fractal_search_trajectory: nearest historical rebalance pattern ===
 
 DROP TABLE IF EXISTS vqf_allocation_snapshots;
 -- CSV TEXT guarded by a CHECK(fractal_vector_dims(alloc) = 25)
@@ -233,15 +248,15 @@ JOIN vqf_allocation_snapshots s ON s.id - 1 = json_extract(je.value, '$.doc_id')
 ORDER BY json_extract(je.value, '$.distance');
 
 -- ------------------------------------------------------------------
--- 5. Reasoning: the regime-shift + optimized-allocation narrative the
+-- 6. Reasoning: the regime-shift + optimized-allocation narrative the
 -- presets above carry in their rationale columns closes the
 -- demo as one reasoning pass over the same two facts (the Section 3
--- drift report and the Section 2/4 optimized book + its nearest
+-- drift report and the Section 2/5 optimized book + its nearest
 -- historical pattern). Plugin-gated: the clean hint is the expected
 -- output without one.
 -- ------------------------------------------------------------------
 .print
-.print === 5. Reasoning: regime shift + rebalance rationale ===
+.print === 6. Reasoning: regime shift + rebalance rationale ===
 SELECT fractal_reason('one-line rationale tying this market regime shift to the optimized 8-asset rebalance and its nearest historical pattern');
 
 .print

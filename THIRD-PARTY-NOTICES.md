@@ -173,3 +173,28 @@ components. Mirrors core's own THIRD-PARTY-NOTICES-COMMUNITY.md.
   (`fractal_optimize_portfolio`) -- a hardcoded objective template built
   on entry 1's SFS engine (project-then-evaluate against a Sharpe-ratio
   objective); not itself a port of a separate published algorithm.
+- **SimHash / random-projection state fingerprint** (`fractal_state_fingerprint`)
+  -- Charikar, M. S. (2002). "Similarity estimation techniques from
+  rounding algorithms." Proceedings of the 34th Annual ACM Symposium on
+  Theory of Computing (STOC), pp. 380-388.
+- **Brent's cycle detection** (`fractal_cycle_detect`) -- Brent, R. P.
+  (1980). "An improved Monte Carlo factorization algorithm." BIT
+  Numerical Mathematics, 20(2), 176-184. This module implements Brent's
+  tortoise-and-hare checkpoint schedule, adapted to run incrementally
+  over a live stream of values rather than a freely-callable function --
+  an extension of the published algorithm, not a direct port.
+- **Periodogram** (`fractal_periodogram`) -- Schuster, A. (1898). "On
+  the investigation of hidden periodicities with application to a
+  supposed 26 day period of meteorological phenomena." Terrestrial
+  Magnetism, 3(1), 13-41. The classical periodogram, computed here via
+  direct DFT.
+- **TDA persistence diagram, 0-dimensional exact + graph Betti number**
+  (`fractal_tda_persistence_diagram`) -- Edelsbrunner, H., Letscher, D.,
+  & Zomorodian, A. (2002). "Topological persistence and simplification."
+  Discrete & Computational Geometry, 28(4), 511-533. The 0-dimensional
+  persistence computation (single-linkage clustering via Kruskal's
+  algorithm) is an exact instance of this theory. The reported first
+  Betti number is the cycle rank of the underlying Vietoris-Rips graph
+  (edges minus vertices plus connected components), not the full
+  simplicial first homology group the cited paper's boundary-matrix
+  reduction method would produce.

@@ -31,9 +31,11 @@
 --     blueprint compositions over the primitives (Scout population +
 --     telemetry; diversify loop + diagnostics) -- see demo-agents.sql
 --     for the pattern.
---   * doc_id is the row's 0-based scan position; catalog rowid aliases
---     the INTEGER PRIMARY KEY id, so doc_id = id - 1 exactly (rowid
---     tables keep their physical position).
+--   * telemetry/hybrid doc_id IS the row's rowid (with the raw 0-indexed
+--     scan position alongside as scan_pos); trajectory/cross-modal doc_id
+--     stays a 0-indexed scan position (the trajectory/cross-modal joins
+--     below still use doc_id = id - 1 exactly, since rowid tables keep
+--     their physical position).
 --
 -- Safe to re-run: vrs_* tables are dropped and recreated each time.
 
@@ -154,7 +156,7 @@ WITH tj AS (SELECT fractal_search_telemetry('vrs_catalog', 'emb_arr',
                     (SELECT center FROM vrs_genres WHERE genre_id = 1), 5) AS rj)
 SELECT c.title, json_extract(je.value, '$.distance') AS distance
 FROM tj, json_each(tj.rj) je
-JOIN vrs_catalog c ON c.id - 1 = json_extract(je.value, '$.doc_id')
+JOIN vrs_catalog c ON c.rowid = json_extract(je.value, '$.doc_id')
 ORDER BY json_extract(je.value, '$.distance');
 
 -- ------------------------------------------------------------------
@@ -181,7 +183,8 @@ ORDER BY json_extract(je.value, '$.distance');
 -- audit cycle): enable repulsion, set params, warm the D_q
 -- rolling window with varied genre-center queries, report negative
 -- feedback on the genre-3 top result (fractal_isolate_background on its
--- doc_id -- the doc_id IS the handle), read back the real
+-- scan_pos -- scan_pos IS the handle, not doc_id, which is the row's
+-- rowid), read back the real
 -- diversity_quotient + session diagnostics, and self-disable.
 SELECT fractal_diversify_enable();
 SELECT fractal_diversify_set_params('{"window_n": 5, "repulsion_sigma": 0.3, "repulsion_weight": 0.5}');
@@ -199,14 +202,14 @@ ORDER BY warmed_doc_id LIMIT 8;
 -- Negative feedback on the genre-3 audit target.
 WITH tj AS (SELECT fractal_search_telemetry('vrs_catalog', 'emb_arr',
                     (SELECT center FROM vrs_genres WHERE genre_id = 3), 1) AS rj)
-SELECT c.title AS audit_target, json_extract(je.value, '$.doc_id') AS audit_doc_id
+SELECT c.title AS audit_target, json_extract(je.value, '$.scan_pos') AS audit_scan_pos
 FROM tj, json_each(tj.rj) je
-JOIN vrs_catalog c ON c.id - 1 = json_extract(je.value, '$.doc_id');
+JOIN vrs_catalog c ON c.rowid = json_extract(je.value, '$.doc_id');
 
 WITH tj AS (SELECT fractal_search_telemetry('vrs_catalog', 'emb_arr',
                     (SELECT center FROM vrs_genres WHERE genre_id = 3), 1) AS rj)
 SELECT fractal_isolate_background(
-    (SELECT json_extract(je.value, '$.doc_id') FROM tj, json_each(tj.rj) je));
+    (SELECT json_extract(je.value, '$.scan_pos') FROM tj, json_each(tj.rj) je));
 
 SELECT fractal_detect_collapse() AS diversity_quotient,
        fractal_explain_result()  AS diagnostics;
@@ -264,7 +267,7 @@ SELECT fractal_reason(
     (SELECT json_group_object(c.title, json_object('genre_id', c.genre_id,
                                                    'distance', json_extract(je.value, '$.distance')))
        FROM tj, json_each(tj.rj) je
-       JOIN vrs_catalog c ON c.id - 1 = json_extract(je.value, '$.doc_id')));
+       JOIN vrs_catalog c ON c.rowid = json_extract(je.value, '$.doc_id')));
 
 .print
 .print === Demo complete ===

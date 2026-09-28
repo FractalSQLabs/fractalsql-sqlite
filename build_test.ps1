@@ -92,12 +92,22 @@
                              path), domain geometry (vascular/cortical/
                              nerve/morphological), search_telemetry,
                              hybrid/cross-modal guards, explain_result/
-                             detect_collapse/diversify
+                             detect_collapse/diversify, the v2.0.25-core
+                             analytics surface (change_point_detect/
+                             periodogram/tda_persistence_diagram/state_
+                             fingerprint/cycle_detect/optimize_subset)
+                             and the vector-math quartet (lp_distance/
+                             quantize_int8/quantize_binary/hamming_
+                             distance)
       23  agents             the registered C agents with a reasoning
                              canary: search_agent/rag_agent/sql_agent/
-                             plan_explore/trajectory_predict/detect_loop/
-                             telemetry/trajectory/hybrid/cross_modal +
-                             the three guards
+                             plan_explore/trajectory_predict/detect_loop
+                             (the (agent_id, state_log, dim[, n_bits,
+                             seed, hamming_threshold]) signature: a
+                             period-2 two-direction toggle flagged, a
+                             distinct-direction stream cleared, a best-
+                             effort short-log answer)/telemetry/trajectory/
+                             hybrid/cross_modal + the three guards
       24  enterprise         dormant enterprise path: ledger/audit
                              surface cleanly rejected; a bogus
                              enterprise_lib surfaces the load failure
@@ -119,7 +129,10 @@
                              agents.c): three representative engines
                              (anomaly_triage, recall_hybrid,
                              regime_triage) run end-to-end against the
-                             real primitives they compose
+                             real primitives they compose, plus
+                             outlier_intercept's metric surface (cosine
+                             default, exact-L2 path, unknown-metric
+                             hard error)
 
     Gate sets:
       QUICK   = 01 02                                   post-edit sanity
@@ -834,8 +847,8 @@ function Gate-01-Build {
 
 function Gate-02-Smoke {
     $ver = Sqlq 'SELECT fractalsql_version();'
-    if ($ver -eq '2.0.0') { Pass "02 smoke: version=$ver" }
-    else { Fail "02 smoke: version='$ver' (want 2.0.0)" }
+    if ($ver -eq '2.0.4') { Pass "02 smoke: version=$ver" }
+    else { Fail "02 smoke: version='$ver' (want 2.0.4)" }
     # fractal_search convergence: self-distance ~0
     $d = Sqlq "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');"
     if ($d -eq '0.0' -or (PyAbsLt1e6 $d)) { Pass "02 smoke: fractal_search self-distance=$d" }
@@ -1998,18 +2011,48 @@ print(','.join('%s,%s'%(i,i+1) for i in range(n-1)))" 2>$null)
         Pass '22 v2_functions: diversify state machine cycles cleanly'
     }
     else { Fail "22 v2_functions: diversify: $r" }
-    $r = Sqlq "SELECT fractal_search_telemetry(
-              'bt_telemetry', 'vec', '0.6,0.8,0.0,0.0', 2);"
-    if ($script:SqlqRc -eq 0 -and $r.Contains('id')) {
-        Pass '22 v2_functions: search_telemetry returns ground-truth rows'
+    $r = Sqlq "SELECT d.id, json_extract(je.j,'`$.distance') AS distance FROM
+           (SELECT value AS j FROM json_each(fractal_search_telemetry(
+              'bt_telemetry', 'vec', '0.6,0.8,0.0,0.0', 2))) je
+           JOIN bt_telemetry d ON d.rowid = json_extract(je.j,'`$.doc_id')
+           ORDER BY json_extract(je.j,'`$.distance') LIMIT 1;"
+    if ($script:SqlqRc -eq 0 -and $r -match '(?m)^1\|[0-9.e-]+$' -and
+        [double]($r -replace '(?m)^1\|','' -split "`r?`n")[0] -lt 1e-6) {
+        Pass '22 v2_functions: search_telemetry doc_id resolves to the real row (rowid = doc_id)'
     }
-    else { Fail "22 v2_functions: telemetry: $r" }
+    else { Fail "22 v2_functions: telemetry rowid-join: $r" }
+    $r = Sqlq "SELECT json_extract(fractal_search_telemetry(
+              'bt_telemetry', 'vec', '0.6,0.8,0.0,0.0', 2), '`$[0].scan_pos');"
+    if ($script:SqlqRc -eq 0 -and $r.Trim() -eq '0') {
+        Pass '22 v2_functions: search_telemetry reports scan_pos alongside the rowid doc_id'
+    }
+    else { Fail "22 v2_functions: telemetry scan_pos: $r" }
     if (ExpectErr 'k must be > 0' `
             "SELECT fractal_search_telemetry('bt_telemetry','vec',
         '0.6,0.8,0.0,0.0', 0);") {
         Pass '22 v2_functions: telemetry k<=0 rejected'
     }
     else { Fail '22 v2_functions: telemetry k<=0 accepted' }
+    # hybrid: the cohort holds real rowids (the same locator the result
+    # doc_id reports); the join asserts the returned doc_ids are real
+    # row ids, not scan positions.
+    $r = Sqlq "SELECT group_concat(d.id) FROM
+           (SELECT value AS j FROM json_each(fractal_hybrid_clinical_search(
+              'bt_telemetry', 'vec', '0.0,1.0,0.0,0.0',
+              (SELECT json_group_array(rowid) FROM bt_telemetry
+                WHERE id IN (2,4,5)), 3))) r
+           JOIN bt_telemetry d ON d.rowid = json_extract(r.j,'`$.doc_id');"
+    if ($script:SqlqRc -eq 0 -and
+        $r.Contains('2') -and $r.Contains('4') -and $r.Contains('5')) {
+        Pass '22 v2_functions: hybrid restricts to the rowid cohort and returns real row ids'
+    }
+    else { Fail "22 v2_functions: hybrid rowid cohort: $r" }
+    if (ExpectErr 'cohort matched no rows' `
+            "SELECT fractal_hybrid_clinical_search('bt_telemetry','vec',
+        '0.0,1.0,0.0,0.0', '[999999]', 1);") {
+        Pass '22 v2_functions: hybrid rejects a cohort matching zero rows'
+    }
+    else { Fail '22 v2_functions: hybrid zero-cohort accepted' }
     $r = Sqlq "SELECT fractal_search_trajectory(
               'bt_traj', 'vec', '0.0,0.0,0.0,0.0',
               '0.3,0.0,0.0,0.0', 3);"
@@ -2023,6 +2066,92 @@ print(','.join('%s,%s'%(i,i+1) for i in range(n-1)))" 2>$null)
         Pass '22 v2_functions: explain_result/detect_collapse respond'
     }
     else { Fail "22 v2_functions: explain/detect_collapse: $r" }
+    # --- v2.0.25-core analytics surface (10 functions) ------------------
+    # change_point_detect: 40-point mean step at t=20, window 10 ->
+    # boundary index 20 (the exact fixture demo/benchmark-api-reference.sql
+    # uses, scaled down to stay inline here).
+    $r = Sqlq "SELECT fractal_change_point_detect(
+                  '1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,
+                   1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,
+                   3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,
+                   3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0',
+                  10, 1.0);"
+    if ($script:SqlqRc -eq 0 -and $r.Contains('"indices"')) {
+        Pass '22 v2_functions: change_point_detect returns boundary indices'
+    }
+    else { Fail "22 v2_functions: change_point_detect: $r" }
+    # periodogram: the same 32-point sin(i/4) series -> peak lists.
+    $r = Sqlq "SELECT fractal_periodogram('$s32', 3);"
+    if ($script:SqlqRc -eq 0 -and $r.Contains('"freqs"') -and $r.Contains('"power"')) {
+        Pass '22 v2_functions: periodogram returns the peak lists'
+    }
+    else { Fail "22 v2_functions: periodogram: $r" }
+    # TDA: an 8-point square ring at spacing 2 (threshold 2.5 admits the
+    # 8 ring edges, excludes the 2.83 corner diagonals) -> E-V+C = 1.
+    $r = Sqlq "SELECT fractal_tda_persistence_diagram(
+                  '0,0,2,0,4,0,4,2,4,4,2,4,0,4,0,2', 2, 1, 2.5);"
+    if ($script:SqlqRc -eq 0 -and $r.Contains('"betti1":1')) {
+        Pass '22 v2_functions: TDA flags the single ring cycle (betti1=1)'
+    }
+    else { Fail "22 v2_functions: TDA: $r" }
+    # state_fingerprint: 64 bits -> (64+7)/8 = 8 bytes -> 16 hex chars.
+    $r = Sqlq "SELECT length(hex(fractal_state_fingerprint('1.0,0.0,0.0', 64)));"
+    if ($r -eq '16') {
+        Pass '22 v2_functions: state_fingerprint returns a 64-bit (16-hex-char) BLOB'
+    }
+    else { Fail "22 v2_functions: state_fingerprint: $r" }
+    # cycle_detect: a clean period-2 one-hot fingerprint stream closes
+    # (one-hot states, so the two directions are distinguishable).
+    $r = Sqlq @'
+    WITH RECURSIVE g(t) AS (VALUES(0) UNION ALL SELECT t+1 FROM g WHERE t<9)
+    SELECT fractal_cycle_detect(
+        (SELECT json_group_array(f) FROM
+           (SELECT hex(fractal_state_fingerprint(
+              CASE WHEN t % 2 = 0 THEN '1.0,0.0,0.0' ELSE '0.0,1.0,0.0' END, 64)) AS f
+              FROM g)),
+        64) AS cycle_detect;
+'@
+    if ($script:SqlqRc -eq 0 -and $r.Contains('"detected":true')) {
+        Pass '22 v2_functions: cycle_detect closes the period-2 fingerprint stream'
+    }
+    else { Fail "22 v2_functions: cycle_detect: $r" }
+    # optimize_subset: best 5 of 10 scored items (bounds <= 1.0).
+    $r = Sqlq "SELECT fractal_optimize_subset(
+                  '10,9,8,7,6,5,4,3,2,1',
+                  '1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0',
+                  5);"
+    if ($script:SqlqRc -eq 0 -and $r.Contains('"weights"')) {
+        Pass '22 v2_functions: optimize_subset returns the value-weighted allocation'
+    }
+    else { Fail "22 v2_functions: optimize_subset: $r" }
+    # Vector math quartet (registered in the common TU -- both builds).
+    $r = Sqlq "SELECT fractal_vector_lp_distance('1,0,0', '0.5,0,0', 2.0) AS lp2;" `
+        "SELECT fractal_vector_lp_distance('1,0,0', '0.5,0,0', 0.5) AS lp05;"
+    if ($script:SqlqRc -eq 0) {
+        Pass '22 v2_functions: fractal_vector_lp_distance (p=2 and fractional p=0.5)'
+    }
+    else { Fail "22 v2_functions: lp_distance: $r" }
+    $r = Sqlq "SELECT fractal_vector_quantize_int8('0.5,-0.25,0.75,0.0');"
+    if ($script:SqlqRc -eq 0 -and $r.Contains('"scale"')) {
+        Pass '22 v2_functions: quantize_int8 returns the scale+codes document'
+    }
+    else { Fail "22 v2_functions: quantize_int8: $r" }
+    $r = Sqlq "SELECT length(fractal_vector_quantize_binary(
+           '1,-1,1,1,-1,1,-1,-1,1,1'));"
+    if ($r -eq '2') {   # (10 + 7) / 8 = 2 sign bytes
+        Pass '22 v2_functions: quantize_binary returns (dim+7)/8 sign bytes'
+    }
+    else { Fail "22 v2_functions: quantize_binary: $r" }
+    $r = Sqlq "SELECT fractal_vector_hamming_distance(
+               fractal_vector_quantize_binary('1,-1,1,1,-1,1,-1,-1,1,1'),
+               fractal_vector_quantize_binary('1,-1,1,1,-1,1,-1,-1,1,1'));" `
+        "SELECT fractal_vector_hamming_distance(
+               fractal_vector_quantize_binary('1,-1,1,1,-1,1,-1,-1,1,1'),
+               fractal_vector_quantize_binary('-1,-1,1,1,-1,1,-1,-1,1,1'));"
+    if ($r -eq "0`n1") {
+        Pass '22 v2_functions: hamming_distance (same pair=0, one bit=1)'
+    }
+    else { Fail "22 v2_functions: hamming_distance: $r" }
 }
 
 function Gate-23-Agents {
@@ -2102,14 +2231,57 @@ function Gate-23-Agents {
     else { Fail "23 plan_explore JSON: $($script:LastAgentOut)" }
     Agent 'trajectory_predict over telemetry' `
         "SELECT fractal_agent_trajectory_predict('bt_traj','vec',3,2);"
-    Agent 'detect_loop monitors a series' `
-        "SELECT fractal_agent_detect_loop(
-       '0.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,0.0,0.1,
-        0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,0.0,0.1,0.2,0.3');"
-    if ($script:LastAgentOut -match '"is_loop_detected":(true|false)') {
-        Pass '23 detect_loop returns the verdict'
+    # detect_loop: the v2.0.25-core signature (agent_id, state_log, dim
+    # [, n_bits, seed, hamming_threshold]) -- SimHash state fingerprints
+    # streamed through Brent's cycle detector (primary signal), plus a
+    # best-effort DFA over the per-state L2 norms (parity with the pg
+    # wrapper: rc ignored, alpha stays 0.0 when the DFA declines -- the
+    # core needs >= 24 points and a non-constant series). The fixtures
+    # still satisfy the DFA so both signals are exercised: 32 states
+    # with varying norms. t1 toggles between two well-separated
+    # directions ((1,0) vs (0,2)) -- two distinct fingerprints cycling,
+    # so Brent flags it. t2 is 32 directions spread ~11 degrees apart
+    # around the circle (fingerprint cells in 2D average ~5.6 degrees
+    # wide, so clustered directions collide and false-positive) with
+    # varied magnitudes.
+    Agent 'detect_loop flags a period-2 two-direction toggle' `
+        "SELECT fractal_agent_detect_loop('agent-t1',
+       '1.0,0.0,0.0,2.0,1.0,0.0,0.0,2.0,1.0,0.0,0.0,2.0,
+        1.0,0.0,0.0,2.0,1.0,0.0,0.0,2.0,1.0,0.0,0.0,2.0,
+        1.0,0.0,0.0,2.0,1.0,0.0,0.0,2.0,1.0,0.0,0.0,2.0,
+        1.0,0.0,0.0,2.0,1.0,0.0,0.0,2.0,1.0,0.0,0.0,2.0,
+        1.0,0.0,0.0,2.0,1.0,0.0,0.0,2.0,1.0,0.0,0.0,2.0,
+        1.0,0.0,0.0,2.0', 2, 64, 42.0, 0);"
+    if ($script:LastAgentOut.Contains('"is_loop_detected":true') -and
+        $script:LastAgentOut.Contains('"agent_id":"agent-t1"')) {
+        Pass '23 detect_loop flags the period-2 toggle (fingerprint cycle, 6-arity form)'
     }
-    else { Fail "23 detect_loop JSON: $($script:LastAgentOut)" }
+    else { Fail "23 detect_loop loop-case JSON: $($script:LastAgentOut)" }
+    Agent 'detect_loop clears a distinct-direction stream' `
+        "SELECT fractal_agent_detect_loop('agent-t2',
+       '0.999,0.05, 1.261,0.317, 0.633,0.3, 0.963,0.716,
+        0.604,0.667, 0.719,1.201, 0.202,0.565, 0.16,1.088,
+       -0.04,0.799, -0.366,1.455, -0.3,0.633, -0.775,1.043,
+       -0.667,0.604, -1.03,0.616, -0.565,0.202, -1.385,0.204,
+       -0.999,-0.05, -0.776,-0.195, -1.175,-0.557, -0.562,-0.418,
+       -1.006,-1.112, -0.462,-0.772, -0.37,-1.036, -0.087,-0.594,
+        0.06,-1.199, 0.341,-1.358, 0.343,-0.723, 0.418,-0.562,
+        0.964,-0.872, 0.858,-0.513, 1.413,-0.504, 0.89,-0.131', 2);"
+    if ($script:LastAgentOut.Contains('"is_loop_detected":false')) {
+        Pass '23 detect_loop clears the 32-state stream (distinct directions, varied norms)'
+    }
+    else { Fail "23 detect_loop drift-case JSON: $($script:LastAgentOut)" }
+    # Short log: the DFA declines (< 24 points) but is best-effort --
+    # parity with pg is a JSON answer with alpha 0.0, not an error.
+    Agent 'detect_loop short log returns a best-effort JSON' `
+        "SELECT fractal_agent_detect_loop('agent-t3', '1.0,0.0,0.0,1.0', 2);"
+    if ($script:LastAgentOut.Contains('"dfa_exponent":0') -and
+        $script:LastAgentOut.Contains('"is_loop_detected":false')) {
+        Pass '23 detect_loop short log is best-effort (alpha 0.0, no cycle)'
+    }
+    else { Fail "23 detect_loop short-log JSON: $($script:LastAgentOut)" }
+    AgentErr 'detect_loop ragged state_log guard' 'not a multiple of dim' `
+        "SELECT fractal_agent_detect_loop('agent-t4', '1.0,0.0,0.0', 2);"
     Agent 'telemetry + trajectory + hybrid + cross_modal + explain' `
         "SELECT fractal_search_telemetry('bt_agent_docs','emb',
        '1.0,0.0,0.0', 2);" `
@@ -2549,6 +2721,35 @@ function Gate-28-ReviewIsolation {
         "SELECT fractalsql_set('text_to_sql_use_review','on');" `
         "SELECT fractal_text_to_sql('q');"
     AssertDump 'REVIEW never sees T2S''s forced RESPONSE_MODE=code' '^RESPONSE_MODE=(unset)$'
+    # 3) Operator boot capture (the pg wrapper's g_response_mode_boot
+    # analog): FSQL_REASONING_HTTP_RESPONSE_MODE set in the HOST process
+    # env at extension-load time must reach the CHAT tier's plugin init
+    # (before the fix, cfg->response_mode was never populated, so the
+    # CHAT tier's env_apply unsetenv'd the operator's value and every
+    # fractal_reason() ran in default text mode). Each Sqlq call spawns
+    # a fresh CLI process, so the env set here is the boot value of a
+    # brand-new FsqlState.
+    $prevRm = $env:FSQL_REASONING_HTTP_RESPONSE_MODE
+    try {
+        $env:FSQL_REASONING_HTTP_RESPONSE_MODE = 'json'
+        if (Test-Path -LiteralPath $script:ReviewDump) { [IO.File]::Delete($script:ReviewDump) }
+        $null = Sqlq `
+            "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
+            "SELECT fractal_reason('summarize');"
+        AssertDump 'CHAT tier applies the operator''s boot RESPONSE_MODE' '^RESPONSE_MODE=json$'
+        # 4) The unset side of the same lever: with nothing in the env,
+        # CHAT must NOT run under any leftover response mode.
+        Remove-Item Env:FSQL_REASONING_HTTP_RESPONSE_MODE -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $script:ReviewDump) { [IO.File]::Delete($script:ReviewDump) }
+        $null = Sqlq `
+            "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
+            "SELECT fractal_reason('summarize');"
+        AssertDump 'CHAT tier unsets RESPONSE_MODE when the operator did not set one' '^RESPONSE_MODE=(unset)$'
+    }
+    finally {
+        if ($null -ne $prevRm) { $env:FSQL_REASONING_HTTP_RESPONSE_MODE = $prevRm }
+        else { Remove-Item Env:FSQL_REASONING_HTTP_RESPONSE_MODE -ErrorAction SilentlyContinue }
+    }
 }
 
 # Smoke gate for the sixteen installable Domain Agent engines
@@ -2635,6 +2836,48 @@ function Gate-29-DomainAgents {
         Pass '29 domain_agents: regime_triage composes dfa+drift -> reason (reason step ran)'
     } else {
         Fail "29 domain_agents: expected the reasoning canary in rationale, got: $r4b"
+    }
+
+    # --- 4: fractal_agent_outlier_intercept (the metric-arg surface) ----
+    # 'cosine' (default) via the telemetry engine; 'l2' via the exact
+    # ORDER BY over fractal_vector_l2_distance; any other value is a hard
+    # error, never a fallback.
+    $null = Sqlq @'
+    CREATE TABLE bt_da_badstates(state_id INTEGER PRIMARY KEY, state_vec TEXT);
+    INSERT INTO bt_da_badstates VALUES (1,'1.0,0.0,0.0'),(2,'0.0,1.0,0.0');
+'@
+    if ($script:SqlqRc -ne 0) {
+        Fail '29 domain_agents: bad-state fixture setup failed'
+        return
+    }
+    $r5 = Sqlq `
+        "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
+        "SELECT fractal_agent_outlier_intercept('0.95,0.05,0.0',
+       'bt_da_badstates', 'state_vec', 0.5);"
+    if ($r5.Contains('"intercepted":true') -and $r5.Contains('domain-agent-canary')) {
+        Pass '29 domain_agents: outlier_intercept intercepts the near-parallel state (cosine default)'
+    } else {
+        Fail "29 domain_agents: outlier_intercept cosine: $r5"
+    }
+    # The small-magnitude state is ~0.95 away in Euclidean terms even
+    # though cosine would call it near -- the exact-L2 path allows it.
+    $r5b = Sqlq `
+        "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
+        "SELECT fractal_agent_outlier_intercept('0.05,0.0,0.0',
+       'bt_da_badstates', 'state_vec', 0.8, 'l2');"
+    if ($r5b.Contains('"intercepted":false') -and $r5b.Contains('domain-agent-canary')) {
+        Pass '29 domain_agents: outlier_intercept l2 metric allows the small-magnitude state'
+    } else {
+        Fail "29 domain_agents: outlier_intercept l2: $r5b"
+    }
+    # Any other metric value (including 'euclid' and NULL) is a hard error.
+    if (ExpectErr "metric must be 'cosine' or 'l2'" `
+            "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
+            "SELECT fractal_agent_outlier_intercept('1.0,0.0,0.0',
+        'bt_da_badstates','state_vec', 0.5, 'euclid');") {
+        Pass "29 domain_agents: outlier_intercept unknown metric rejected"
+    } else {
+        Fail "29 domain_agents: unknown metric accepted"
     }
 
     [IO.File]::WriteAllText($script:SqlTxt, 'SELECT 1')

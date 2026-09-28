@@ -12,8 +12,8 @@
 -- demo-vertical-agentic-*.sql demos -- and every output column is a REAL
 -- primitive result, not a literal. threat_score is the computed drift
 -- exponent; allocation/sharpe are the optimizer's own output (no hardcoded
--- 0.042); routed_to is the real nearest capability name resolved through
--- the doc_id mapping, and confidence is 1/(1+distance); intercepted is a
+-- 0.042); routed_to is the real nearest capability name (doc_id IS the
+-- row's rowid), and confidence is 1/(1+distance); intercepted is a
 -- real distance-vs-threshold comparison; mem_id/content are the real
 -- recalled row; item_id/score are the real catalog id and
 -- 1-cosine_distance. The 13 cognition composites' triage/rationale/analysis
@@ -32,9 +32,12 @@
 -- function performs the same composition as the blueprint above it, not
 -- that it reproduces the identical numbers.
 --
--- The telemetry/trajectory functions report 0-INDEXED scan positions
--- (doc_id), and the blueprint sections map doc_id back to the named row
--- key with a plain row_number() OVER (ORDER BY rowid) - 1 view.
+-- The telemetry/hybrid functions return doc_id = the row's REAL rowid
+-- (with the raw 0-indexed scan position alongside as scan_pos), and the
+-- blueprint sections resolve doc_id with a plain rowid join. The
+-- trajectory function keeps a 0-INDEXED scan position as doc_id, and
+-- those blueprint sections map doc_id back to the named row key with a
+-- plain row_number() OVER (ORDER BY rowid) - 1 view.
 --
 -- fractal_agent_diverse_portfolios (enterprise tier): its engine,
 -- fractal_optimize_portfolio_multimodal, IS registered here but is
@@ -132,10 +135,10 @@ SELECT fractal_agent_allocate('0.05,0.1', '1,0,0,1', 1);
 
 -- 4. route_task (fractal_agent_route_task).
 -- task_emb is the incoming task embedding; the blueprint finds the nearest
--- capability row via fractal_search_telemetry and resolves the 0-indexed
--- scan position back to the named capability id. routed_to is the REAL
--- capability name; confidence is 1/(1+distance) (real, from the nearest
--- distance); rationale is the REAL fractal_reason output.
+-- capability row via fractal_search_telemetry and resolves the row's
+-- doc_id (the REAL rowid) back to the named capability id. routed_to is
+-- the REAL capability name; confidence is 1/(1+distance) (real, from the
+-- nearest distance); rationale is the REAL fractal_reason output.
 DROP TABLE IF EXISTS agents_demo_caps;
 CREATE TABLE agents_demo_caps (capability_name TEXT, emb TEXT);
 INSERT INTO agents_demo_caps VALUES
@@ -153,8 +156,7 @@ SELECT m.capability_name                       AS routed_to,
        1.0 / (1.0 + t.dist)                    AS confidence,
        1000                                    AS remaining_budget
 FROM t
-JOIN (SELECT capability_name, (row_number() OVER (ORDER BY rowid) - 1) AS doc_id
-        FROM agents_demo_caps) m USING (doc_id);
+JOIN agents_demo_caps m ON m.rowid = t.doc_id;
 .print --- rationale (fractal_reason) ---
 SELECT fractal_reason('one-line rationale for this task routing decision');
 .print --- the shipped agent: same composition, one call ---
@@ -172,7 +174,12 @@ SELECT fractal_agent_route_task(
 -- because cosine distance ignores magnitude: [0.1,0.1,0.1] vs [0.9,0.9,0.9]
 -- are parallel (distance 0), not far. A far probe must point a different
 -- direction -- here [0,1,0] vs bad [1,0,0] -> distance 1 > 0.5 ->
--- intercepted=false.
+-- intercepted=false. The threshold is calibrated against one metric, so
+-- the metric is an explicit argument: 'cosine' (the default) goes through
+-- fractal_search_telemetry; 'l2' is exact Euclidean, where magnitude
+-- matters -- there [0.05,0,0] sits 0.95 away from bad [1,0,0] and is
+-- allowed under the same threshold. Any other metric is a hard error,
+-- never a silent fallback.
 DROP TABLE IF EXISTS agents_demo_badstates;
 CREATE TABLE agents_demo_badstates (emb TEXT);
 INSERT INTO agents_demo_badstates VALUES ('1.0,0.0,0.0'), ('0.9,0.1,0.0');
@@ -201,9 +208,21 @@ FROM d;
 .print --- the shipped agent: same composition, one call ---
 SELECT fractal_agent_outlier_intercept('0.0,1.0,0.0', 'agents_demo_badstates', 'emb', 0.5);
 
+.print
+.print === outlier_intercept blueprint (l2: magnitude counts) ===
+-- Same check under exact Euclidean distance, where magnitude matters:
+-- [0.05,0,0] sits ~0.856 (real L2) away from bad [1,0,0] and is allowed
+-- under the same threshold, even though cosine would call it parallel.
+SELECT (fractal_vector_l2_distance('0.05,0.0,0.0', emb) < 0.5) AS intercepted
+FROM (SELECT emb FROM agents_demo_badstates ORDER BY fractal_vector_l2_distance(emb, '0.05,0.0,0.0') LIMIT 1);
+.print --- the shipped agent: same composition, one call ---
+SELECT fractal_agent_outlier_intercept('0.05,0.0,0.0', 'agents_demo_badstates', 'emb', 0.5, 'l2');
+.print --- unknown metric: hard error, no silent fallback ---
+SELECT fractal_agent_outlier_intercept('0.95,0.05,0.0', 'agents_demo_badstates', 'emb', 0.5, 'euclid');
+
 -- 6. recall_hybrid (fractal_agent_recall_hybrid).
 -- Pure retrieval: no LLM step. The "hybrid" is the cohort -- a strict SQL
--- filter (customer_id) mapped to 0-indexed scan positions, then
+-- filter (customer_id) collected as rowids, then
 -- fractal_hybrid_clinical_search restricts the vector recall to that
 -- cohort. mem_id is the REAL session_id from the matching row (not a
 -- canned 1..5); content is the REAL row text (not 'recalled memory
@@ -222,10 +241,9 @@ INSERT INTO agents_demo_mem VALUES
 
 .print
 .print === 6. recall_hybrid blueprint (cust-a cohort, k=2) ===
-WITH cohort AS (SELECT group_concat(pos, ',') AS ids
-                  FROM (SELECT row_number() OVER (ORDER BY rowid) - 1 AS pos
-                          FROM agents_demo_mem
-                         WHERE customer_id = 'cust-a')),
+WITH cohort AS (SELECT group_concat(rowid, ',') AS ids
+                  FROM agents_demo_mem
+                 WHERE customer_id = 'cust-a'),
      hs AS (SELECT fractal_hybrid_clinical_search(
                     'agents_demo_mem', 'state_vector', '0.18,0.22,0.2',
                     (SELECT ids FROM cohort), 2) AS rj)
@@ -233,17 +251,16 @@ SELECT m.session_id AS mem_id,
        m.content    AS content
   FROM hs,
        json_each(hs.rj) je
-  JOIN (SELECT session_id, content,
-               (row_number() OVER (ORDER BY rowid) - 1) AS doc_id
-          FROM agents_demo_mem) m ON m.doc_id = json_extract(je.value, '$.doc_id');
+  JOIN agents_demo_mem m ON m.rowid = json_extract(je.value, '$.doc_id');
 .print --- the shipped agent: same composition, one call ---
 SELECT fractal_agent_recall_hybrid(
-    'agents_demo_mem', 'state_vector', '0.18,0.22,0.2', 'customer_id', 'cust-a', 2);
+    'agents_demo_mem', 'state_vector', '0.18,0.22,0.2', 'customer_id', 'cust-a', 2,
+    'session_id', 'content');
 
 -- 6b. no-rows guard (interactive only -- the cohort filter with no
 -- matches raises cleanly). Uncomment to confirm:
 -- SELECT fractal_hybrid_clinical_search('agents_demo_mem', 'state_vector',
---     '0.1,0.1,0.1', (SELECT group_concat(rowid - 1) FROM agents_demo_mem
+--     '0.1,0.1,0.1', (SELECT group_concat(rowid) FROM agents_demo_mem
 --                       WHERE customer_id = 'no-such-customer'), 5);
 -- Expect: the C-side error for an empty cohort.
 
@@ -251,7 +268,7 @@ SELECT fractal_agent_recall_hybrid(
 -- Pure retrieval: no LLM step. Enables session-global repulsion
 -- (fractal_diversify_enable) so the search avoids recently-rejected items,
 -- then fractal_search_telemetry returns a repulsion-diverse top-k. item_id
--- is the REAL catalog id (resolved through the doc_id mapping); score is
+-- is the REAL catalog id (doc_id IS the rowid); score is
 -- 1-cosine_distance (real, from the primitive -- not the canned
 -- 0.95-i*0.01). The diversify-enable is a session side effect: reset with
 -- SELECT fractal_diversify_disable(); when your session is done (done at
@@ -273,8 +290,7 @@ WITH t AS (SELECT json_extract(value, '$.doc_id')   AS doc_id,
 SELECT m.id             AS item_id,
        1.0 - t.dist     AS score
 FROM t
-JOIN (SELECT id, (row_number() OVER (ORDER BY rowid) - 1) AS doc_id
-        FROM agents_demo_catalog) m USING (doc_id);
+JOIN agents_demo_catalog m ON m.rowid = t.doc_id;
 .print --- the shipped agent: same composition, one call (diversify already enabled above) ---
 SELECT fractal_agent_recommend_diverse('agents_demo_catalog', 'emb', '0.12,0.01,0.0', 3);
 
@@ -315,7 +331,7 @@ SELECT fractal_agent_data_analyst(
 -- reasons. The cohort is caller-built from age>65 AND condition='sepsis' --
 -- the two-predicate cohort a single (filter_col, filter_val) hybrid call
 -- cannot express. nearest_cohort_id is the real nearest patient (doc_id
--- resolved back to id); cohort_distance/drift_distance are real; rationale
+-- IS the rowid); cohort_distance/drift_distance are real; rationale
 -- is the real fractal_reason output.
 DROP TABLE IF EXISTS agents_demo_patients;
 CREATE TABLE agents_demo_patients (
@@ -328,10 +344,9 @@ INSERT INTO agents_demo_patients VALUES
 
 .print
 .print === 10. patient_deterioration_triage blueprint (age>65 sepsis cohort) ===
-WITH cohort AS (SELECT group_concat(pos, ',') AS ids
-                  FROM (SELECT row_number() OVER (ORDER BY rowid) - 1 AS pos
-                          FROM agents_demo_patients
-                         WHERE age > 65 AND condition = 'sepsis')),
+WITH cohort AS (SELECT group_concat(rowid, ',') AS ids
+                  FROM agents_demo_patients
+                 WHERE age > 65 AND condition = 'sepsis'),
      hs AS (SELECT fractal_hybrid_clinical_search(
                     'agents_demo_patients', 'vitals', '0.9,-0.8,0.7,0.6',
                     (SELECT ids FROM cohort), 5) AS rj),
@@ -339,8 +354,8 @@ WITH cohort AS (SELECT group_concat(pos, ',') AS ids
                     'agents_demo_patients', 'vitals',
                     '0.1,0.1,0.1,0.1', '0.95,-0.85,0.75,0.65', 5) AS tj)
 SELECT (SELECT m.id FROM hs, json_each(hs.rj) je
-         JOIN (SELECT id, (row_number() OVER (ORDER BY rowid) - 1) AS doc_id
-                 FROM agents_demo_patients) m ON m.doc_id = json_extract(je.value, '$.doc_id')
+         JOIN agents_demo_patients m
+           ON m.rowid = json_extract(je.value, '$.doc_id')
         ORDER BY json_extract(je.value, '$.distance') LIMIT 1) AS nearest_cohort_id,
        (SELECT json_extract(je.value, '$.distance') FROM hs, json_each(hs.rj) je
          ORDER BY json_extract(je.value, '$.distance') LIMIT 1) AS cohort_distance,
@@ -354,16 +369,16 @@ SELECT fractal_reason('one-line triage rationale for this patient cohort scan');
 SELECT fractal_agent_patient_deterioration_triage(
     'agents_demo_patients', 'vitals', '0.9,-0.8,0.7,0.6',
     '0.1,0.1,0.1,0.1', '0.95,-0.85,0.75,0.65',
-    (SELECT group_concat(pos) FROM (SELECT row_number() OVER (ORDER BY rowid) - 1 AS pos
-                                       FROM agents_demo_patients
-                                      WHERE age > 65 AND condition = 'sepsis')),
+    (SELECT group_concat(rowid) FROM agents_demo_patients
+                                      WHERE age > 65 AND condition = 'sepsis'),
     5);
 
 -- 11. feedback_audit (fractal_agent_feedback_audit; pure analytics, NO
 -- LLM). A self-contained audit cycle: enables session-global repulsion,
 -- warms the D_q rolling window with varied queries from a warmup table,
 -- reports negative feedback on the audit target (fractal_isolate_background
--- on the k=1 telemetry doc_id -- the doc_id IS the handle), then reads back
+-- on the k=1 telemetry scan_pos -- scan_pos IS the handle, not doc_id,
+-- which is the row's rowid), then reads back
 -- the real diversity_quotient (fractal_detect_collapse) and session
 -- diagnostics (fractal_explain_result). Self-disables diversify (unlike
 -- recommend_diverse, which leaves it on).
@@ -397,9 +412,9 @@ SELECT count(*) AS warmup_queries
                   'agents_demo_fwarmup', 'center',
                   printf('%.2f,0.5,0.5', 0.1 * (n % 8)), 3)
           FROM gs);
--- Negative feedback on the audit target: the k=1 telemetry doc_id IS the
--- handle fractal_isolate_background takes:
-WITH tgt AS (SELECT json_extract(value, '$.doc_id') AS d
+-- Negative feedback on the audit target: the k=1 telemetry scan_pos IS
+-- the handle fractal_isolate_background takes:
+WITH tgt AS (SELECT json_extract(value, '$.scan_pos') AS d
                FROM json_each(fractal_search_telemetry(
                         'agents_demo_fcatalog', 'emb', '0.5,0.5,0.5', 1)))
 SELECT fractal_isolate_background((SELECT d FROM tgt)) AS isolated;
@@ -414,8 +429,9 @@ SELECT fractal_agent_feedback_audit(
 -- Refines the task vector with Sniper Search (the abstract [-1,1]^dim
 -- fractal_search_debug here, whose $.best_point is the refined vector),
 -- finds the nearest node
--- via fractal_search_telemetry, resolves the scan position to the named
--- node id, and reasons. assigned_node is the real node id; confidence is
+-- via fractal_search_telemetry, resolves the row's doc_id (the REAL
+-- rowid) to the named node id, and reasons. assigned_node is the real
+-- node id; confidence is
 -- 1/(1+distance) (real); rationale is the real fractal_reason output. Like
 -- route_task but with the fractal_search refinement step route_task lacks.
 DROP TABLE IF EXISTS agents_demo_nodes;
@@ -439,8 +455,7 @@ WITH q AS (SELECT json_extract(fractal_search_debug('0.8,0.1,0,0,0.1', 30, 50),
 SELECT m.id               AS assigned_node,
        1.0 / (1.0 + t.dist) AS confidence
 FROM t
-JOIN (SELECT id, (row_number() OVER (ORDER BY rowid) - 1) AS doc_id
-        FROM agents_demo_nodes) m USING (doc_id);
+JOIN agents_demo_nodes m ON m.rowid = t.doc_id;
 .print --- rationale (fractal_reason) ---
 SELECT fractal_reason('one-line rationale for this workload assignment');
 .print --- the shipped agent: same composition, one call ---
@@ -451,11 +466,12 @@ SELECT fractal_agent_schedule_workload(
 -- fractal_agent_rebalance_sibling).
 -- Runs the SFS cardinality-constrained Sharpe maximizer
 -- (fractal_optimize_portfolio), finds the nearest historical allocation
--- pattern via fractal_search_telemetry over the weights vector, resolves
--- its doc_id to the named allocation id, and reasons. sharpe is the real
--- optimizer output; weights is the real JSON; nearest_alloc_id is the real
--- telemetry nearest; rationale is the real fractal_reason output. cov is a
--- flattened 1-D row-major 4x4.
+-- pattern via fractal_search_trajectory (baseline -> optimizer weights),
+-- resolves its doc_id (a 0-indexed scan position -- trajectory keeps scan
+-- positions, unlike telemetry) to the named allocation id, and reasons.
+-- sharpe is the real optimizer output; weights is the real JSON;
+-- nearest_alloc_id is the real trajectory nearest; rationale is the real
+-- fractal_reason output. cov is a flattened 1-D row-major 4x4.
 DROP TABLE IF EXISTS agents_demo_alloc;
 CREATE TABLE agents_demo_alloc (id INTEGER PRIMARY KEY, alloc TEXT);
 INSERT INTO agents_demo_alloc VALUES
@@ -471,11 +487,9 @@ WITH opt AS (SELECT fractal_optimize_portfolio(
                     4, 42) AS j),
      t AS (SELECT json_extract(value, '$.doc_id')   AS doc_id,
                   json_extract(value, '$.distance') AS dist
-             FROM json_each(fractal_search_telemetry(
-                      'agents_demo_alloc', 'alloc',
-                      (SELECT json_extract(j, '$.weights') FROM opt), 5))
-            ORDER BY json_extract(value, '$.distance')
-            LIMIT 1)
+             FROM json_each(fractal_search_trajectory(
+                    'agents_demo_alloc', 'alloc', '0.25,0.25,0.25,0.25',
+                    (SELECT json_extract(j, '$.weights') FROM opt), 1)))
 SELECT (SELECT json_extract(j, '$.sharpe') FROM opt)   AS sharpe,
        (SELECT json_extract(j, '$.weights') FROM opt)  AS weights,
        m.id           AS nearest_alloc_id,
@@ -517,8 +531,8 @@ SELECT fractal_agent_diverse_portfolios(
 -- trajectory nearest (doc_id resolved back to id); trajectory_distance is
 -- real; trace_complexity is the real box-counting dimension of the GPS
 -- trace; rationale is the real fractal_reason output. Vehicle 1 has a
--- deliberate detour (its UPDATE relocates its tuple, exercising the doc_id
--- mapping against the physical order too).
+-- deliberate detour (its row gets an UPDATE between the baseline load and
+-- the search, exercising the doc_id mapping against a post-UPDATE table).
 DROP TABLE IF EXISTS agents_demo_vehicles;
 CREATE TABLE agents_demo_vehicles (
     id INTEGER PRIMARY KEY, baseline TEXT, current TEXT);
@@ -746,7 +760,10 @@ SELECT fractal_agent_regime_triage(
 -- baseline row (baseline_id = rowid; the column must hold CSV/JSON vector
 -- text -- a scalar metric column is rejected with a "baseline vector is
 -- NULL or malformed" error, so the fleet fixture supplies the column);
--- fractal_agent_detect_loop DFA-tests a series for a repetitive loop.
+-- fractal_agent_detect_loop fingerprints state vectors and streams them
+-- through Brent's cycle detector (v2.0.25 -- takes agent_id, state_log,
+-- dim; the DFA side-signal is best-effort). The 1-D sinusoid is periodic,
+-- so the scanner flags it -- a genuine positive, not a false one.
 -- (fractal_agent_plan_explore and the search/rag agents need the reasoning
 -- plugin and error with the clean hint without one.)
 .print
@@ -755,8 +772,10 @@ SELECT fractal_agent_trajectory_predict('agents_demo_vehicles', 'current', 1, 8)
            AS forecast;
 WITH RECURSIVE gs(t) AS (SELECT 1 UNION ALL SELECT t + 1 FROM gs WHERE t < 64)
 SELECT fractal_agent_detect_loop(
+           'agents-demo-loop',
            '[' || (SELECT group_concat(printf('%.3f', v))
-                     FROM (SELECT t, 0.1 * sin(t * 0.7) AS v FROM gs)) || ']')
+                     FROM (SELECT t, 0.1 * sin(t * 0.7) AS v FROM gs)) || ']',
+           1)
            AS loop_scan;
 
 -- 19. Closing narrative -- fractal_reason over the real computed results.

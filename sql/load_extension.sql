@@ -20,7 +20,7 @@
 -- Edition + version metadata.
 -- ---------------------------------------------------------------
 SELECT fractalsql_edition();        -- 'Community'
-SELECT fractalsql_version();        -- '2.0.0'
+SELECT fractalsql_version();        -- '2.0.4'
 
 -- ---------------------------------------------------------------
 -- fractal_search(vector, query) — cosine distance between `vector`
