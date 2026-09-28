@@ -14,11 +14,33 @@
 SQLITE_EXTENSION_INIT3
 
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "fsql_vector.h"
+
+/* snprintf's return value is how many bytes WOULD have been written given
+ * enough room, not how many actually were -- using it to advance a cursor
+ * unchecked (`p += snprintf(p, remaining, ...)`) lets p run past the end
+ * of the buffer the moment a call is ever under-sized, and the next
+ * call's `remaining = end - p` then underflows to a huge size_t, handing
+ * snprintf a bogus buffer size. This file's capacity math is generous
+ * enough that no caller should ever hit that, but the appends stay
+ * bounds-checked anyway rather than trusting the sizing to hold forever.
+ * Returns 0 and advances *p / shrinks *remaining on success, -1 (buffer
+ * would have been exceeded, *p and *remaining left untouched) otherwise. */
+static int append_fmt(char **p, size_t *remaining, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(*p, *remaining, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= *remaining) return -1;
+    *p += n;
+    *remaining -= (size_t)n;
+    return 0;
+}
 
 /* ------------------------------------------------------------------
  * Encode / decode
@@ -172,15 +194,16 @@ static void fv_to_json_fn(sqlite3_context *ctx, int argc,
     size_t cap = 16 + (size_t)dim * 32 + 4;
     char *json = (char *)malloc(cap);
     if (!json) { free(data); sqlite3_result_error_nomem(ctx); return; }
-    char *p = json + (size_t)snprintf(json, cap, "[");
-    for (int i = 0; i < dim; i++) {
-        p += (size_t)snprintf(p, (size_t)(json + cap - p), "%s%.9g",
-                              i ? "," : "", (double)data[i]);
-    }
-    snprintf(p, (size_t)(json + cap - p), "]");
+    char *p = json;
+    size_t remaining = cap;
+    int bad = append_fmt(&p, &remaining, "[");
+    for (int i = 0; i < dim && !bad; i++)
+        bad = append_fmt(&p, &remaining, "%s%.9g", i ? "," : "", (double)data[i]);
+    if (!bad) bad = append_fmt(&p, &remaining, "]");
+    free(data);
+    if (bad) { free(json); sqlite3_result_error_nomem(ctx); return; }
     sqlite3_result_text(ctx, json, -1, SQLITE_TRANSIENT);
     free(json);
-    free(data);
 }
 
 /* fractal_vector_dims(vec) -> INTEGER. */
@@ -410,11 +433,13 @@ static void fv_quantize_int8_fn(sqlite3_context *ctx, int argc,
     char *json = (char *)malloc(cap);
     if (!json) { free(codes); sqlite3_result_error_nomem(ctx); return; }
     char *p = json;
-    p += snprintf(p, (size_t)(json + cap - p), "{\"scale\":%.10g,\"codes\":[", (double)scale);
-    for (int i = 0; i < da; i++)
-        p += snprintf(p, (size_t)(json + cap - p), "%s%d", i ? "," : "", (int)codes[i]);
-    snprintf(p, (size_t)(json + cap - p), "]}");
+    size_t remaining = cap;
+    int bad = append_fmt(&p, &remaining, "{\"scale\":%.10g,\"codes\":[", (double)scale);
+    for (int i = 0; i < da && !bad; i++)
+        bad = append_fmt(&p, &remaining, "%s%d", i ? "," : "", (int)codes[i]);
+    if (!bad) bad = append_fmt(&p, &remaining, "]}");
     free(codes);
+    if (bad) { free(json); sqlite3_result_error_nomem(ctx); return; }
     sqlite3_result_text(ctx, json, -1, SQLITE_TRANSIENT);
     free(json);
 }
