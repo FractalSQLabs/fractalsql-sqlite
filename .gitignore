@@ -17,6 +17,12 @@ test/__pycache__/
 .pytest_cache/
 .coverage
 
+# build_test.sh --coverage artifacts
+*.gcno
+*.gcda
+*.gcov
+coverage_html/
+
 !include/**/*.a
 !include/**/*.so
 !include/**/*.dylib

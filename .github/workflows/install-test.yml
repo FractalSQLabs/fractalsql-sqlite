@@ -290,7 +290,7 @@ jobs:
           VERSION=$("${SQLITE3_BIN}" :memory: ".load /usr/local/lib/sqlite3/fractalsql" "SELECT fractalsql_version();")
           echo "edition=${EDITION} version=${VERSION}"
           test "${EDITION}" = "Community"
-          test "${VERSION}" = "2.0.4"
+          test "${VERSION}" = "2.0.5"
 
           # Search works with no further config.
           "${SQLITE3_BIN}" :memory: \
@@ -384,7 +384,7 @@ jobs:
           VERSION=$(sqlite3 :memory: ".read /usr/local/lib/sqlite3/load_fractalsql.sql" "SELECT fractalsql_version();" | tail -1)
           echo "edition=${EDITION} version=${VERSION}"
           test "${EDITION}" = "Community"
-          test "${VERSION}" = "2.0.4"
+          test "${VERSION}" = "2.0.5"
           echo "ok: easy_install.sh end-to-end (Debian)"
           SCRIPT
           chmod +x test-easy-install.sh
@@ -529,9 +529,15 @@ jobs:
               -ArgumentList @('tests\_mock_llm_server.py', 'pong-from-mock') `
               -RedirectStandardOutput mock.port -RedirectStandardError mock.err `
               -NoNewWindow -PassThru
+          $ready = $false
           for ($i = 0; $i -lt 50; $i++) {
-              if ((Test-Path mock.port) -and (Get-Item mock.port).Length -gt 0) { break }
+              if ((Test-Path mock.port) -and (Get-Item mock.port).Length -gt 0) { $ready = $true; break }
               Start-Sleep -Milliseconds 200
+          }
+          if (-not $ready) {
+              Write-Host "FATAL: mock server didn't report a port within 10s"
+              if (Test-Path mock.err) { Write-Host "--- mock.err ---"; Get-Content mock.err }
+              exit 1
           }
           $port = (Get-Content mock.port -ErrorAction Stop).Trim()
           if (-not $port) { Write-Host "FATAL: mock server didn't report a port"; exit 1 }

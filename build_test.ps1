@@ -686,8 +686,11 @@ function Build-AsanExtension {
     $objs = @()
     foreach ($src in $srcFiles) {
         $obj = Join-Path $outDir ([IO.Path]::GetFileNameWithoutExtension($src) + '.obj')
-        & cl.exe @commonCompileArgs "/Fo$obj" $src
-        if ($LASTEXITCODE -ne 0) { throw "ASan compile failed for $(Split-Path -Leaf $src) (exit $LASTEXITCODE)" }
+        $out = & cl.exe @commonCompileArgs "/Fo$obj" $src 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $out | ForEach-Object { Write-Host $_ }
+            throw "ASan compile failed for $(Split-Path -Leaf $src) (exit $LASTEXITCODE)"
+        }
         $objs += $obj
     }
 
@@ -697,8 +700,11 @@ function Build-AsanExtension {
         '/EXPORT:sqlite3_fractalsql_init',
         $coreLib, 'bcrypt.lib'
     )
-    & cl.exe @linkArgs
-    if ($LASTEXITCODE -ne 0) { throw "ASan link failed for $dll (exit $LASTEXITCODE)" }
+    $out = & cl.exe @linkArgs 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $out | ForEach-Object { Write-Host $_ }
+        throw "ASan link failed for $dll (exit $LASTEXITCODE)"
+    }
     if (-not (Test-Path -LiteralPath $dll)) { throw "ASan build did not produce $dll" }
     Write-Host ("  -> {0} ({1:N0} bytes)" -f $dll, (Get-Item $dll).Length)
     return $dll
@@ -730,8 +736,11 @@ function Build-UbsanExtension {
     $objs = @()
     foreach ($src in $srcFiles) {
         $obj = Join-Path $outDir ([IO.Path]::GetFileNameWithoutExtension($src) + '.obj')
-        & $script:ClangCl @commonCompileArgs "/Fo$obj" $src
-        if ($LASTEXITCODE -ne 0) { throw "UBSan compile failed for $(Split-Path -Leaf $src) (exit $LASTEXITCODE)" }
+        $out = & $script:ClangCl @commonCompileArgs "/Fo$obj" $src 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $out | ForEach-Object { Write-Host $_ }
+            throw "UBSan compile failed for $(Split-Path -Leaf $src) (exit $LASTEXITCODE)"
+        }
         $objs += $obj
     }
 
@@ -741,8 +750,11 @@ function Build-UbsanExtension {
         '/EXPORT:sqlite3_fractalsql_init',
         $coreLib, 'bcrypt.lib'
     )
-    & $script:ClangCl @linkArgs
-    if ($LASTEXITCODE -ne 0) { throw "UBSan link failed for $dll (exit $LASTEXITCODE)" }
+    $out = & $script:ClangCl @linkArgs 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $out | ForEach-Object { Write-Host $_ }
+        throw "UBSan link failed for $dll (exit $LASTEXITCODE)"
+    }
     if (-not (Test-Path -LiteralPath $dll)) { throw "UBSan build did not produce $dll" }
     Write-Host ("  -> {0} ({1:N0} bytes)" -f $dll, (Get-Item $dll).Length)
     return $dll
@@ -847,8 +859,8 @@ function Gate-01-Build {
 
 function Gate-02-Smoke {
     $ver = Sqlq 'SELECT fractalsql_version();'
-    if ($ver -eq '2.0.4') { Pass "02 smoke: version=$ver" }
-    else { Fail "02 smoke: version='$ver' (want 2.0.4)" }
+    if ($ver -eq '2.0.5') { Pass "02 smoke: version=$ver" }
+    else { Fail "02 smoke: version='$ver' (want 2.0.5)" }
     # fractal_search convergence: self-distance ~0
     $d = Sqlq "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');"
     if ($d -eq '0.0' -or (PyAbsLt1e6 $d)) { Pass "02 smoke: fractal_search self-distance=$d" }

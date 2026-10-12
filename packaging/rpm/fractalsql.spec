@@ -2,7 +2,7 @@
 %global docdir %{_docdir}/fractalsql-sqlite
 
 Name:           fractalsql-sqlite
-Version:        2.0.4
+Version:        2.0.5
 Release:        1%{?dist}
 Summary:        Stochastic Fractal Search SQLite loadable extension (Community)
 
@@ -20,7 +20,7 @@ fractalsql-sqlite is a SQLite loadable extension exposing the full
 FractalSQL 2.0 surface:
 
     fractalsql_edition()          -> 'Community'
-    fractalsql_version()          -> '2.0.4'
+    fractalsql_version()          -> '2.0.5'
     fractal_search(vector, query) -> REAL (cosine distance to
                                           SFS-refined projection
                                           of the query vector)
@@ -95,13 +95,16 @@ Load inside any SQLite session:
 
     SELECT load_extension('/usr/local/lib/sqlite3/fractalsql');
     SELECT fractalsql_edition();   -- 'Community'
-    SELECT fractalsql_version();   -- '2.0.4'
+    SELECT fractalsql_version();   -- '2.0.5'
 
 See /usr/share/doc/fractalsql-sqlite/load_extension.sql for examples.
 
 EOF
 
 %changelog
+* Mon Oct 12 2026 FractalSQLabs - 2.0.5-1
+- Expanded test coverage: 12 domain agents, 9 vector-ops functions,
+  enterprise mock, OOM injection, and a standalone Ed25519 unit test.
 * Wed Sep 09 2026 FractalSQLabs - 2.0.4-1
 - 2.x: pure-C multi-TU port on the vendored FractalSQL core drop;
   fractal_vector BLOB type, Scout-mode aggregate, sovereign-tier

@@ -3,7 +3,7 @@
 </p>
 
 # FractalSQL: Sovereign Data Intelligence
-### Sovereign, Agentic SQLite
+### AI Database Extension for SQLite
 
 **Vector Search. In-Database Reasoning. Production-Safe Agency. All beside your data.**
 
