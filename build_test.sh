@@ -206,6 +206,34 @@
 #                      LD_PRELOAD/DYLD_INSERT_LIBRARIES approach the
 #                      other gates use — see the --tsan note below for
 #                      why that approach doesn't reach Darwin at all.
+#   34  oom_inject     Linux only. LD_PRELOAD fault injection (tests/
+#                      oom_inject.c) makes one specific allocation size
+#                      from fractalsql.so itself return NULL, reaching
+#                      sqlite3_result_error_nomem() guard sites nothing
+#                      else can: no other gate ever runs this process
+#                      out of memory on its own. Size-matched and
+#                      module-scoped (dladdr() on the caller's return
+#                      address), not call-count-based, so it can't
+#                      silently drift onto the wrong allocation if an
+#                      unrelated earlier malloc is added or removed.
+#   35  ed25519        src/fsql_ed25519.h's own header comment says it
+#                      was "validated against the RFC 8032 Section 7.1
+#                      test vectors... plus a corrupted-signature
+#                      rejection check" during development, then "kept
+#                      out of the shipped build" -- tests/ed25519_
+#                      probe.c is that check, finally committed. A
+#                      standalone translation unit (not a SQL-level
+#                      test): the only SQL-reachable path to this
+#                      header verifies against a hardcoded production
+#                      key whose private half is never in CI by design,
+#                      so this instead unit-tests the verify primitive
+#                      directly, with throwaway keys, independent of
+#                      the real one entirely.
+#   36  extract_population  fsql_extract_population (src/fsql_parse.c)
+#                      has no caller outside the libFuzzer smoke
+#                      harness (gate 21, which --coverage never runs),
+#                      so a plain run leaves it dead too -- same
+#                      standalone-probe treatment as gate 35.
 #
 # Gate sets:
 #   QUICK   = 01 02                                   post-edit sanity loop
@@ -391,7 +419,7 @@ wpath() {
   fi
 }
 
-DEFAULT_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 31 32)
+DEFAULT_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 31 32 34 35 36)
 QUICK_GATES=(01 02)
 FUZZ_GATES=(21)
 
@@ -710,7 +738,7 @@ compile_plugins() {
   for name in mock_reasoning_plugin evil_nonterminating_plugin \
               evil_lying_length_plugin evil_crash_plugin \
               retry_reasoning_plugin think_reasoning_plugin \
-              mock_embed_plugin evil_embed_plugin; do
+              mock_embed_plugin evil_embed_plugin mock_enterprise_core; do
     # Same LD_PRELOAD scoping as gate_01_build: this is a compile
     # invocation, not a load of the sanitized extension, and cc
     # inheriting the sanitizer runtime here would mis-flag its own
@@ -731,6 +759,7 @@ compile_plugins() {
   THINK="$(pj "think_reasoning_plugin$PLUGSUF")"
   MOCKEMB="$(pj "mock_embed_plugin$PLUGSUF")"
   EVOLEMB="$(pj "evil_embed_plugin$PLUGSUF")"
+  MOCKENT="$(pj "mock_enterprise_core$PLUGSUF")"
 }
 
 # Skip a gate whose fixture plugin did not compile (platform-limited
@@ -877,9 +906,9 @@ gate_01_build() {
 
 gate_02_smoke() {
   local ver; ver=$(sqlq "SELECT fractalsql_version();")
-  [[ "$ver" = "2.0.4" ]] \
+  [[ "$ver" = "2.0.5" ]] \
     && pass "02 smoke: version=$ver" \
-    || fail "02 smoke: version='$ver' (want 2.0.4)"
+    || fail "02 smoke: version='$ver' (want 2.0.5)"
   # fractal_search convergence: self-distance ~0
   local d; d=$(sqlq "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');")
   if [[ "$d" = "0.0" ]] || python_abs_lt_1e6 "$d"; then
@@ -1511,6 +1540,50 @@ gate_15_embed() {
   else
     fail "15 vectorizer: injection-shaped source_table accepted"
   fi
+
+  # Rate cap: max_embeds_per_window caps how many rows one
+  # process_queue() call actually embeds per window; the rest stay
+  # 'pending' (fsqlv_rate_gate's gated branch, otherwise dead -- every
+  # other vectorizer test above runs uncapped).
+  local rcap; rcap=$(sqlq \
+    "CREATE TABLE bt_vrate(id INTEGER PRIMARY KEY, body TEXT, emb TEXT);" \
+    "INSERT INTO bt_vrate(body) VALUES ('a'),('b'),('c');" \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCKEMB');" \
+    "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" \
+    "SELECT fractal_vectorizer_create('bt_vrate','body','emb',
+      '{\"max_embeds_per_window\":1,\"rate_window_secs\":3600}');" \
+    "SELECT 'PROCESSED=' || fractal_vectorizer_process_queue(10);" \
+    "SELECT 'DONE=' || count(*) FROM fractal_vectorizer_queue WHERE status='done';" \
+    "SELECT 'PEND=' || count(*) FROM fractal_vectorizer_queue WHERE status='pending';")
+  grep <<< "$rcap" -q "DONE=1" && grep <<< "$rcap" -q "PEND=2" \
+    && pass "15 vectorizer: max_embeds_per_window caps one row/window, defers the rest" \
+    || fail "15 vectorizer: rate cap: $rcap"
+
+  # Partial-create rollback (fsqlv_create_cleanup): trigger names are
+  # "fractal_vectorizer_trg_<id><suffix>", and the registry (along with
+  # the queue and rate-window tables) is TEMP -- scoped to, and reset
+  # by, each connection (see this gate's own bt_vembed comment above:
+  # "All in ONE connection"). A fresh sqlq connection's registry is
+  # therefore always empty, so its first-ever vectorizer is always
+  # id=1, regardless of what any OTHER separate sqlq call created
+  # earlier in this run. Pre-creating a same-named TEMP trigger here
+  # (same connection, since a TEMP trigger from a different connection
+  # wouldn't even still exist) makes the real create's own trigger step
+  # collide, forcing the registry-row-already-inserted rollback path
+  # otherwise dead in every other vectorizer test here.
+  sqlq "CREATE TABLE bt_vclean(id INTEGER PRIMARY KEY, body TEXT, emb TEXT);" \
+    >/dev/null 2>&1
+  if expect_err "already exists" \
+      "CREATE TEMP TRIGGER \"fractal_vectorizer_trg_1\"
+        AFTER INSERT ON bt_vclean BEGIN SELECT 1; END;" \
+      "SELECT fractalsql_set('reasoning_plugin','$MOCKEMB');" \
+      "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" \
+      "SELECT fractal_vectorizer_create('bt_vclean','body','emb');"; then
+    pass "15 vectorizer: a trigger-name collision mid-create rolls back the registry row"
+  else
+    fail "15 vectorizer: expected the trigger collision to surface and roll back"
+  fi
+
   # pause/resume/drop surface: a paused vectorizer defers (0 processed).
   r=$(sqlq \
     "CREATE TABLE bt_vsoak_stub(
@@ -2167,6 +2240,12 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
   else
     fail "22 v2_functions: periodogram: $r"
   fi
+  if expect_err "max_peaks must be > 0" \
+      "SELECT fractal_periodogram('$s32', 0);"; then
+    pass "22 v2_functions: periodogram rejects max_peaks<=0"
+  else
+    fail "22 v2_functions: periodogram accepted max_peaks<=0"
+  fi
   # TDA: an 8-point square ring at spacing 2 (threshold 2.5 admits the
   # 8 ring edges, excludes the 2.83 corner diagonals) -> E-V+C = 1.
   r=$(sqlq "SELECT fractal_tda_persistence_diagram(
@@ -2183,6 +2262,12 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
   else
     fail "22 v2_functions: state_fingerprint: $r"
   fi
+  if expect_err "n_bits must be > 0" \
+      "SELECT fractal_state_fingerprint('1.0,0.0,0.0', 0);"; then
+    pass "22 v2_functions: state_fingerprint rejects n_bits<=0"
+  else
+    fail "22 v2_functions: state_fingerprint accepted n_bits<=0"
+  fi
   # cycle_detect: a clean period-2 one-hot fingerprint stream closes
   # (one-hot states, so the two directions are distinguishable).
   r=$(sqlq "
@@ -2197,6 +2282,12 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
     pass "22 v2_functions: cycle_detect closes the period-2 fingerprint stream"
   else
     fail "22 v2_functions: cycle_detect: $r"
+  fi
+  if expect_err "n_bits must be > 0" \
+      "SELECT fractal_cycle_detect('[]', 0);"; then
+    pass "22 v2_functions: cycle_detect rejects n_bits<=0"
+  else
+    fail "22 v2_functions: cycle_detect accepted n_bits<=0"
   fi
   # optimize_subset: best 5 of 10 scored items (bounds <= 1.0).
   r=$(sqlq "SELECT fractal_optimize_subset(
@@ -2241,6 +2332,144 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
   else
     fail "22 v2_functions: hamming_distance: $r"
   fi
+
+  # --- fractal_vector / from_text / to_json round-trip ----------------
+  r=$(sqlq "SELECT fractal_vector_to_json(fractal_vector(3));")
+  [[ "$r" == "[0,0,0]" ]] \
+    && pass "22 v2_functions: fractal_vector(dim) constructs a zero vector" \
+    || fail "22 v2_functions: fractal_vector(3): $r"
+  if expect_err "dim must be" \
+      "SELECT fractal_vector(0);"; then
+    pass "22 v2_functions: fractal_vector rejects dim <= 0"
+  else
+    fail "22 v2_functions: fractal_vector(0) accepted"
+  fi
+  r=$(sqlq "SELECT fractal_vector_to_json(fractal_vector_from_text('1,2,3'));")
+  [[ "$r" == "[1,2,3]" ]] \
+    && pass "22 v2_functions: from_text canonicalizes a CSV vector" \
+    || fail "22 v2_functions: from_text: $r"
+  if expect_err "malformed vector" \
+      "SELECT fractal_vector_from_text('not,a,vector,[');"; then
+    pass "22 v2_functions: from_text rejects malformed input"
+  else
+    fail "22 v2_functions: from_text accepted malformed input"
+  fi
+  r=$(sqlq "SELECT fractal_vector_to_json('1.5,2.5,3.5');")
+  [[ "$r" == "[1.5,2.5,3.5]" ]] \
+    && pass "22 v2_functions: to_json renders a JSON array" \
+    || fail "22 v2_functions: to_json: $r"
+
+  # --- fractal_vector_add / fractal_vector_sub (fv_binary_vec_fn) -----
+  r=$(sqlq "SELECT fractal_vector_to_json(fractal_vector_add('1,2,3','1,1,1'));")
+  [[ "$r" == "[2,3,4]" ]] \
+    && pass "22 v2_functions: add([1,2,3],[1,1,1])=[2,3,4]" \
+    || fail "22 v2_functions: add: $r"
+  r=$(sqlq "SELECT fractal_vector_to_json(fractal_vector_sub('3,4,5','1,1,1'));")
+  [[ "$r" == "[2,3,4]" ]] \
+    && pass "22 v2_functions: sub([3,4,5],[1,1,1])=[2,3,4]" \
+    || fail "22 v2_functions: sub: $r"
+  if expect_err "vector dim mismatch" \
+      "SELECT fractal_vector_add('1,2,3','1,1');"; then
+    pass "22 v2_functions: add rejects mismatched dims"
+  else
+    fail "22 v2_functions: add accepted mismatched dims"
+  fi
+
+  # --- fractal_vector_scale / norm / normalize ------------------------
+  r=$(sqlq "SELECT fractal_vector_to_json(fractal_vector_scale('1,2,3',2));")
+  [[ "$r" == "[2,4,6]" ]] \
+    && pass "22 v2_functions: scale([1,2,3],2)=[2,4,6]" \
+    || fail "22 v2_functions: scale: $r"
+  r=$(sqlq "SELECT fractal_vector_norm('3,4,0');")
+  [[ "$r" == "5.0" || "$r" == "5" ]] \
+    && pass "22 v2_functions: norm([3,4,0])=5" \
+    || fail "22 v2_functions: norm: $r"
+  # float32 storage round-trips 0.6/0.8 as 0.600000024/0.800000012 at
+  # %.9g -- match on precision, not exact string equality.
+  r=$(sqlq "SELECT fractal_vector_to_json(fractal_vector_normalize('3,4,0'));")
+  grep <<< "$r" -Eq '^\[0\.6[0-9]*,0\.8[0-9]*,0\]$' \
+    && pass "22 v2_functions: normalize([3,4,0]) -> unit vector [0.6,0.8,0]" \
+    || fail "22 v2_functions: normalize: $r"
+  r=$(sqlq "SELECT fractal_vector_normalize(NULL);")
+  [[ -z "$r" ]] \
+    && pass "22 v2_functions: normalize(NULL) -> NULL" \
+    || fail "22 v2_functions: normalize(NULL): $r"
+
+  # --- self-contained sin/sqrt/cos (hosts missing
+  # SQLITE_ENABLE_MATH_FUNCTIONS) -----------------------------------
+  r=$(sqlq "SELECT sin(0.0);")
+  [[ "$r" = "0.0" ]] \
+    && pass "22 v2_functions: sin(0)=0" \
+    || fail "22 v2_functions: sin(0): $r"
+  r=$(sqlq "SELECT cos(0.0);")
+  [[ "$r" = "1.0" ]] \
+    && pass "22 v2_functions: cos(0)=1" \
+    || fail "22 v2_functions: cos(0): $r"
+  r=$(sqlq "SELECT sqrt(4.0);")
+  [[ "$r" = "2.0" ]] \
+    && pass "22 v2_functions: sqrt(4)=2" \
+    || fail "22 v2_functions: sqrt(4): $r"
+  r=$(sqlq "SELECT sqrt(-1.0);")
+  [[ -z "$r" ]] \
+    && pass "22 v2_functions: sqrt(negative) -> NULL" \
+    || fail "22 v2_functions: sqrt(-1): $r"
+  r=$(sqlq "SELECT sin(NULL);")
+  [[ -z "$r" ]] \
+    && pass "22 v2_functions: sin(NULL) -> NULL" \
+    || fail "22 v2_functions: sin(NULL): $r"
+
+  # --- fractalsql_get -------------------------------------------------
+  r=$(sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+           "SELECT fractalsql_get('reasoning_plugin');" | tail -n1)
+  [[ "$r" = "$MOCK" ]] \
+    && pass "22 v2_functions: fractalsql_get round-trips a string key" \
+    || fail "22 v2_functions: fractalsql_get: $r"
+  if expect_err "unknown config key" \
+      "SELECT fractalsql_get('not_a_real_key');"; then
+    pass "22 v2_functions: fractalsql_get rejects an unknown key"
+  else
+    fail "22 v2_functions: fractalsql_get accepted an unknown key"
+  fi
+  if expect_err "expects TEXT" \
+      "SELECT fractalsql_get(123);"; then
+    pass "22 v2_functions: fractalsql_get rejects a non-TEXT name"
+  else
+    fail "22 v2_functions: fractalsql_get accepted a non-TEXT name"
+  fi
+
+  # --- scattered argument-validation guards, each otherwise dead ------
+  sqlq "CREATE TABLE bt_v22_empty(id INTEGER PRIMARY KEY, emb TEXT);" >/dev/null 2>&1
+  if expect_err "k must be > 0" \
+      "SELECT fractal_search_telemetry('bt_v22_empty','emb','1.0,2.0',0);"; then
+    pass "22 v2_functions: search_telemetry rejects k<=0"
+  else
+    fail "22 v2_functions: search_telemetry accepted k<=0"
+  fi
+  if expect_err "doc_id must be >= 0" \
+      "SELECT fractal_store_morphology(-1, '1.0,2.0,3.0');"; then
+    pass "22 v2_functions: store_morphology rejects a negative doc_id"
+  else
+    fail "22 v2_functions: store_morphology accepted a negative doc_id"
+  fi
+  if expect_err "dim must be > 0" \
+      "SELECT fractal_agent_detect_loop('a','1.0,2.0',0);"; then
+    pass "22 v2_functions: detect_loop rejects dim<=0"
+  else
+    fail "22 v2_functions: detect_loop accepted dim<=0"
+  fi
+  if [[ -f "$(wpath "$MOCKEMB")" ]]; then
+    if expect_err "no rows found in the corpus" \
+        "SELECT fractalsql_set('reasoning_plugin','$MOCKEMB');" \
+        "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" \
+        "SELECT fractal_agent_plan_explore('1.0,2.0,3.0','bt_v22_empty','emb',5);"; then
+      pass "22 v2_functions: plan_explore raises a clean ERROR when the corpus table is empty"
+    else
+      fail "22 v2_functions: plan_explore accepted an empty corpus table"
+    fi
+  else
+    skip "22 v2_functions: plan_explore empty-corpus (mock_embed_plugin did not build)"
+  fi
+  sqlq "DROP TABLE IF EXISTS bt_v22_empty;" >/dev/null 2>&1
 }
 
 gate_23_agents() {
@@ -2315,6 +2544,31 @@ gate_23_agents() {
   grep <<< "$LAST_AGENT_OUT" -q '"generated_sql"' \
     && pass "23 sql_agent returns the composite JSON" \
     || fail "23 sql_agent JSON: $LAST_AGENT_OUT"
+
+  # sql_agent auto_execute, real SELECT: the PRE preamble above uses
+  # $MOCKEMB, whose canned chat reply is a fixed embedding-shaped
+  # string ("[0.1,0.2,0.3]") -- never valid SQL, so auto_execute never
+  # gets past its own prepare() failure. $MOCK's canned reply instead
+  # comes from $SQLTXT, a file this test controls directly: writing a
+  # real SELECT into it and switching the reasoning_plugin to $MOCK
+  # reaches the actual execute-and-fetch success path (agents_exec_
+  # select_json), otherwise dead in every other agent test here.
+  sqlq "
+    CREATE TABLE bt_sql_t2s(id INTEGER PRIMARY KEY, v INTEGER);
+    INSERT INTO bt_sql_t2s VALUES (1,10),(2,20);
+  " >/dev/null 2>&1
+  printf 'SELECT count(*) AS n FROM bt_sql_t2s' > "$SQLTXT"
+  local r_t2s; r_t2s=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractalsql_set('http_url','https://llm.invalid/v1');" \
+    "SELECT fractalsql_set('http_model','mock-model');" \
+    "SELECT fractal_sql_agent('count rows','[\"bt_sql_t2s\"]',2,1);")
+  grep <<< "$r_t2s" -q '"execution_status":"executed"' \
+    && grep <<< "$r_t2s" -q '"rows":\[\[2\]\]' \
+    && pass "23 sql_agent auto_execute runs a real generated SELECT and fetches real rows" \
+    || fail "23 sql_agent auto_execute: expected a real executed SELECT, got: $r_t2s"
+  printf 'SELECT 1' > "$SQLTXT"
+  sqlq "DROP TABLE IF EXISTS bt_sql_t2s;" >/dev/null 2>&1
   agent "plan_explore MCTS branches" \
     "SELECT fractal_agent_plan_explore('1.0,0.0,0.0',
       'bt_agent_docs','emb', 2);"
@@ -2418,6 +2672,153 @@ gate_24_enterprise() {
     pass "24 enterprise: bogus enterprise_lib surfaces the load failure"
   else
     fail "24 enterprise: bogus enterprise_lib did not surface the error"
+  fi
+
+  # A library that dlopen()s cleanly but exports none of the 8 required
+  # symbols: the ONLY way to reach ent_dlclose_failed() (closing a
+  # handle that opened fine but got rejected after the fact) without a
+  # TOCTOU race -- every other rejection path here fails before dlopen
+  # ever runs.
+  if [[ -n "$CC" ]]; then
+    local empty_so="$PDIRW/empty_lib$PLUGSUF"
+    if "$CC" -shared -fPIC -std=c99 -x c /dev/null -o "$empty_so" \
+          >"$PDIRW/empty_lib_build.log" 2>&1; then
+      if FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 expect_err "missing expected enterprise symbols" \
+          "SELECT fractalsql_set('enterprise_lib','$empty_so');" \
+          "SELECT fractal_ledger_flush();"; then
+        pass "24 enterprise: a symbol-less .so dlopens cleanly but is rejected and closed"
+      else
+        fail "24 enterprise: expected a missing-symbols rejection"
+      fi
+    else
+      skip "24 enterprise: symbol-less .so (failed to build)"
+    fi
+  else
+    skip "24 enterprise: symbol-less .so (no C compiler on PATH)"
+  fi
+
+  # ---- mock enterprise core: the active-tier success/failure paths --
+  # tests/mock_enterprise_core.c is a test-only stand-in for the real,
+  # licensed core (same 8+3-symbol dlsym surface fsql_enterprise.c
+  # expects), unsigned -- loaded via FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1,
+  # the same dev-drop bypass gate 25 uses for a real core. This is the
+  # only place any of this is exercised: without it, every ledger/
+  # portfolio-multimodal UDF's resolved-pointer success branch is dead
+  # code in this public (no-vendored-core) checkout.
+  if [[ ! -f "$(wpath "$MOCKENT")" ]]; then
+    skip "24 enterprise: mock core (mock_enterprise_core.c did not build)"
+    return
+  fi
+
+  local fn
+  for fn in fractal_ledger_flush fractal_ledger_compact \
+            fractal_ledger_reset_soft fractal_ledger_reset_hard \
+            fractal_ledger_load; do
+    local r
+    r=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+      "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+      "SELECT $fn();")
+    if [[ $? -eq 0 ]]; then
+      pass "24 enterprise: $fn succeeds while the mock is loaded"
+    else
+      fail "24 enterprise: $fn errored while the mock is loaded: $r"
+    fi
+  done
+  # fractalsql_set() itself returns "ok" as a visible row, so a
+  # multi-statement sqlq call's output is "ok"\n<actual result> --
+  # tail -n1 the way every exact-equality check below does.
+  local tc; tc=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+    "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+    "SELECT fractal_ledger_truth_count();" | tail -n1)
+  [[ "$tc" = "0" ]] \
+    && pass "24 enterprise: truth_count succeeds while the mock is loaded" \
+    || fail "24 enterprise: expected 0 from truth_count, got: $tc"
+  local sc; sc=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+    "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+    "SELECT fractal_ledger_shadow_count();" | tail -n1)
+  [[ "$sc" = "0" ]] \
+    && pass "24 enterprise: shadow_count succeeds while the mock is loaded" \
+    || fail "24 enterprise: expected 0 from shadow_count, got: $sc"
+
+  # Failure branch: the sentinel flips the mock's return codes without
+  # touching enterprise_lib again (see mock_enterprise_core.c's own
+  # header for why a file, not a value, is the toggle).
+  local sentinel="$PDIR/fractalsql_bt_mock_ent_fail"
+  rm -f "$sentinel"; touch "$sentinel"
+  local rf; rf=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 FSQL_MOCK_ENT_FAIL="$sentinel" sqlq \
+    "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+    "SELECT fractal_ledger_flush();")
+  local rfrc=$?
+  if [[ $rfrc -ne 0 ]]; then
+    pass "24 enterprise: flush refuses cleanly when the mock reports failure"
+  else
+    fail "24 enterprise: expected flush to error with the fail sentinel set, got: $rf"
+  fi
+  rm -f "$sentinel"
+
+  # Portfolio multimodal family (both optional symbols present in the
+  # mock: the UDF prefers _ex when available, so this also exercises
+  # that resolved-pointer branch, not just the plain symbol).
+  local pm; pm=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+    "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+    "SELECT json_extract(fractal_optimize_portfolio_multimodal(
+       '0.1,0.05','0.04,0.01,0.01,0.03',1,2),'\$.n_found');" | tail -n1)
+  [[ "$pm" = "1" ]] \
+    && pass "24 enterprise: fractal_optimize_portfolio_multimodal returns a well-formed result" \
+    || fail "24 enterprise: expected n_found=1, got: $pm"
+  # min registered arity is 4 (mu,cov,k,n_restarts); max_front defaults
+  # to 8, so n_restarts must be >= 8 unless max_front is also given --
+  # pass both explicitly (2,2) to keep max_front<=n_restarts trivially.
+  local pmp; pmp=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+    "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+    "SELECT json_extract(fractal_optimize_portfolio_multimodal_pareto(
+       '0.1,0.05','0.04,0.01,0.01,0.03',1,2,2),'\$.n_found');" | tail -n1)
+  [[ "$pmp" = "1" ]] \
+    && pass "24 enterprise: fractal_optimize_portfolio_multimodal_pareto returns a well-formed result" \
+    || fail "24 enterprise: expected n_found=1, got: $pmp"
+
+  # fractal_audit_unpack: a direct decode call. The mock's audit_unpack
+  # is a pure echo (its own header comment), so round-tripping a blob
+  # through it is an exact equality check.
+  local au; au=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+    "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+    "SELECT fractal_audit_unpack('hello world') = 'hello world';" | tail -n1)
+  [[ "$au" = "1" ]] \
+    && pass "24 enterprise: audit_unpack round-trips a payload through the mock" \
+    || fail "24 enterprise: expected audit_unpack to echo the payload back exactly, got: $au"
+
+  # diffusion_mode (parse_diffusion_mode): only reached when the arg is
+  # actually passed (NULL/omitted defaults to 'gaussian' without
+  # parsing it at all) -- 'levy' exercises the accept branch, a bogus
+  # value the reject branch.
+  local dm; dm=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+    "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+    "SELECT json_extract(fractal_optimize_portfolio_multimodal(
+       '0.1,0.05','0.04,0.01,0.01,0.03',1,2,0.15,0.9,NULL,0,'levy'),'\$.n_found');" | tail -n1)
+  [[ "$dm" = "1" ]] \
+    && pass "24 enterprise: fractal_optimize_portfolio_multimodal accepts diffusion_mode='levy'" \
+    || fail "24 enterprise: expected n_found=1 with diffusion_mode=levy, got: $dm"
+  # diffusion_mode is validated before the enterprise-tier check, so
+  # this rejection fires with no enterprise_lib needed.
+  if expect_err "diffusion_mode must be" \
+      "SELECT fractal_optimize_portfolio_multimodal(
+        '0.1,0.05','0.04,0.01,0.01,0.03',1,2,0.15,0.9,NULL,0,'bogus');"; then
+    pass "24 enterprise: fractal_optimize_portfolio_multimodal rejects an unknown diffusion_mode"
+  else
+    fail "24 enterprise: expected a diffusion_mode rejection"
+  fi
+
+  # fractal_feedback_report / parse_engagement_kind: no enterprise tier
+  # needed (fsql_feedback_report is a plain core call).
+  local fr; fr=$(sqlq "SELECT fractal_feedback_report(1,'positive');")
+  [[ -z "$fr" ]] \
+    && pass "24 enterprise: fractal_feedback_report('positive') succeeds" \
+    || fail "24 enterprise: expected NULL, got: $fr"
+  if expect_err "kind must be one of" \
+      "SELECT fractal_feedback_report(1,'bogus');"; then
+    pass "24 enterprise: fractal_feedback_report rejects an unknown kind"
+  else
+    fail "24 enterprise: fractal_feedback_report accepted an unknown kind"
   fi
 }
 
@@ -2841,6 +3242,12 @@ gate_29_domain_agents() {
   grep <<< "$r4b" -q 'domain-agent-canary' \
     && pass "29 domain_agents: regime_triage composes dfa+drift -> reason (reason step ran)" \
     || fail "29 domain_agents: expected the reasoning canary in rationale, got: $r4b"
+  if expect_err "series must be a CSV/JSON vector" \
+      "SELECT fractal_agent_regime_triage('bad!vec',32);"; then
+    pass "29 domain_agents: regime_triage rejects a malformed series"
+  else
+    fail "29 domain_agents: regime_triage accepted a malformed series"
+  fi
 
   # --- 4: fractal_agent_outlier_intercept (the metric-arg surface) ----
   # 'cosine' (default) via the telemetry engine; 'l2' via the exact
@@ -2878,6 +3285,409 @@ gate_29_domain_agents() {
   else
     fail "29 domain_agents: unknown metric accepted"
   fi
+
+  # --- 5: fractal_agent_recommend_diverse (real catalog id + score) ----
+  sqlq "
+    CREATE TABLE bt_da_catalog(id INTEGER, emb TEXT);
+    INSERT INTO bt_da_catalog VALUES
+      (10,'0.1,0.2,0.3'),(20,'0.9,0.8,0.7'),(30,'0.5,0.5,0.5');
+  " >/dev/null 2>&1 || { fail "29 domain_agents: catalog fixture setup failed"; return; }
+  local r6; r6=$(sqlq \
+    "SELECT json_extract(fractal_agent_recommend_diverse(
+       'bt_da_catalog','emb','0.1,0.2,0.3',3,'id'),'\$[0].item_id');")
+  [[ "$r6" = "10" ]] \
+    && pass "29 domain_agents: recommend_diverse returns the real nearest catalog id" \
+    || fail "29 domain_agents: expected item_id=10, got: $r6"
+  local r6b; r6b=$(sqlq \
+    "SELECT json_extract(fractal_agent_recommend_diverse(
+       'bt_da_catalog','emb','0.1,0.2,0.3',3,'id'),'\$[0].score');")
+  grep <<< "$r6b" -Eq '^[0-9]+(\.[0-9]+)?$' \
+    && pass "29 domain_agents: recommend_diverse score is a real float" \
+    || fail "29 domain_agents: expected a numeric score, got: $r6b"
+  if expect_err "query_vec must be a CSV/JSON vector" \
+      "SELECT fractal_agent_recommend_diverse(
+        'bt_da_catalog','emb','bad!vec',3,'id');"; then
+    pass "29 domain_agents: recommend_diverse rejects a malformed query_vec"
+  else
+    fail "29 domain_agents: recommend_diverse accepted a malformed query_vec"
+  fi
+  sqlq "SELECT fractal_diversify_disable();" >/dev/null 2>&1
+
+  # --- 6: fractal_agent_data_analyst (composes sql_agent -> reason) ---
+  sqlq "
+    CREATE TABLE bt_da_data(id INTEGER PRIMARY KEY, val REAL);
+    INSERT INTO bt_da_data VALUES (1,10.5),(2,20.5);
+  " >/dev/null 2>&1 || { fail "29 domain_agents: data_analyst fixture setup failed"; return; }
+  local r7; r7=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT json_extract(fractal_agent_data_analyst(
+       'sum of val','[\"bt_da_data\"]',2),'\$.generated_sql');")
+  grep <<< "$r7" -q 'domain-agent-canary' \
+    && pass "29 domain_agents: data_analyst composes sql_agent (generated_sql is the real LLM step, canary)" \
+    || fail "29 domain_agents: expected the canary in generated_sql, got: $r7"
+  local r7b; r7b=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT json_extract(fractal_agent_data_analyst(
+       'sum of val','[\"bt_da_data\"]',2),'\$.result_json');")
+  grep <<< "$r7b" -q 'status' \
+    && pass "29 domain_agents: data_analyst result_json is a real jsonb (auto_execute ran)" \
+    || fail "29 domain_agents: expected a status-bearing result_json, got: $r7b"
+  local r7c; r7c=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT json_extract(fractal_agent_data_analyst(
+       'sum of val','[\"bt_da_data\"]',2),'\$.analysis');")
+  grep <<< "$r7c" -q 'domain-agent-canary' \
+    && pass "29 domain_agents: data_analyst composes sql_agent -> reason (analysis is the real reason step, canary)" \
+    || fail "29 domain_agents: expected the canary in analysis, got: $r7c"
+
+  # --- 7: fractal_agent_patient_deterioration_triage (hybrid+trajectory
+  # -> reason) + empty-table guard --------------------------------------
+  sqlq "
+    CREATE TABLE bt_da_patients(id INTEGER PRIMARY KEY, vitals TEXT);
+    INSERT INTO bt_da_patients VALUES
+      (1,'0.9,-0.8,0.7,0.6'),(2,'0.1,0.1,0.1,0.1'),
+      (3,'0.2,0.2,0.2,0.2'),(4,'0.85,-0.75,0.65,0.55');
+  " >/dev/null 2>&1 || { fail "29 domain_agents: patient fixture setup failed"; return; }
+  local r8; r8=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT json_extract(fractal_agent_patient_deterioration_triage(
+       'bt_da_patients','vitals','0.9,-0.8,0.7,0.6',
+       '0.1,0.1,0.1,0.1','0.95,-0.85,0.75,0.65',NULL,5,'id'),'\$.nearest_cohort_id');")
+  grep <<< "$r8" -Eq '^[0-9]+$' \
+    && pass "29 domain_agents: patient_deterioration_triage returns the real nearest cohort id" \
+    || fail "29 domain_agents: expected a numeric nearest_cohort_id, got: $r8"
+  local r8b; r8b=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT json_extract(fractal_agent_patient_deterioration_triage(
+       'bt_da_patients','vitals','0.9,-0.8,0.7,0.6',
+       '0.1,0.1,0.1,0.1','0.95,-0.85,0.75,0.65',NULL,5,'id'),'\$.rationale');")
+  grep <<< "$r8b" -q 'domain-agent-canary' \
+    && pass "29 domain_agents: patient_deterioration_triage composes hybrid+trajectory -> reason (canary)" \
+    || fail "29 domain_agents: expected the canary in rationale, got: $r8b"
+  sqlq "DELETE FROM bt_da_patients;" >/dev/null 2>&1
+  if expect_err "no patient rows in bt_da_patients" \
+      "SELECT fractal_agent_patient_deterioration_triage(
+        'bt_da_patients','vitals','0.9,-0.8,0.7,0.6',
+        '0.1,0.1,0.1,0.1','0.95,-0.85,0.75,0.65',NULL,5,'id');"; then
+    pass "29 domain_agents: patient_deterioration_triage raises a clean ERROR when the patient table is empty"
+  else
+    fail "29 domain_agents: expected a no-patient-rows ERROR"
+  fi
+
+  # --- 8: fractal_agent_feedback_audit (pure analytics, no LLM) +
+  # empty-table guard ---------------------------------------------------
+  sqlq "
+    CREATE TABLE bt_da_fcatalog(id INTEGER PRIMARY KEY, emb TEXT);
+    INSERT INTO bt_da_fcatalog VALUES
+      (1,'0.4,0.1,0.2'),(2,'-0.3,0.5,0.1'),(3,'0.2,-0.4,0.3'),
+      (4,'0.6,0.2,-0.1'),(5,'-0.2,-0.3,0.4'),(6,'0.1,0.6,-0.2');
+    CREATE TABLE bt_da_fwarmup(center TEXT);
+    INSERT INTO bt_da_fwarmup VALUES
+      ('0.3,0.1,0.2'),('-0.1,0.4,0.1'),('0.2,-0.2,0.3'),('0.5,0.1,-0.1');
+  " >/dev/null 2>&1 || { fail "29 domain_agents: feedback_audit fixture setup failed"; return; }
+  local r9; r9=$(sqlq \
+    "SELECT json_extract(fractal_agent_feedback_audit(
+       'bt_da_fcatalog','emb','0.5,0.5,0.5',
+       'bt_da_fwarmup','center',4,3),'\$.diversity_quotient');")
+  grep <<< "$r9" -Eq '^[0-9]+(\.[0-9]+)?$' \
+    && pass "29 domain_agents: feedback_audit diversity_quotient is a real float (not NaN)" \
+    || fail "29 domain_agents: expected a numeric diversity_quotient, got: $r9"
+  local r9b; r9b=$(sqlq \
+    "SELECT (json_extract(fractal_agent_feedback_audit(
+       'bt_da_fcatalog','emb','0.5,0.5,0.5',
+       'bt_da_fwarmup','center',4,3),'\$.explanation') IS NOT NULL);")
+  [[ "$r9b" = "1" ]] \
+    && pass "29 domain_agents: feedback_audit returns the real session diagnostics" \
+    || fail "29 domain_agents: expected a non-null explanation, got: $r9b"
+  sqlq "DELETE FROM bt_da_fcatalog;" >/dev/null 2>&1
+  if expect_err "no catalog rows in bt_da_fcatalog" \
+      "SELECT fractal_agent_feedback_audit(
+        'bt_da_fcatalog','emb','0.5,0.5,0.5','bt_da_fwarmup','center',4,3);"; then
+    pass "29 domain_agents: feedback_audit raises a clean ERROR when the catalog is empty"
+  else
+    fail "29 domain_agents: expected a no-catalog-rows ERROR"
+  fi
+
+  # --- 9: fractal_agent_schedule_workload (search+telemetry -> reason)
+  # + empty-table guard --------------------------------------------------
+  sqlq "
+    CREATE TABLE bt_da_nodes(id INTEGER PRIMARY KEY, capability TEXT);
+    INSERT INTO bt_da_nodes VALUES
+      (1,'0.9,0.1,0.0,0.0,0.0'),(2,'0.0,0.0,0.9,0.1,0.0'),(3,'0.1,0.0,0.0,0.0,0.9');
+  " >/dev/null 2>&1 || { fail "29 domain_agents: node fixture setup failed"; return; }
+  local r10; r10=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT json_extract(fractal_agent_schedule_workload(
+       '0.8,0.1,0.0,0.0,0.1','bt_da_nodes','capability','id',30,50,5),'\$.assigned_node');")
+  grep <<< "$r10" -Eq '^[0-9]+$' \
+    && pass "29 domain_agents: schedule_workload returns the real nearest node" \
+    || fail "29 domain_agents: expected a numeric assigned_node, got: $r10"
+  local r10b; r10b=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT json_extract(fractal_agent_schedule_workload(
+       '0.8,0.1,0.0,0.0,0.1','bt_da_nodes','capability','id',30,50,5),'\$.rationale');")
+  grep <<< "$r10b" -q 'domain-agent-canary' \
+    && pass "29 domain_agents: schedule_workload composes search+telemetry -> reason (canary)" \
+    || fail "29 domain_agents: expected the canary in rationale, got: $r10b"
+  sqlq "DELETE FROM bt_da_nodes;" >/dev/null 2>&1
+  if expect_err "no node rows in bt_da_nodes" \
+      "SELECT fractal_agent_schedule_workload(
+        '0.8,0.1,0.0,0.0,0.1','bt_da_nodes','capability','id',30,50,5);"; then
+    pass "29 domain_agents: schedule_workload raises a clean ERROR when the node table is empty"
+  else
+    fail "29 domain_agents: expected a no-node-rows ERROR"
+  fi
+
+  # --- 10: fractal_agent_rebalance_sibling (optimize+trajectory ->
+  # reason) + empty-table guard -----------------------------------------
+  sqlq "
+    CREATE TABLE bt_da_alloc(id INTEGER PRIMARY KEY, alloc TEXT);
+    INSERT INTO bt_da_alloc VALUES
+      (1,'0.25,0.25,0.25,0.25'),(2,'0.4,0.3,0.2,0.1'),(3,'0.1,0.2,0.3,0.4');
+  " >/dev/null 2>&1 || { fail "29 domain_agents: alloc fixture setup failed"; return; }
+  local r11; r11=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT json_extract(fractal_agent_rebalance_sibling(
+       '0.05,0.10,0.15,0.20',
+       '0.04,0.0,0.0,0.0,0.0,0.09,0.0,0.0,0.0,0.0,0.16,0.0,0.0,0.0,0.0,0.25',
+       4,'bt_da_alloc','alloc','0.25,0.25,0.25,0.25',NULL,5,'id'),'\$.sharpe');")
+  grep <<< "$r11" -Eq '^-?[0-9]+(\.[0-9]+)?$' \
+    && pass "29 domain_agents: rebalance_sibling sharpe is the real optimizer output" \
+    || fail "29 domain_agents: expected a numeric sharpe, got: $r11"
+  local r11b; r11b=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT json_extract(fractal_agent_rebalance_sibling(
+       '0.05,0.10,0.15,0.20',
+       '0.04,0.0,0.0,0.0,0.0,0.09,0.0,0.0,0.0,0.0,0.16,0.0,0.0,0.0,0.0,0.25',
+       4,'bt_da_alloc','alloc','0.25,0.25,0.25,0.25',NULL,5,'id'),'\$.nearest_alloc_id');")
+  grep <<< "$r11b" -Eq '^[0-9]+$' \
+    && pass "29 domain_agents: rebalance_sibling nearest_alloc_id is the real trajectory nearest" \
+    || fail "29 domain_agents: expected a numeric nearest_alloc_id, got: $r11b"
+  sqlq "DELETE FROM bt_da_alloc;" >/dev/null 2>&1
+  if expect_err "no allocation rows in bt_da_alloc" \
+      "SELECT fractal_agent_rebalance_sibling(
+        '0.05,0.10,0.15,0.20',
+        '0.04,0.0,0.0,0.0,0.0,0.09,0.0,0.0,0.0,0.0,0.16,0.0,0.0,0.0,0.0,0.25',
+        4,'bt_da_alloc','alloc','0.25,0.25,0.25,0.25',NULL,5,'id');"; then
+    pass "29 domain_agents: rebalance_sibling raises a clean ERROR when the allocation table is empty"
+  else
+    fail "29 domain_agents: expected a no-allocation-rows ERROR"
+  fi
+
+  # --- 11: fractal_agent_detour_classify (trajectory+boxcount -> reason)
+  # + empty-table guard --------------------------------------------------
+  # Box-counting needs enough points AND enough scale dynamic range,
+  # not just >= 8 points (an exactly-regular or tightly-clustered set
+  # silently fails the epsilon-bucket filter) -- same linear-spread-
+  # with-jitter shape gate 22's own boxcount fixture uses.
+  local trace; trace=$(awk 'BEGIN{srand(11); out="";
+    for(i=1;i<=40;i++){x=i+rand()*0.01; y=i*0.5+rand()*0.01;
+      if(i>1) out=out","; out=out x","y} print out}')
+  sqlq "
+    CREATE TABLE bt_da_vehicles(id INTEGER PRIMARY KEY, baseline TEXT, current TEXT);
+    INSERT INTO bt_da_vehicles VALUES
+      (1,'0.1,0.1,0.1,0.1','0.8,0.7,0.6,0.5'),(2,'0.2,0.2,0.2,0.2','0.25,0.25,0.25,0.25');
+  " >/dev/null 2>&1 || { fail "29 domain_agents: vehicle fixture setup failed"; return; }
+  local r12; r12=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT json_extract(fractal_agent_detour_classify(
+       'bt_da_vehicles','current','0.1,0.1,0.1,0.1','0.8,0.7,0.6,0.5',
+       '$trace',5,'id',2),'\$.trace_complexity');")
+  grep <<< "$r12" -Eq '^[0-9]+(\.[0-9]+)?$' \
+    && pass "29 domain_agents: detour_classify trace_complexity is the real box-counting dimension" \
+    || fail "29 domain_agents: expected a numeric trace_complexity, got: $r12"
+  local r12b; r12b=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT json_extract(fractal_agent_detour_classify(
+       'bt_da_vehicles','current','0.1,0.1,0.1,0.1','0.8,0.7,0.6,0.5',
+       '$trace',5,'id',2),'\$.rationale');")
+  grep <<< "$r12b" -q 'domain-agent-canary' \
+    && pass "29 domain_agents: detour_classify composes trajectory+boxcount -> reason (canary)" \
+    || fail "29 domain_agents: expected the canary in rationale, got: $r12b"
+  sqlq "DELETE FROM bt_da_vehicles;" >/dev/null 2>&1
+  if expect_err "no vehicle rows in bt_da_vehicles" \
+      "SELECT fractal_agent_detour_classify(
+        'bt_da_vehicles','current','0.1,0.1,0.1,0.1','0.2,0.2,0.2,0.2',
+        '0,0,0,0',5,'id',2);"; then
+    pass "29 domain_agents: detour_classify raises a clean ERROR when the vehicle table is empty"
+  else
+    fail "29 domain_agents: expected a no-vehicle-rows ERROR"
+  fi
+
+  # --- 12: fractal_agent_track_anomaly (trajectory+dfa -> reason) +
+  # empty-table guard -----------------------------------------------------
+  local heading; heading=$(awk 'BEGIN{srand(13); out=""; cum=0;
+    for(i=0;i<80;i++){ step=(i>=30 && i<=50) ? (rand()-0.5)*0.35 : (rand()-0.5)*0.03;
+      cum+=step; if(i>0) out=out","; out=out cum } print out}')
+  sqlq "
+    CREATE TABLE bt_da_tracks(id INTEGER PRIMARY KEY, baseline TEXT, current TEXT);
+    INSERT INTO bt_da_tracks VALUES
+      (1,'0.1,0.1,0.1,0.1','0.7,-0.4,-0.8,0.9'),(2,'0.2,0.2,0.2,0.2','0.24,0.24,0.24,0.24');
+  " >/dev/null 2>&1 || { fail "29 domain_agents: track fixture setup failed"; return; }
+  local r13; r13=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT json_extract(fractal_agent_track_anomaly(
+       'bt_da_tracks','current','0.1,0.1,0.1,0.1','0.7,-0.4,-0.8,0.9',
+       '$heading',5,'id'),'\$.dfa_exponent');")
+  grep <<< "$r13" -Eq '^-?[0-9]+(\.[0-9]+)?$' \
+    && pass "29 domain_agents: track_anomaly dfa_exponent is the real DFA exponent" \
+    || fail "29 domain_agents: expected a numeric dfa_exponent, got: $r13"
+  local r13b; r13b=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT json_extract(fractal_agent_track_anomaly(
+       'bt_da_tracks','current','0.1,0.1,0.1,0.1','0.7,-0.4,-0.8,0.9',
+       '$heading',5,'id'),'\$.rationale');")
+  grep <<< "$r13b" -q 'domain-agent-canary' \
+    && pass "29 domain_agents: track_anomaly composes trajectory+dfa -> reason (canary)" \
+    || fail "29 domain_agents: expected the canary in rationale, got: $r13b"
+  sqlq "DELETE FROM bt_da_tracks;" >/dev/null 2>&1
+  if expect_err "no track rows in bt_da_tracks" \
+      "SELECT fractal_agent_track_anomaly(
+        'bt_da_tracks','current','0.1,0.1,0.1,0.1','0.2,0.2,0.2,0.2',
+        '0,0,0',5,'id');"; then
+    pass "29 domain_agents: track_anomaly raises a clean ERROR when the track table is empty"
+  else
+    fail "29 domain_agents: expected a no-track-rows ERROR"
+  fi
+
+  # --- 13: fractal_agent_network_coverage_alert (morph+drift -> reason)
+  # + NULL guard ----------------------------------------------------------
+  # Same linear-spread-with-jitter shape as detour_classify's trace
+  # above: morphological_complexity needs enough points AND enough
+  # scale dynamic range, not just >= 8 points.
+  local cloud; cloud=$(awk 'BEGIN{srand(17); out="";
+    for(i=1;i<=40;i++){x=i+rand()*0.01; y=i*0.5+rand()*0.01;
+      if(i>1) out=out","; out=out x","y} print out}')
+  local drift; drift=$(awk 'BEGIN{srand(19); out="";
+    for(t=1;t<=96;t++){ if(t<48){v=4.0+1.5*sin(t*0.31)+(rand()-0.5)*0.8}
+                        else {v=4.0+3.0*sin(t*1.4)+(rand()-0.5)*0.4}
+      if(t>1) out=out","; out=out v } print out}')
+  local r14; r14=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT json_extract(fractal_agent_network_coverage_alert(
+       '$cloud','$drift',2,48,0.5),'\$.morph_dimension');")
+  grep <<< "$r14" -Eq '^[0-9]+(\.[0-9]+)?$' \
+    && pass "29 domain_agents: network_coverage_alert morph_dimension is the real morphological complexity" \
+    || fail "29 domain_agents: expected a numeric morph_dimension, got: $r14"
+  local r14b; r14b=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT json_extract(fractal_agent_network_coverage_alert(
+       '$cloud','$drift',2,48,0.5),'\$.rationale');")
+  grep <<< "$r14b" -q 'domain-agent-canary' \
+    && pass "29 domain_agents: network_coverage_alert composes morph+drift -> reason (canary)" \
+    || fail "29 domain_agents: expected the canary in rationale, got: $r14b"
+  if expect_err "point_cloud and drift_series are required" \
+      "SELECT fractal_agent_network_coverage_alert(NULL,'1.0,2.0,3.0',2,48,0.5);"; then
+    pass "29 domain_agents: network_coverage_alert raises a clean ERROR when point_cloud/drift_series is NULL"
+  else
+    fail "29 domain_agents: expected a required-args ERROR"
+  fi
+  if expect_err "point_cloud must be a CSV/JSON vector" \
+      "SELECT fractal_agent_network_coverage_alert('bad!vec','1.0,2.0,3.0',2,48,0.5);"; then
+    pass "29 domain_agents: network_coverage_alert rejects a malformed point_cloud"
+  else
+    fail "29 domain_agents: network_coverage_alert accepted a malformed point_cloud"
+  fi
+
+  # --- 14: fractal_agent_allocate (optimize_portfolio -> reason) +
+  # cov-length rejection ------------------------------------------------
+  local r15; r15=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_agent_allocate('0.05,0.1','1.0,0.0,0.0,1.0',1,'{}');")
+  grep <<< "$r15" -q '"sharpe"' \
+    && pass "29 domain_agents: allocate composes optimize_portfolio -> reason (real optimizer jsonb with sharpe)" \
+    || fail "29 domain_agents: expected a sharpe-bearing allocation jsonb, got: $r15"
+  local r15b; r15b=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT json_extract(fractal_agent_allocate(
+       '0.05,0.1','1.0,0.0,0.0,1.0',1,'{}'),'\$.rationale');")
+  grep <<< "$r15b" -q 'domain-agent-canary' \
+    && pass "29 domain_agents: allocate rationale is the real reason step output (canary)" \
+    || fail "29 domain_agents: expected the canary in rationale, got: $r15b"
+  if expect_err "must be n_assets^2" \
+      "SELECT fractal_agent_allocate('0.1,0.1','1.0',1);"; then
+    pass "29 domain_agents: allocate surfaces the optimizer's clean cov-length rejection"
+  else
+    fail "29 domain_agents: expected a cov-length rejection"
+  fi
+  if expect_err "mu/cov must be" \
+      "SELECT fractal_agent_allocate('bad!vec','1.0,0.0,0.0,1.0',1);"; then
+    pass "29 domain_agents: allocate rejects a malformed mu/cov"
+  else
+    fail "29 domain_agents: allocate accepted a malformed mu/cov"
+  fi
+
+  # --- 15: fractal_agent_route_task (telemetry -> reason) + empty-
+  # capability-table guard ----------------------------------------------
+  sqlq "
+    CREATE TABLE bt_da_caps(capability_name TEXT, emb TEXT);
+    INSERT INTO bt_da_caps VALUES ('cap-a','0.1,0.2,0.3'),('cap-b','0.9,0.8,0.7');
+  " >/dev/null 2>&1 || { fail "29 domain_agents: capability fixture setup failed"; return; }
+  local r16; r16=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT json_extract(fractal_agent_route_task(
+       '0.1,0.2,0.3','bt_da_caps','emb','capability_name',1000),'\$.routed_to');" | tail -n1)
+  [[ "$r16" = "cap-a" ]] \
+    && pass "29 domain_agents: route_task returns the real nearest capability name" \
+    || fail "29 domain_agents: expected routed_to=cap-a, got: $r16"
+  local r16b; r16b=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT json_extract(fractal_agent_route_task(
+       '0.1,0.2,0.3','bt_da_caps','emb','capability_name',1000),'\$.rationale');")
+  grep <<< "$r16b" -q 'domain-agent-canary' \
+    && pass "29 domain_agents: route_task composes telemetry -> reason (reason step ran)" \
+    || fail "29 domain_agents: expected the canary in rationale, got: $r16b"
+  sqlq "DELETE FROM bt_da_caps;" >/dev/null 2>&1
+  if expect_err "no capability rows in bt_da_caps" \
+      "SELECT fractal_agent_route_task(
+        '0.1,0.2,0.3','bt_da_caps','emb','capability_name',1000);"; then
+    pass "29 domain_agents: route_task raises a clean ERROR when the capability table is empty"
+  else
+    fail "29 domain_agents: expected a no-capability-rows ERROR"
+  fi
+
+  # --- 16: fractal_agent_diverse_portfolios (enterprise tier) ---------
+  if [[ -n "$(wpath "$MOCKENT")" && -f "$(wpath "$MOCKENT")" ]]; then
+    local r17; r17=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+      "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+      "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+      "SELECT json_extract(fractal_agent_diverse_portfolios(
+         '0.05,0.1','1.0,0.0,0.0,1.0',1),'\$[0].candidate_id');" | tail -n1)
+    grep <<< "$r17" -Eq '^[0-9]+$' \
+      && pass "29 domain_agents: diverse_portfolios returns real candidates once enterprise is loaded" \
+      || fail "29 domain_agents: expected a numeric candidate_id, got: $r17"
+    # objective_mode is validated before the enterprise-tier check, so
+    # this rejection fires with no enterprise_lib needed.
+    if expect_err "objective_mode must be" \
+        "SELECT fractal_agent_diverse_portfolios(
+          '0.05,0.1','1.0,0.0,0.0,1.0',1,8,0.15,0.9,NULL,'{}','bogus');"; then
+      pass "29 domain_agents: diverse_portfolios rejects an unknown objective_mode"
+    else
+      fail "29 domain_agents: diverse_portfolios accepted an unknown objective_mode"
+    fi
+    # mu/cov decode also happens before the enterprise-tier check.
+    if expect_err "mu/cov must be" \
+        "SELECT fractal_agent_diverse_portfolios('bad!vec','1.0,0.0,0.0,1.0',1);"; then
+      pass "29 domain_agents: diverse_portfolios rejects a malformed mu/cov"
+    else
+      fail "29 domain_agents: diverse_portfolios accepted a malformed mu/cov"
+    fi
+  else
+    skip "29 domain_agents: diverse_portfolios (mock core did not build)"
+  fi
+
+  sqlq "
+    DROP TABLE IF EXISTS bt_da_caps;
+    DROP TABLE IF EXISTS bt_da_catalog;
+    DROP TABLE IF EXISTS bt_da_data;
+    DROP TABLE IF EXISTS bt_da_patients;
+    DROP TABLE IF EXISTS bt_da_fcatalog;
+    DROP TABLE IF EXISTS bt_da_fwarmup;
+    DROP TABLE IF EXISTS bt_da_nodes;
+    DROP TABLE IF EXISTS bt_da_alloc;
+    DROP TABLE IF EXISTS bt_da_vehicles;
+    DROP TABLE IF EXISTS bt_da_tracks;
+  " >/dev/null 2>&1
 
   printf 'SELECT 1' > "$SQLTXT"
 }
@@ -3115,6 +3925,28 @@ gate_31_ledger_chain() {
   else
     fail "31 ledger_chain: see driver output above"
   fi
+
+  # ---- real write/read storage path (not the driver's direct-table-
+  # poke above): fractal_audit_log's actual C write goes through our
+  # own storage VFS (ledger_slot_store/ledger_vfs_write_entry) even
+  # with the mock core loaded -- the mock's canned flush()/load() never
+  # touch it, so this is the only place that path is reachable. Setting
+  # enterprise_ledger_key first also tags the write with a real HMAC,
+  # and fractal_ledger_verify's read-back (ledger_vfs_read_entry) then
+  # checks it in constant time -- both otherwise dead in this checkout.
+  if [[ -n "$(wpath "$MOCKENT")" && -f "$(wpath "$MOCKENT")" ]]; then
+    sqlq "DELETE FROM fractalsql_ledger WHERE kind = 2;" >/dev/null 2>&1
+    local rw; rw=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+      "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+      "SELECT fractalsql_set('enterprise_ledger_key','gate31-hmac-test-key');" \
+      "SELECT fractal_audit_log('test.small','{\"n\":1}');" \
+      "SELECT fractal_ledger_verify(2);" | tail -n1)
+    grep <<< "$rw" -q '"ok":true' \
+      && pass "31 ledger_chain: audit_log + ledger_verify round-trip a real HMAC-keyed write/read" \
+      || fail "31 ledger_chain: expected an ok verify after a real write, got: $rw"
+  else
+    skip "31 ledger_chain: real write/read storage path (mock core did not build)"
+  fi
 }
 
 gate_32_enterprise_signature_real() {
@@ -3282,6 +4114,169 @@ gate_33_tsan_ledger_concurrent() {
   fi
 }
 
+gate_34_oom_inject() {
+  if [[ "$sysname" != "Linux" ]]; then
+    skip "34 oom_inject (Linux only — dladdr()-based LD_PRELOAD interception)"
+    return
+  fi
+  # A sanitizer runtime is already LD_PRELOADed (main(), below) and
+  # must stay first in that list -- our own malloc/calloc/realloc
+  # interposition can't be layered on top of that: either it goes
+  # first and ASan refuses to start ("runtime does not come first in
+  # initial library list"), or it goes after and the dynamic linker
+  # binds malloc to ASan's definition first, making ours dead weight
+  # either way. ASan/UBSan/TSan already instrument every allocation
+  # path far more thoroughly than a size-matched malloc failure could.
+  if [[ "$ASAN" -eq 1 || "$UBSAN" -eq 1 || "$TSAN" -eq 1 ]]; then
+    skip "34 oom_inject (sanitizer builds already own malloc interception)"
+    return
+  fi
+  if [[ -z "$CC" ]]; then
+    skip "34 oom_inject (no C compiler on PATH)"
+    return
+  fi
+  local shim="$PDIRW/oom_inject.so"
+  if ! "$CC" -shared -fPIC -std=c99 tests/oom_inject.c -o "$shim" -ldl \
+        >"$PDIRW/oom_inject.log" 2>&1; then
+    fail "34 oom_inject: shim failed to build (see $PDIRW/oom_inject.log)"
+    return
+  fi
+
+  # Two allocations, each the only one of its exact size made FROM
+  # fractalsql.so for that call -- see tests/oom_inject.c's own header
+  # for why size-based targeting needs that (a vector op whose output
+  # buffer is unavoidably the same size as its own CSV-decode scratch
+  # buffer can't be disambiguated this way; these two don't have that
+  # problem).
+  local v100; v100=$(printf '1.0,%.0s' {1..99}; printf '1.0')
+
+  # fractal_vector(777): calloc(777, sizeof(float)) = 3108 bytes, the
+  # only allocation of that size in this call (no CSV decode at all --
+  # dim is a plain integer argument).
+  local base1; base1=$(sqlq "SELECT fractal_vector_to_json(fractal_vector(777));")
+  [[ "$base1" == \[0,0,0* ]] \
+    && pass "34 oom_inject: fractal_vector(777) succeeds with no fault injected (baseline)" \
+    || fail "34 oom_inject: baseline fractal_vector(777) failed: $base1"
+  local oom1; oom1=$(LD_PRELOAD="$shim" FSQL_OOM_FAIL_SIZE=3108 \
+    FSQL_OOM_TARGET_SO=fractalsql.so sqlq "SELECT fractal_vector(777);")
+  grep <<< "$oom1" -qi "out of memory" \
+    && pass "34 oom_inject: fractal_vector(dim)'s calloc failure surfaces as a clean out-of-memory error" \
+    || fail "34 oom_inject: expected an out-of-memory error, got: $oom1"
+
+  # fractal_vector_to_json(100 floats): malloc(16 + 100*32 + 4) = 3220
+  # bytes -- the output JSON buffer, sized by a different multiplier
+  # (32, not 4) than the CSV-decode scratch buffer (100*4=400), so the
+  # two can't collide for this dim.
+  local base2; base2=$(sqlq "SELECT length(fractal_vector_to_json('$v100'));")
+  [[ "$base2" =~ ^[0-9]+$ ]] \
+    && pass "34 oom_inject: fractal_vector_to_json(100 floats) succeeds with no fault injected (baseline)" \
+    || fail "34 oom_inject: baseline to_json failed: $base2"
+  local oom2; oom2=$(LD_PRELOAD="$shim" FSQL_OOM_FAIL_SIZE=3220 \
+    FSQL_OOM_TARGET_SO=fractalsql.so sqlq "SELECT fractal_vector_to_json('$v100');")
+  grep <<< "$oom2" -qi "out of memory" \
+    && pass "34 oom_inject: fractal_vector_to_json's output-buffer malloc failure surfaces as a clean out-of-memory error" \
+    || fail "34 oom_inject: expected an out-of-memory error, got: $oom2"
+}
+
+gate_35_ed25519() {
+  if [[ -z "$CC" ]]; then
+    skip "35 ed25519 (no C compiler on PATH)"
+    return
+  fi
+  # Must run from the repo root with the same -Isrc the real build uses
+  # to resolve fsql_enterprise.c's #include "fsql_ed25519.h": under
+  # --coverage this makes gcov record the identical source path, so
+  # this probe's hits merge into the SAME fsql_ed25519.h entry the main
+  # build's own lcov capture reports, rather than a second, separate one.
+  local obj="src/_ed25519_probe.o"
+  local covflags=()
+  [[ "$COVERAGE" -eq 1 ]] && covflags+=(--coverage)
+  rm -f "$obj"
+  if ! env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$CC" -std=c11 -O1 -g \
+        ${covflags[@]+"${covflags[@]}"} -Isrc -c tests/ed25519_probe.c \
+        -o "$obj" >"$PDIRW/ed25519_probe_build.log" 2>&1; then
+    fail "35 ed25519: probe failed to build (see $PDIRW/ed25519_probe_build.log)"
+    return
+  fi
+  local bin="$PDIRW/ed25519_probe"
+  if ! env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$CC" ${covflags[@]+"${covflags[@]}"} "$obj" -o "$bin" \
+        >"$PDIRW/ed25519_probe_link.log" 2>&1; then
+    fail "35 ed25519: probe failed to link (see $PDIRW/ed25519_probe_link.log)"
+    rm -f "$obj"
+    return
+  fi
+  # This binary has no sanitizer instrumentation of its own -- running
+  # it with a sanitizer runtime inherited via LD_PRELOAD hits the same
+  # "runtime does not come first" refusal gate 34 does.
+  local out; out=$(env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$bin" 2>&1)
+  local rc=$?
+  # .gcno/.gcda stay in src/ for run_coverage_report's later lcov
+  # capture under --coverage; otherwise there's nothing worth keeping.
+  rm -f "$obj"
+  [[ "$COVERAGE" -ne 1 ]] && rm -f "${obj%.o}.gcno" "${obj%.o}.gcda"
+  if [[ $rc -eq 0 ]]; then
+    pass "35 ed25519: fsql_ed25519_verify_detached (RFC 8032 TEST 1/2 + throwaway-key accept/tamper/wrong-key/corrupt-sig reject -- see driver OK lines above)"
+  else
+    fail "35 ed25519: see driver output above ($out)"
+  fi
+}
+
+gate_36_extract_population() {
+  if [[ -z "$CC" ]]; then
+    skip "36 extract_population (no C compiler on PATH)"
+    return
+  fi
+  # fsql_extract_population's only caller is the libFuzzer smoke
+  # harness (gate 21, FSQL_FUZZ_* only -- never part of a plain
+  # --coverage run), so it's otherwise dead here. Same repo-root /
+  # -Isrc treatment as gate 35's probe, but compiling src/fsql_parse.c
+  # itself rather than a header: a SEPARATELY-named object (not
+  # src/fsql_parse.o, which the real build already populated with this
+  # same file's other 3 functions' hits from earlier gates) so this
+  # probe's run only ADDS fsql_extract_population's hits via lcov's own
+  # same-source-path summation, rather than overwriting the real
+  # build's object and risking its already-recorded hits.
+  local mainobj="src/_extract_pop_main.o"
+  local supportobj="src/_extract_pop_support.o"
+  local covflags=()
+  [[ "$COVERAGE" -eq 1 ]] && covflags+=(--coverage)
+  rm -f "$mainobj" "$supportobj"
+  if ! env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$CC" -std=c11 -O1 -g \
+        ${covflags[@]+"${covflags[@]}"} -Isrc \
+        -c tests/extract_population_probe.c -o "$mainobj" \
+        >"$PDIRW/extract_pop_build.log" 2>&1 \
+     || ! env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$CC" -std=c11 -O1 -g \
+        ${covflags[@]+"${covflags[@]}"} \
+        -c src/fsql_parse.c -o "$supportobj" \
+        >>"$PDIRW/extract_pop_build.log" 2>&1; then
+    fail "36 extract_population: probe failed to build (see $PDIRW/extract_pop_build.log)"
+    rm -f "$mainobj" "$supportobj"
+    return
+  fi
+  local bin="$PDIRW/extract_population_probe"
+  if ! env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$CC" ${covflags[@]+"${covflags[@]}"} \
+        "$mainobj" "$supportobj" -o "$bin" \
+        >"$PDIRW/extract_pop_link.log" 2>&1; then
+    fail "36 extract_population: probe failed to link (see $PDIRW/extract_pop_link.log)"
+    rm -f "$mainobj" "$supportobj"
+    return
+  fi
+  # No sanitizer instrumentation of its own -- same LD_PRELOAD-
+  # exclusion gate 34/35 need under --asan/--ubsan/--tsan.
+  local out; out=$(env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$bin" 2>&1)
+  local rc=$?
+  rm -f "$mainobj" "$supportobj"
+  if [[ "$COVERAGE" -ne 1 ]]; then
+    rm -f "${mainobj%.o}.gcno" "${mainobj%.o}.gcda"
+    rm -f "${supportobj%.o}.gcno" "${supportobj%.o}.gcda"
+  fi
+  if [[ $rc -eq 0 ]]; then
+    pass "36 extract_population: fsql_extract_population (population-array parse, no-key, NULL, max_rows cap -- see driver OK lines above)"
+  else
+    fail "36 extract_population: see driver output above ($out)"
+  fi
+}
+
 # ======================================================================
 # Runner
 # ======================================================================
@@ -3306,6 +4301,9 @@ gate_title() {
     31) echo "ledger_chain" ;;
     32) echo "enterprise_signature_real" ;;
     33) echo "tsan_ledger_concurrent" ;;
+    34) echo "oom_inject" ;;
+    35) echo "ed25519" ;;
+    36) echo "extract_population" ;;
   esac
 }
 
@@ -3329,6 +4327,9 @@ run_gate() {
     31) gate_31_ledger_chain ;;
     32) gate_32_enterprise_signature_real ;;
     33) gate_33_tsan_ledger_concurrent ;;
+    34) gate_34_oom_inject ;;
+    35) gate_35_ed25519 ;;
+    36) gate_36_extract_population ;;
   esac
 }
 

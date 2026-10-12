@@ -21,12 +21,12 @@
 -- See sql/load_extension.sql for install paths.
 --
 -- ---------------------------------------------------------------------
--- 2. Function surface (2.0.4, Community sovereign build)
+-- 2. Function surface (2.0.5, Community sovereign build)
 -- ---------------------------------------------------------------------
 --
 -- Smoke + search:
 --   fractalsql_edition() -> TEXT                        -- 'Community'
---   fractalsql_version() -> TEXT                        -- '2.0.4'
+--   fractalsql_version() -> TEXT                        -- '2.0.5'
 --   fractal_search(vector, query) -> REAL               -- Sniper, memoized
 --   fractal_search_explore(emb, query[, params]) -> TEXT       -- Scout aggregate
 --
