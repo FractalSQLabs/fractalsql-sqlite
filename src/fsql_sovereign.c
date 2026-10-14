@@ -1157,7 +1157,7 @@ static void morphology_fn(sqlite3_context *ctx, int argc,
  * Diversify / Repulsion controls
  * ------------------------------------------------------------------ */
 
-/* fractal_diversify_enable() — opt the connection's shared ctx into
+/* fractal_diversify_enable(): opt the connection's shared ctx into
  * the divergence monitor + repulsive post-filter. */
 static void diversify_enable_fn(sqlite3_context *ctx, int argc,
                                 sqlite3_value **argv) {
@@ -1193,7 +1193,7 @@ static void diversify_disable_fn(sqlite3_context *ctx, int argc,
     sqlite3_result_null(ctx);
 }
 
-/* Targeted JSON extractors — the same idea as the entry TU's
+/* Targeted JSON extractors: the same idea as the entry TU's
  * json_get_int, plus a double variant. Only flat scalar fields of one
  * flat object are ever read here; no nested-object or array support is
  * attempted (the params document has none). */
@@ -1233,7 +1233,7 @@ static double json_get_double(const char *s, const char *key, int *found) {
     return v;
 }
 
-/* fractal_diversify_set_params(params_json) — one flat JSON object
+/* fractal_diversify_set_params(params_json): one flat JSON object
  * with any subset of {window_n, stall_threshold, repulsion_sigma,
  * repulsion_weight, max_shadows_considered, tail_buffer_cap}.
  *
@@ -1242,7 +1242,7 @@ static double json_get_double(const char *s, const char *key, int *found) {
  * are the documented defaults (window_n 5, stall_threshold 0.15,
  * repulsion_sigma f(dim), max_shadows_considered 64,
  * tail_buffer_cap 256), so absent fields always resolve to
- * defaults-or-earlier-override — never reset. */
+ * defaults-or-earlier-override, never reset. */
 static void diversify_set_params_fn(sqlite3_context *ctx, int argc,
                                     sqlite3_value **argv) {
     (void)argc;
@@ -1301,7 +1301,7 @@ static void diversify_set_params_fn(sqlite3_context *ctx, int argc,
     sqlite3_result_null(ctx);
 }
 
-/* fractal_diversify_current_dq() — most recent D_q, or NULL when NaN
+/* fractal_diversify_current_dq(): most recent D_q, or NULL when NaN
  * (no query run yet / diversify disabled). SQLite has no NaN, so
  * NULL is the honest spelling of that internal NaN. */
 static void diversify_dq_fn(sqlite3_context *ctx, int argc,
@@ -1314,7 +1314,7 @@ static void diversify_dq_fn(sqlite3_context *ctx, int argc,
     sqlite3_result_double(ctx, dq);
 }
 
-/* fractal_diversify_overhead_p99_us() — rolling p99 of core's own
+/* fractal_diversify_overhead_p99_us(): rolling p99 of core's own
  * per-query diversify overhead; NULL while NaN (buffer not full /
  * diversify disabled). */
 static void diversify_overhead_fn(sqlite3_context *ctx, int argc,
@@ -1347,7 +1347,7 @@ static int parse_engagement_kind(sqlite3_value *v, char *err,
 }
 
 /* fractal_feedback_report(result_handle, kind [, dwell_ms]).
- * handle: INTEGER (int64, >= 0) or TEXT (strtoull — full uint64 range,
+ * handle: INTEGER (int64, >= 0) or TEXT (strtoull, full uint64 range,
  * same reasoning as the portfolio seed). kind: 'dwell'|'positive'|
  * 'negative'. dwell_ms: DEFAULT NULL -> 0. */
 static void feedback_report_fn(sqlite3_context *ctx, int argc,

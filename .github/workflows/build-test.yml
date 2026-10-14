@@ -50,13 +50,18 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
+          # libssl-dev: gate 37 (mcp_smoke) builds the MCP server
+          # on-demand via mcp/Makefile, which links -lssl -lcrypto.
           sudo apt-get install -y --no-install-recommends \
-              build-essential sqlite3 libsqlite3-dev pkg-config
+              build-essential sqlite3 libsqlite3-dev pkg-config libssl-dev
 
       - name: Install toolchain (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install sqlite pkg-config
+          # openssl@3: gate 37 (mcp_smoke) builds the MCP server
+          # on-demand via mcp/Makefile; macOS has no system OpenSSL,
+          # and the gate resolves Homebrew's keg-only prefix itself.
+          brew install sqlite pkg-config openssl@3
           # Apple's /usr/bin/sqlite3 is built WITHOUT extension loading
           # (SQLITE_OMIT_LOAD_EXTENSION) — ".load" is not a command
           # there. Homebrew's sqlite is keg-only and never reaches
@@ -91,6 +96,22 @@ jobs:
           Rename-Item -Path "deps\sqlite-amalgamation-${env:SQLITE_VERSION}" `
                       -NewName "sqlite"
           Add-Content -Path $env:GITHUB_ENV -Value "FSQL_SQLITE_DIR=$PWD\deps\sqlite"
+
+      - name: SQLite amalgamation headers (POSIX)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          # mcp/Makefile compiles the vendored sqlite3 amalgamation
+          # directly (deps/sqlite/sqlite3.c) rather than linking system
+          # libsqlite3 -- gate 37/38 (mcp_smoke/mcp_https) need it to
+          # build the MCP server, and apt's/brew's libsqlite3-dev only
+          # ships headers, not sqlite3.c. Mirrors the Windows step above.
+          zip_name="sqlite-amalgamation-${SQLITE_VERSION}.zip"
+          url="https://www.sqlite.org/${SQLITE_YEAR}/${zip_name}"
+          mkdir -p deps
+          curl -fsSL -o deps/sqlite.zip "$url"
+          unzip -q deps/sqlite.zip -d deps
+          mv "deps/sqlite-amalgamation-${SQLITE_VERSION}" deps/sqlite
 
       - name: Run gate suite (POSIX)
         if: runner.os != 'Windows'
@@ -183,7 +204,7 @@ jobs:
           conn.enable_load_extension(False)
           cur = conn.cursor()
           assert cur.execute("SELECT fractalsql_edition()").fetchone()[0] == "Community"
-          assert cur.execute("SELECT fractalsql_version()").fetchone()[0] == "2.0.5"
+          assert cur.execute("SELECT fractalsql_version()").fetchone()[0] == "2.0.6"
           d = cur.execute("SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0')").fetchone()[0]
           assert abs(d) < 1e-6
           print("asan/ubsan smoke OK")
@@ -294,8 +315,23 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update
+          # libssl-dev: gate 37 (mcp_smoke), part of --tsan's default
+          # gate set, builds the MCP server via mcp/Makefile.
           sudo apt-get install -y --no-install-recommends \
-              build-essential sqlite3 libsqlite3-dev pkg-config util-linux
+              build-essential sqlite3 libsqlite3-dev pkg-config util-linux libssl-dev
+
+      - name: SQLite amalgamation headers
+        run: |
+          # gate 37/38 (mcp_smoke/mcp_https), part of --tsan's default
+          # gate set, need the vendored sqlite3.c amalgamation to build
+          # the MCP server via mcp/Makefile -- see the gates job's own
+          # "SQLite amalgamation headers (POSIX)" step for why.
+          zip_name="sqlite-amalgamation-${SQLITE_VERSION}.zip"
+          url="https://www.sqlite.org/${SQLITE_YEAR}/${zip_name}"
+          mkdir -p deps
+          curl -fsSL -o deps/sqlite.zip "$url"
+          unzip -q deps/sqlite.zip -d deps
+          mv "deps/sqlite-amalgamation-${SQLITE_VERSION}" deps/sqlite
 
       - name: build_test.sh --tsan
         run: |
@@ -322,8 +358,23 @@ jobs:
       - name: Install toolchain + lcov
         run: |
           sudo apt-get update
+          # libssl-dev: gate 37 (mcp_smoke), part of --coverage's
+          # default gate set, builds the MCP server via mcp/Makefile.
           sudo apt-get install -y --no-install-recommends \
-              build-essential sqlite3 libsqlite3-dev pkg-config lcov
+              build-essential sqlite3 libsqlite3-dev pkg-config lcov libssl-dev
+
+      - name: SQLite amalgamation headers
+        run: |
+          # gate 37/38 (mcp_smoke/mcp_https), part of --coverage's
+          # default gate set, need the vendored sqlite3.c amalgamation
+          # to build the MCP server via mcp/Makefile -- see the gates
+          # job's own "SQLite amalgamation headers (POSIX)" step for why.
+          zip_name="sqlite-amalgamation-${SQLITE_VERSION}.zip"
+          url="https://www.sqlite.org/${SQLITE_YEAR}/${zip_name}"
+          mkdir -p deps
+          curl -fsSL -o deps/sqlite.zip "$url"
+          unzip -q deps/sqlite.zip -d deps
+          mv "deps/sqlite-amalgamation-${SQLITE_VERSION}" deps/sqlite
 
       - name: build_test.sh --coverage
         run: |

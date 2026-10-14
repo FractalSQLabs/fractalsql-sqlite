@@ -74,7 +74,7 @@ fsql_extract_population(const char *json, int dim, int max_rows, double *out_fla
         for (int d = 0; d < dim; d++) {
             char *end = NULL;
             out_flat[(size_t) np * dim + d] = strtod(p, &end);
-            if (end == p)                       /* malformed — stop */
+            if (end == p)                       /* malformed: stop */
                 return np;
             p = end;
             while (*p == ' ' || *p == ',') p++;

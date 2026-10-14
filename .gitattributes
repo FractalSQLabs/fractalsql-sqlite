@@ -28,3 +28,8 @@
 # checkout -- an editor or tool that normalizes these to LF breaks
 # scripts\windows\build.bat and build-msi.bat silently.
 *.bat text eol=crlf
+
+# .bat files are DOS batch scripts: cmd.exe misparses LF-only endings
+# (caret continuations and labels break) -- always normalize to CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf

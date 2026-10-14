@@ -35,15 +35,56 @@ FROM ${BASE_IMAGE} AS builder
 # rockylinux:9 (modern), manylinux_2_28 (legacy), or alpine:3.20 (musl).
 # Alpine's sqlite dev headers are in `sqlite-dev`; RHEL-family ships
 # them as `sqlite-devel`. python3 powers the in-image smoke gate.
+# g++ + openssl-dev/-devel build the bundled MCP server (mcp/Makefile)
+# against each profile's OWN base image/glibc — not the packaging
+# host's. That per-profile correctness is the entire reason the mcp
+# build lives here rather than in scripts/package.sh: a host-built
+# binary would carry the packaging runner's (newer) glibc floor
+# regardless of which profile's package it ended up in, silently
+# breaking the legacy profile's whole reason to exist.
+#
+# rockylinux:9 (dnf branch): the upstream rockylinux:9 image tag is a
+# frozen snapshot (its baked-in glibc runtime predates current dnf
+# mirrors). Rocky's mirror network can momentarily serve baseos and
+# appstream repodata from two mirrors that aren't perfectly in sync —
+# reproduced directly against this exact image across many builds
+# here: the same install sometimes lands glibc (baseos) and
+# glibc-devel (appstream) at two different point releases. When it
+# does, g++ ends up emitting calls to glibc's ISO-C23 strtol symbol
+# aliases (__isoc23_strtoull etc., real as of glibc 2.38+, and
+# apparently present in SOME but not all glibc-devel point builds this
+# repo's mirrors have served) that the mismatched libc.so.6 doesn't
+# export — an "undefined reference" at link time for every
+# nlohmann::json/strtol call site. `dnf update` first, then install,
+# both with --allowerasing (this repo's existing remedy for the
+# libcurl-minimal/libcurl conflict on EL images) narrows the window but
+# does not close it outright — a self-test + `dnf distro-sync` retry
+# loop below catches the rare case that still slips through, rather
+# than hoping a particular dnf incantation never hits it again.
 RUN if command -v apk >/dev/null 2>&1; then \
         apk add --no-cache build-base musl-dev binutils file \
-            sqlite-dev python3 ; \
+            sqlite-dev python3 openssl-dev ; \
     elif command -v dnf >/dev/null 2>&1; then \
-        dnf install -y --setopt=install_weak_deps=False \
-            gcc make binutils file sqlite-devel python3 \
-        && dnf clean all ; \
+        dnf update -y --setopt=install_weak_deps=False --allowerasing --nobest \
+        && dnf install -y --setopt=install_weak_deps=False --allowerasing --nobest \
+            gcc gcc-c++ make binutils file sqlite-devel python3 openssl-devel \
+        && dnf clean all \
+        && for attempt in 1 2 3; do \
+               printf '#include <cstdlib>\nint main(){ return (int)strtoull("1",0,10); }\n' > /tmp/glibc_check.cpp; \
+               if g++ -std=c++17 -O2 -o /tmp/glibc_check /tmp/glibc_check.cpp 2>/tmp/glibc_check.err; then \
+                   rm -f /tmp/glibc_check /tmp/glibc_check.cpp /tmp/glibc_check.err; \
+                   break; \
+               fi; \
+               if [ "${attempt}" = "3" ]; then \
+                   echo "ERROR: glibc/glibc-devel self-test still fails after ${attempt} dnf distro-sync attempts:" >&2; \
+                   cat /tmp/glibc_check.err >&2; \
+                   exit 1; \
+               fi; \
+               echo "glibc/glibc-devel mismatch detected (attempt ${attempt}); forcing dnf distro-sync and retrying" >&2; \
+               dnf distro-sync -y --allowerasing --nobest glibc glibc-common glibc-devel glibc-headers; \
+           done ; \
     else \
-        yum install -y gcc make binutils file sqlite-devel python3 ; \
+        yum update -y && yum install -y gcc gcc-c++ make binutils file sqlite-devel python3 openssl-devel ; \
     fi
 
 ARG TARGETARCH
@@ -144,12 +185,48 @@ assert abs(d) < 1e-6, d
 print("smoke OK: Community %s, self-search dist=%r" % (ver, d))
 EOF
 
+# MCP server (mcp/fractalsql-sqlite-mcp) — built here, against this
+# SAME profile's base image, so its glibc floor matches the .so above
+# (rockylinux:9/glibc 2.34 for modern, manylinux_2_28/glibc 2.28 for
+# legacy, alpine/musl for musl) rather than whatever the packaging
+# host happens to run. One binary per profile, same as the .so.
+# The amalgamation HEADER copies too (not just sqlite3.c): the
+# minimal-profile demo stage installs no sqlite-devel, so without
+# deps/sqlite/sqlite3.h the mcp Makefile's #include <sqlite3.h>
+# resolves nowhere below (reproduced on the demo target).
+COPY deps/sqlite/sqlite3.c /build/deps/sqlite/sqlite3.c
+COPY deps/sqlite/sqlite3.h /build/deps/sqlite/sqlite3.h
+COPY mcp/Makefile          /build/mcp/Makefile
+COPY mcp/vendor/json.hpp   /build/mcp/vendor/json.hpp
+COPY mcp/src/              /build/mcp/src/
+# Belt-and-suspenders against .dockerignore not being honored for
+# whatever reason (stale COPY cache, a build client that ignores it):
+# a locally make'd .o — built against the HOST's glibc, not this
+# image's — looks "already up to date" to `make` and gets linked in
+# as-is rather than rebuilt, which is exactly how this reproduced
+# "undefined reference to __isoc23_*" link failures in development
+# (a host-built mcp/src/*.o riding along into a Rocky 9 build). Strip
+# any object/binary that COPY might have carried over before building.
+RUN find /build/mcp -name '*.o' -delete
+RUN set -eux; \
+    make -C /build/mcp; \
+    strip /build/mcp/fractalsql-sqlite-mcp; \
+    /build/mcp/fractalsql-sqlite-mcp --version; \
+    mv /build/mcp/fractalsql-sqlite-mcp /fractalsql-sqlite-mcp${OUTPUT_SUFFIX}
+
 # --------------------------------------------------------------------
-# Export stage — scratch, so `buildx --output=local` drops just the .so.
+# Export stage — scratch, so `buildx --output=local` drops the .so
+# and the MCP server binary. OUTPUT_SUFFIX on BOTH filenames: modern/
+# legacy/musl builds all land in the same dist/${arch}/ directory
+# (install-test.yml and scripts/package.sh build every profile there
+# in sequence), and a bare "fractalsql-sqlite-mcp" name would let a
+# later profile's build silently overwrite an earlier profile's
+# differently-glibc-targeted binary under the same filename.
 # --------------------------------------------------------------------
 FROM scratch AS export
 ARG OUTPUT_SUFFIX
 COPY --from=builder /fractalsql${OUTPUT_SUFFIX}.so /fractalsql${OUTPUT_SUFFIX}.so
+COPY --from=builder /fractalsql-sqlite-mcp${OUTPUT_SUFFIX} /fractalsql-sqlite-mcp${OUTPUT_SUFFIX}
 
 # --------------------------------------------------------------------
 # Demo stage — a RUNNABLE sqlite3 CLI environment with the extension
@@ -193,10 +270,16 @@ ARG OUTPUT_SUFFIX
 # preinstalls libcurl-minimal, which conflicts with full libcurl; this
 # swaps it for the full package (the dnf-documented remedy for exactly
 # this conflict).
-# gcc make curl: the sqlite3-shell build below (the amalgamation needs a
-# compiler and make; curl fetches it).
+# gcc gcc-c++ make: the sqlite3-shell build below (the amalgamation
+# needs a compiler and make; curl fetches it) and the MCP server binary
+# build further down.
+# openssl-devel: the MCP server binary links libssl/libcrypto — the
+# schema-lock SHA-256 (10.5) and the optional HTTP transport (10.3) —
+# and drags in the runtime openssl-libs half with it. The engine .so
+# itself never links OpenSSL.
 RUN dnf install -y --setopt=install_weak_deps=False --allowerasing \
-        gcc make curl sqlite python3 python3-pip libcurl \
+        gcc gcc-c++ make curl sqlite python3 python3-pip libcurl \
+        openssl-devel \
  && dnf clean all
 # Rocky 9's `sqlite` package is 3.34.1 — too old for two things the demo
 # corpus uses, and neither is fixable from an extension:
@@ -230,6 +313,29 @@ RUN set -eux; \
     /usr/local/bin/sqlite3 ":memory:" \
         "SELECT group_concat(v ORDER BY v) FROM (SELECT 2 AS v UNION SELECT 1);"; \
     rm -rf /tmp/sqlite-autoconf*
+
+# MCP server binary (spec 14.7's demo simplification): the demo runs the
+# PRODUCTION server — the same binary mcp/ builds, --tool-filtered by
+# demo/mcp/call-tool.sh to the four pinned demo tools (9.3) — not a
+# second, drifting demo implementation. Compiled here from the same
+# sources the in-repo build uses (mcp/vendor/json.hpp + the vendored
+# amalgamation), installed into /usr/local/bin (ahead of /usr/bin in
+# PATH), build tree cleaned up so the image carries only binaries.
+COPY deps/sqlite/sqlite3.c /mcpbuild/deps/sqlite/sqlite3.c
+COPY deps/sqlite/sqlite3.h /mcpbuild/deps/sqlite/sqlite3.h
+COPY mcp/Makefile          /mcpbuild/mcp/Makefile
+COPY mcp/vendor/json.hpp   /mcpbuild/mcp/vendor/json.hpp
+COPY mcp/src/              /mcpbuild/mcp/src/
+# See the builder stage's identical step for why: a locally make'd .o
+# riding along in the COPY looks up to date to `make` and gets linked
+# in unrebuilt, mixing the host's glibc into this image's binary.
+RUN find /mcpbuild/mcp -name '*.o' -delete
+RUN set -eux; \
+    make -C /mcpbuild/mcp; \
+    strip /mcpbuild/mcp/fractalsql-sqlite-mcp; \
+    mv /mcpbuild/mcp/fractalsql-sqlite-mcp /usr/local/bin/; \
+    rm -rf /mcpbuild; \
+    /usr/local/bin/fractalsql-sqlite-mcp --version
 COPY --from=builder /fractalsql${OUTPUT_SUFFIX}.so /usr/local/lib/sqlite3/fractalsql.so
 # Bundled reasoning plugin (vendored prebuilt .so from include/). include/
 # carries the plugin for every supported platform (linux-x86_64,

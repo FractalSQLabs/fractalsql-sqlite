@@ -163,12 +163,61 @@
       </Component>
     </ComponentGroup>
 
+    <!-- MCP server files, in their own subdirectory (parity with the
+         Linux packages' mcp/ layout) rather than flattened alongside
+         the core DLL. Built by mcp\scripts\windows\build.bat, run
+         before this MSI build — see build-msi.bat's own existence
+         check. Same vcpkg-OpenSSL-static posture as the reasoning
+         plugin's build, so the .exe carries no separate runtime DLL
+         dependency. -->
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Directory Id="McpFolder" Name="mcp">
+        <Component Id="c_McpServerExe" Guid="3F6A8C12-5B91-4E7D-8A3C-1D9E6B4F2A70">
+          <File Id="fractalsql_sqlite_mcp_exe"
+                Source="mcp/dist/windows-mcp/fractalsql-sqlite-mcp.exe"
+                KeyPath="yes" />
+        </Component>
+
+        <Component Id="c_McpReadme" Guid="8D2C4A61-7F3E-4B19-9C5D-2A8E6F1B3D94">
+          <File Id="mcp_readme_md"
+                Source="mcp/README.md"
+                KeyPath="yes" />
+        </Component>
+
+        <!-- MSI Long Filenames permit a leading dot; kept identical to
+             the committed filename so a side-by-side diff against the
+             repo (or the Linux packages) needs no translation. -->
+        <Component Id="c_McpSchemaLock" Guid="C1B9E3A7-4D62-4F8B-A1C5-6E7D9F2A8B30">
+          <File Id="mcp_schema_lock" Name=".mcp-schema-lock"
+                Source="mcp/.mcp-schema-lock"
+                KeyPath="yes" />
+        </Component>
+
+        <Component Id="c_McpSafetyLock" Guid="5E7A1C93-8B4D-4A2F-9E6C-3D1B8F5A2C70">
+          <File Id="mcp_safety_lock" Name=".mcp-safety-annotations-lock"
+                Source="mcp/.mcp-safety-annotations-lock"
+                KeyPath="yes" />
+        </Component>
+
+        <Component Id="c_McpManifest" Guid="9A4F2E81-6C3B-4D7A-B2E9-4C8A1F6D3E52">
+          <File Id="mcp_manifest_json"
+                Source="mcp/manifest.json"
+                KeyPath="yes" />
+        </Component>
+      </Directory>
+    </DirectoryRef>
+
     <Feature Id="MainFeature"
              Title="FractalSQL Core"
              Level="1"
              Display="expand"
              AllowAdvertise="no">
       <ComponentGroupRef Id="CoreFiles" />
+      <ComponentRef Id="c_McpServerExe" />
+      <ComponentRef Id="c_McpReadme" />
+      <ComponentRef Id="c_McpSchemaLock" />
+      <ComponentRef Id="c_McpSafetyLock" />
+      <ComponentRef Id="c_McpManifest" />
     </Feature>
 
     <!-- Without this, WixUI_InstallDir's EULA dialog silently falls back

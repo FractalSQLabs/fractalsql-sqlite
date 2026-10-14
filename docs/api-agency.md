@@ -17,7 +17,7 @@ computed results plus a human-readable read.
 > second, optional `fractalsql_agents` install/activation step. SQLite has no
 > server-side procedural language and no second extension artifact, so
 > `src/fsql_domain_agents.c` registers all sixteen as plain C SQL functions in
-> this same `.so`, alongside the six Universal Agents — callable the moment
+> this same `.so`, alongside the six Universal Agents; callable the moment
 > `.load` runs, no install step.
 > Most SQL examples on this page are written in the server edition's dialect
 > (`FROM fn(...)`, `ARRAY[...]::float8[]`, `timestamptz`) since the page doubles
@@ -37,7 +37,7 @@ If you want to build a recipe that isn't in the box, see
 blocks further down.
 
 > **What's an "installable agent" vs. a "Universal Agent" vs. a "Domain Agent"?**
-> The **installable agents** (below) are the productized recipes — sixteen
+> The **installable agents** (below) are the productized recipes: sixteen
 > C-registered SQL functions in the SQLite integration
 > (`src/fsql_domain_agents.c`), a second, separately-installed
 > `fractalsql_agents` extension in the server edition. The **Universal
@@ -51,7 +51,7 @@ blocks further down.
 ## Install
 
 **SQLite difference:** no `fractalsql_agents` extension and no separate
-install/activation step at all — load the base extension and all sixteen agents (plus
+install/activation step at all: load the base extension and all sixteen agents (plus
 the six Universal Agents) are callable immediately:
 ```sql
 .load /usr/local/lib/sqlite3/fractalsql
@@ -89,9 +89,9 @@ Pick by the problem shape, not by the function name.
 | "Should I block this proposed action (is it near a known-bad state)?" | `outlier_intercept` | distance-to-bad-state safety barrier → LLM justification | ✓ |
 | "Triage a patient against a cohort + baseline→current drift" | `patient_deterioration_triage` | cohort search + trajectory drift → LLM triage | ✓ |
 | "Ask a natural-language question over my tables" | `data_analyst` | NL→SQL→execute → LLM analysis | ✓ |
-| "Recall similar past memories, restricted by a metadata filter" | `recall_hybrid` | cohort-restricted vector recall | — |
-| "Recommend diverse items, avoiding recently-rejected ones" | `recommend_diverse` | repulsion-diverse top-k | — |
-| "Audit my recommender's diversity health" | `feedback_audit` | diversify loop + collapse detection | — |
+| "Recall similar past memories, restricted by a metadata filter" | `recall_hybrid` | cohort-restricted vector recall | No LLM |
+| "Recommend diverse items, avoiding recently-rejected ones" | `recommend_diverse` | repulsion-diverse top-k | No LLM |
+| "Audit my recommender's diversity health" | `feedback_audit` | diversify loop + collapse detection | No LLM |
 
 > **A guarantee about the outputs.** Every output column is a **real primitive
 > result, not a literal**. `threat_score` is the computed drift exponent;
@@ -109,30 +109,30 @@ Pick by the problem shape, not by the function name.
 
 ### Porting these examples to SQLite
 
-Most examples below are written in the server edition's dialect —
+Most examples below are written in the server edition's dialect:
 `FROM fractal_agent_x(...)` (a set-returning-function call),
 `ARRAY[...]::float8[]` vector literals, and
-`timestamptz`/`generate_series`/`now()` fixture DDL — since this page doubles
+`timestamptz`/`generate_series`/`now()` fixture DDL, since this page doubles
 as the reference for what each recipe composes across both editions. The
 mechanical translation to a SQLite session:
 
 | Server edition (as written below) | SQLite |
 | --- | --- |
-| `SELECT col1, col2, ... FROM fractal_agent_x(args)` | `SELECT fractal_agent_x(args)` — one scalar call returning a single TEXT JSON document; pick fields with `json_extract(result, '$.col1')` |
-| `ARRAY[0.1, 0.2, 0.3]::float8[]` | `'0.1,0.2,0.3'` (CSV text) or `'[0.1,0.2,0.3]'` (JSON text) — see [vectorizer-setup.md](vectorizer-setup.md) / [api-discovery.md](api-discovery.md) for the full vector-argument convention |
+| `SELECT col1, col2, ... FROM fractal_agent_x(args)` | `SELECT fractal_agent_x(args)`: one scalar call returning a single TEXT JSON document; pick fields with `json_extract(result, '$.col1')` |
+| `ARRAY[0.1, 0.2, 0.3]::float8[]` | `'0.1,0.2,0.3'` (CSV text) or `'[0.1,0.2,0.3]'` (JSON text); see [vectorizer-setup.md](vectorizer-setup.md) / [api-discovery.md](api-discovery.md) for the full vector-argument convention |
 | `float8[]` column type | `TEXT` column holding a CSV/JSON vector, or a `fractal_vector` BLOB |
 | `timestamptz`, `now()`, `generate_series(1, 96)` | an `INTEGER` ordering column (unix epoch or a plain sequence) and a `WITH RECURSIVE` CTE in place of `generate_series` |
-| the [id-resolution](#a-note-on-id-resolution) `ctid`-`row_number()` mapping | identical, with `ORDER BY rowid` in place of `ORDER BY ctid` — `src/fsql_domain_agents.c`'s `da_resolve_id()` does this internally already; you only need it yourself when composing primitives by hand |
+| the [id-resolution](#a-note-on-id-resolution) `ctid`-`row_number()` mapping | identical, with `ORDER BY rowid` in place of `ORDER BY ctid`; `src/fsql_domain_agents.c`'s `da_resolve_id()` does this internally already, so you only need it yourself when composing primitives by hand |
 
 Every underlying primitive and every argument, default, and return field named
-below is the same on both editions — only the fixture DDL and the call/result
+below is the same on both editions; only the fixture DDL and the call/result
 shape differ.
 
 ---
 
 ## The sixteen recipes
 
-### Anomaly triage — `fractal_agent_anomaly_triage`
+### Anomaly triage: `fractal_agent_anomaly_triage`
 **Triage drift on one entity's metric time series.**
 
 Use it when you have a per-entity metric series in a table (latency, error rate,
@@ -146,11 +146,11 @@ instead.
 
 | Argument | Type | Default | What it is |
 | --- | --- | --- | --- |
-| `log_table` | `text` | — | your metric table |
-| `metric_col` | `text` | — | the numeric metric column to read as the series |
-| `time_col` | `text` | — | the timestamp column to order the series by |
-| `filter_col` | `text` | — | the entity-id column to filter on (e.g. `host`) |
-| `filter_val` | `text` | — | which entity (e.g. `'host-1'`) |
+| `log_table` | `text` | (none) | your metric table |
+| `metric_col` | `text` | (none) | the numeric metric column to read as the series |
+| `time_col` | `text` | (none) | the timestamp column to order the series by |
+| `filter_col` | `text` | (none) | the entity-id column to filter on (e.g. `host`) |
+| `filter_val` | `text` | (none) | which entity (e.g. `'host-1'`) |
 | `baseline_window` | `int` | `32` | recent-window size for the drift comparison |
 
 **How it works.** (1) Reads the entity's metric series ordered by time into a
@@ -181,7 +181,7 @@ and returns `rc=-1`; 32 is safe).
 
 ---
 
-### Allocate — `fractal_agent_allocate`
+### Allocate: `fractal_agent_allocate`
 **Cardinality-constrained portfolio allocation.**
 
 Use it when you want the best allocation of a fixed number of assets from a
@@ -193,9 +193,9 @@ the SFS Sharpe maximizer and reasons a rationale.
 
 | Argument | Type | Default | What it is |
 | --- | --- | --- | --- |
-| `mu` | `float8[]` | — | expected returns per asset |
-| `cov` | `float8[]` | — | covariance matrix, **flattened 1-D row-major n×n** |
-| `cardinality` | `int` | — | how many assets to hold |
+| `mu` | `float8[]` | (none) | expected returns per asset |
+| `cov` | `float8[]` | (none) | covariance matrix, **flattened 1-D row-major n×n** |
+| `cardinality` | `int` | (none) | how many assets to hold |
 | `context` | `text` | `NULL` | optional label passed to the reason call |
 
 **How it works.** (1) `fractal_optimize_portfolio(mu, cov, cardinality)`: the
@@ -223,7 +223,7 @@ mismatched `cov` length surfaces the primitive's clean `cov length` ERROR.
 
 ---
 
-### Route task — `fractal_agent_route_task`
+### Route task: `fractal_agent_route_task`
 **Match an incoming task to the best capable sub-agent.**
 
 Use it as a sub-agent dispatcher: DevOps task routing, Customer Support
@@ -235,11 +235,11 @@ nearest capability row and accounts a token budget.
 
 | Argument | Type | Default | What it is |
 | --- | --- | --- | --- |
-| `task_emb` | `float8[]` | — | the incoming task's embedding (same dim as the capability embeddings) |
-| `cap_table` | `text` | — | your capability/sub-agent table |
-| `cap_emb_col` | `text` | — | the embedding column in that table |
-| `cap_id_col` | `text` | — | the column to return as the routed-to name |
-| `budget` | `int` | — | the caller's token budget |
+| `task_emb` | `float8[]` | (none) | the incoming task's embedding (same dim as the capability embeddings) |
+| `cap_table` | `text` | (none) | your capability/sub-agent table |
+| `cap_emb_col` | `text` | (none) | the embedding column in that table |
+| `cap_id_col` | `text` | (none) | the column to return as the routed-to name |
+| `budget` | `int` | (none) | the caller's token budget |
 | `cost_per_route` | `int` | `150` | tokens one routing decision costs |
 
 **How it works.** (1) `fractal_search_telemetry(cap_table, cap_emb_col, task_emb, 1)`
@@ -271,7 +271,7 @@ FROM fractal_agent_route_task(
 
 ---
 
-### Outlier intercept — `fractal_agent_outlier_intercept`
+### Outlier intercept: `fractal_agent_outlier_intercept`
 **Pre-commit safety barrier against known-bad states.**
 
 Use it as a pre-commit screen on a proposed action's state vector: DevOps action
@@ -284,17 +284,17 @@ if that distance is within a threshold.
 
 | Argument | Type | Default | What it is |
 | --- | --- | --- | --- |
-| `state_vec` | `text` | — | the proposed action's state vector (CSV/JSON vector) |
-| `history_table` | `text` | — | your known-bad-state table |
-| `emb_col` | `text` | — | the embedding column in that table |
-| `threshold` | `REAL` | — | intercept if the nearest bad state is within this distance |
+| `state_vec` | `text` | (none) | the proposed action's state vector (CSV/JSON vector) |
+| `history_table` | `text` | (none) | your known-bad-state table |
+| `emb_col` | `text` | (none) | the embedding column in that table |
+| `threshold` | `REAL` | (none) | intercept if the nearest bad state is within this distance |
 | `metric` | `text` | `'cosine'` | the distance measure: `'cosine'` (exact telemetry engine, ignores magnitude) or `'l2'` (exact Euclidean). Any other value raises `metric must be 'cosine' or 'l2'`. |
 
 **How it works.** (1) Finds the distance from the proposed state to the nearest
 known-bad state under the caller-chosen metric: `'cosine'` runs
 `fractal_search_telemetry(history_table, emb_col, state_vec, 1)`; `'l2'` is an
 exact `ORDER BY` over `fractal_vector_l2_distance(col, state_vec)` in ordinary
-SQL (there is no operator syntax in SQLite — the function IS the operator).
+SQL (there is no operator syntax in SQLite; the function IS the operator).
 (2) `intercepted = distance < threshold`, a real comparison of a real distance.
 (3) `fractal_reason` justifies the decision in one sentence (naming the metric
 actually used, so the threshold's own basis is auditable).
@@ -339,7 +339,7 @@ threshold. Raises `no bad-state rows in …` if the history table is empty.
 
 ---
 
-### Recall hybrid — `fractal_agent_recall_hybrid`
+### Recall hybrid: `fractal_agent_recall_hybrid`
 **Cohort-restricted vector recall (no LLM).**
 
 Use it for memory recall restricted by a metadata filter: Customer Support memory
@@ -351,9 +351,9 @@ the vector search so `k` is respected within the cohort.
 
 | Argument | Type | Default | What it is |
 | --- | --- | --- | --- |
-| `mem_table` | `text` | — | your memory/corpus table |
-| `vec_col` | `text` | — | the embedding column |
-| `query_vec` | `float8[]` | — | the query embedding |
+| `mem_table` | `text` | (none) | your memory/corpus table |
+| `vec_col` | `text` | (none) | the embedding column |
+| `query_vec` | `float8[]` | (none) | the query embedding |
 | `filter_col` | `text` | `NULL` | metadata column to filter on (NULL = no filter, search all) |
 | `filter_val` | `text` | `NULL` | the value to match |
 | `k` | `int` | `5` | how many results |
@@ -390,7 +390,7 @@ which accepts a caller-built `cohort_doc_ids`.
 
 ---
 
-### Recommend diverse — `fractal_agent_recommend_diverse`
+### Recommend diverse: `fractal_agent_recommend_diverse`
 **Feedback-aware diverse top-k recommendations (no LLM).**
 
 Use it when you want diverse candidates that avoid recently-rejected items:
@@ -402,9 +402,9 @@ session-global Diversify/Repulsion layer, then runs a repulsion-diverse top-k.
 
 | Argument | Type | Default | What it is |
 | --- | --- | --- | --- |
-| `catalog_table` | `text` | — | your catalog table |
-| `emb_col` | `text` | — | the embedding column |
-| `query_vec` | `float8[]` | — | the query embedding |
+| `catalog_table` | `text` | (none) | your catalog table |
+| `emb_col` | `text` | (none) | the embedding column |
+| `query_vec` | `float8[]` | (none) | the query embedding |
 | `k` | `int` | `10` | how many results |
 | `id_col` | `text` | `'id'` | the column to return as the id (must be bigint-castable) |
 
@@ -441,7 +441,7 @@ self-disables.) `id_col` must be bigint-castable.
 
 ---
 
-### Data analyst — `fractal_agent_data_analyst`
+### Data analyst: `fractal_agent_data_analyst`
 **Natural-language analytics over any of your tables.**
 
 The horizontal catch-all: the closest thing to a general-purpose agent in the
@@ -454,7 +454,7 @@ to synthesize a read of the result. No vertical demo is wired to it.
 
 | Argument | Type | Default | What it is |
 | --- | --- | --- | --- |
-| `question` | `text` | — | the natural-language question |
+| `question` | `text` | (none) | the natural-language question |
 | `table_names` | `text[]` | `NULL` | the tables the agent may query |
 | `max_retries` | `int` | `2` | how many correction loops on EXPLAIN/execution failure |
 | `context` | `text` | `'{}'` | optional label passed to the reason call |
@@ -489,7 +489,7 @@ restricted role (see [Safe Agency & Guardrails](#safe-agency--guardrails)).
 
 ---
 
-### Patient deterioration triage — `fractal_agent_patient_deterioration_triage`
+### Patient deterioration triage: `fractal_agent_patient_deterioration_triage`
 **Cohort-restricted patient triage with baseline→current drift.**
 
 Use it for clinical deterioration triage, or any "nearest patient within a
@@ -502,11 +502,11 @@ that [recall_hybrid](#recall-hybrid--fractal_agent_recall_hybrid)'s single
 
 | Argument | Type | Default | What it is |
 | --- | --- | --- | --- |
-| `patient_table` | `text` | — | your patient/corpus table |
-| `vec_col` | `text` | — | the embedding column |
-| `query_vec` | `text` | — | the patient to triage (CSV/JSON vector) |
-| `baseline_vec` | `text` | — | the baseline state for the drift search |
-| `current_vec` | `text` | — | the current state for the drift search |
+| `patient_table` | `text` | (none) | your patient/corpus table |
+| `vec_col` | `text` | (none) | the embedding column |
+| `query_vec` | `text` | (none) | the patient to triage (CSV/JSON vector) |
+| `baseline_vec` | `text` | (none) | the baseline state for the drift search |
+| `current_vec` | `text` | (none) | the current state for the drift search |
 | `cohort_doc_ids` | `text` | `NULL` | caller-built cohort (JSON array of rowids; NULL = all rows) |
 | `k` | `int` | `5` | how many cohort neighbors |
 | `id_col` | `text` | `'id'` | the column to return as the id (must be bigint-castable) |
@@ -518,7 +518,7 @@ every row's rowid. (2)
 ranked ascending by distance, each resolved to its named patient id via a
 direct `rowid` predicate (the
 [id-resolution mapping](#a-note-on-id-resolution)) in the same query. (3)
-`fractal_search_trajectory` for the baseline→current drift — always a single
+`fractal_search_trajectory` for the baseline→current drift, always a single
 result; `k` does not apply here. (4) `fractal_reason` synthesizes the triage
 over the single nearest cohort match and the drift, not over every entry in
 `cohort_matches`.
@@ -558,9 +558,9 @@ FROM triage;
 
 **Notes.** Raises `no patient rows in …` if the table is empty, or `cohort
 matched no rows in …` if the cohort is empty. `id_col` must be bigint-castable.
-Cohort doc_ids are rowids —
+Cohort doc_ids are rowids:
 `json_group_array(rowid)` over the patient table (see
-[id resolution](#a-note-on-id-resolution)) — and the caller-supplied
+[id resolution](#a-note-on-id-resolution)), and the caller-supplied
 `cohort_doc_ids` array must be rowids on that same table, not named ids.
 `k` controls only the cohort-search width; the drift search always compares a
 single baseline point to a single current point, so it stays fixed at its
@@ -568,7 +568,7 @@ nearest point regardless of `k`.
 
 ---
 
-### Feedback audit — `fractal_agent_feedback_audit`
+### Feedback audit: `fractal_agent_feedback_audit`
 **Recommender diversity audit (pure analytics, no LLM).**
 
 Use it to audit a recommender's diversity health: a self-contained cycle that
@@ -582,11 +582,11 @@ leaves the session clean.
 
 | Argument | Type | Default | What it is |
 | --- | --- | --- | --- |
-| `catalog_table` | `text` | — | your catalog table |
-| `emb_col` | `text` | — | the embedding column |
-| `query_vec` | `float8[]` | — | the audit target's query embedding |
-| `warmup_table` | `text` | — | a table of varied vectors to warm the window |
-| `warmup_vec_col` | `text` | — | the vector column in the warmup table |
+| `catalog_table` | `text` | (none) | your catalog table |
+| `emb_col` | `text` | (none) | the embedding column |
+| `query_vec` | `float8[]` | (none) | the audit target's query embedding |
+| `warmup_table` | `text` | (none) | a table of varied vectors to warm the window |
+| `warmup_vec_col` | `text` | (none) | the vector column in the warmup table |
 | `warmup_count` | `int` | `8` | how many warmup vectors to run |
 | `k` | `int` | `3` | top-k for the warmup searches |
 
@@ -627,7 +627,7 @@ warmup table with enough varied vectors to fill the window, or
 
 ---
 
-### Schedule workload — `fractal_agent_schedule_workload`
+### Schedule workload: `fractal_agent_schedule_workload`
 **Schedule a workload onto the best node (with vector refinement).**
 
 Use it for Sovereign-Edge node scheduling, or any "refine a task vector, then
@@ -639,10 +639,10 @@ search" in the abstract search space before the nearest-node lookup.
 
 | Argument | Type | Default | What it is |
 | --- | --- | --- | --- |
-| `task_vec` | `float8[]` | — | the workload's task vector |
-| `node_table` | `text` | — | your node/capability table |
-| `node_emb_col` | `text` | — | the embedding column in that table |
-| `node_id_col` | `text` | — | the column to return as the node id |
+| `task_vec` | `float8[]` | (none) | the workload's task vector |
+| `node_table` | `text` | (none) | your node/capability table |
+| `node_emb_col` | `text` | (none) | the embedding column in that table |
+| `node_id_col` | `text` | (none) | the column to return as the node id |
 | `iterations` | `int` | `30` | `fractal_search` refinement iterations |
 | `population` | `int` | `50` | `fractal_search` population size |
 | `k` | `int` | `5` | how many nearest nodes |
@@ -676,7 +676,7 @@ FROM fractal_agent_schedule_workload(
 
 ---
 
-### Rebalance sibling — `fractal_agent_rebalance_sibling`
+### Rebalance sibling: `fractal_agent_rebalance_sibling`
 **Rebalance a portfolio and compare to the nearest historical allocation.**
 
 Use it for Quant-Finance rebalancing: run the SFS cardinality-constrained
@@ -687,12 +687,12 @@ table, then reason over both. Generalizes the fintech-MCTS reference blueprint.
 
 | Argument | Type | Default | What it is |
 | --- | --- | --- | --- |
-| `mu` | `float8[]` | — | expected returns per asset |
-| `cov` | `float8[]` | — | covariance, **flattened 1-D row-major n×n** |
-| `cardinality` | `int` | — | how many assets to hold |
-| `alloc_table` | `text` | — | your historical-allocation-snapshots table |
-| `alloc_emb_col` | `text` | — | the embedding column in that table |
-| `baseline_vec` | `float8[]` | — | the baseline for the trajectory search |
+| `mu` | `float8[]` | (none) | expected returns per asset |
+| `cov` | `float8[]` | (none) | covariance, **flattened 1-D row-major n×n** |
+| `cardinality` | `int` | (none) | how many assets to hold |
+| `alloc_table` | `text` | (none) | your historical-allocation-snapshots table |
+| `alloc_emb_col` | `text` | (none) | the embedding column in that table |
+| `baseline_vec` | `float8[]` | (none) | the baseline for the trajectory search |
 | `seed` | `bigint` | `NULL` | optimizer RNG seed (NULL = nondeterministic) |
 | `k` | `int` | `5` | how many nearest snapshots |
 | `id_col` | `text` | `'id'` | the column to return as the allocation id (must be bigint-castable) |
@@ -702,7 +702,7 @@ table, then reason over both. Generalizes the fintech-MCTS reference blueprint.
 (2) Extracts the weights as a `float8[]` vector. (3)
 `fractal_search_trajectory(alloc_table, alloc_emb_col, baseline_vec, weights, 1)`
 for the nearest historical allocation. (4) Resolves its `doc_id` (a 0-indexed
-scan position — trajectory keeps scan positions) to the named
+scan position; trajectory keeps scan positions) to the named
 allocation id via the [id-resolution mapping](#a-note-on-id-resolution). (5) `fractal_reason`
 synthesizes the rebalance rationale.
 
@@ -734,7 +734,7 @@ allocation table is empty.
 
 ---
 
-### Diverse portfolios — `fractal_agent_diverse_portfolios`
+### Diverse portfolios: `fractal_agent_diverse_portfolios`
 **Enterprise tier.** Companion to `allocate`, above: instead of one
 cardinality-constrained portfolio, return several structurally distinct good
 ones.
@@ -751,9 +751,9 @@ tradeoffs.
 
 | Argument | Type | Default | What it is |
 | --- | --- | --- | --- |
-| `mu` | `float8[]` | — | expected returns per asset |
-| `cov` | `float8[]` | — | covariance, **flattened 1-D row-major n×n** |
-| `cardinality` | `int` | — | how many assets each candidate may hold |
+| `mu` | `float8[]` | (none) | expected returns per asset |
+| `cov` | `float8[]` | (none) | covariance, **flattened 1-D row-major n×n** |
+| `cardinality` | `int` | (none) | how many assets each candidate may hold |
 | `n_restarts` | `int` | `8` | independent restarts (upper bound on candidates found) |
 | `overlap_threshold` | `float8` | `0.15` | max shared-asset fraction between two returned candidates |
 | `quality_frac` | `float8` | `0.90` | candidates must be within this fraction of the best Sharpe found |
@@ -818,7 +818,7 @@ guarded the same way as the sharpe path for consistency).
 
 ---
 
-### Detour classify — `fractal_agent_detour_classify`
+### Detour classify: `fractal_agent_detour_classify`
 **Classify a vehicle detour: route deviation + GPS-trace complexity.**
 
 Use it for Fleet-Logistics detour classification, or any trajectory-deviation +
@@ -829,11 +829,11 @@ fleet with the fractal (box-counting) complexity of the vehicle's GPS trace.
 
 | Argument | Type | Default | What it is |
 | --- | --- | --- | --- |
-| `vehicle_table` | `text` | — | your fleet table |
-| `emb_col` | `text` | — | the embedding column (searched for the deviation) |
-| `baseline_vec` | `float8[]` | — | the vehicle's baseline route vector |
-| `current_vec` | `float8[]` | — | the vehicle's current route vector |
-| `gps_trace` | `float8[]` | — | the GPS trace as a flat interleaved array |
+| `vehicle_table` | `text` | (none) | your fleet table |
+| `emb_col` | `text` | (none) | the embedding column (searched for the deviation) |
+| `baseline_vec` | `float8[]` | (none) | the vehicle's baseline route vector |
+| `current_vec` | `float8[]` | (none) | the vehicle's current route vector |
+| `gps_trace` | `float8[]` | (none) | the GPS trace as a flat interleaved array |
 | `k` | `int` | `5` | how many nearest fleet peers |
 | `id_col` | `text` | `'id'` | the column to return as the vehicle id (must be bigint-castable) |
 | `boxcount_dim` | `int` | `2` | the box-counting embedding dimension |
@@ -880,7 +880,7 @@ FROM fractal_agent_detour_classify(
 
 ---
 
-### Track anomaly — `fractal_agent_track_anomaly`
+### Track anomaly: `fractal_agent_track_anomaly`
 **Triage a track anomaly: trajectory deviation + heading-change DFA.**
 
 Use it for Maritime track-deviation detection or Cybersecurity beaconing/C2
@@ -892,11 +892,11 @@ exponent of the heading-change series.
 
 | Argument | Type | Default | What it is |
 | --- | --- | --- | --- |
-| `track_table` | `text` | — | your fleet/track table |
-| `emb_col` | `text` | — | the embedding column (searched for the deviation) |
-| `baseline_vec` | `float8[]` | — | the track's baseline vector |
-| `current_vec` | `float8[]` | — | the track's current vector |
-| `heading_series` | `float8[]` | — | the heading-change series |
+| `track_table` | `text` | (none) | your fleet/track table |
+| `emb_col` | `text` | (none) | the embedding column (searched for the deviation) |
+| `baseline_vec` | `float8[]` | (none) | the track's baseline vector |
+| `current_vec` | `float8[]` | (none) | the track's current vector |
+| `heading_series` | `float8[]` | (none) | the heading-change series |
 | `k` | `int` | `5` | how many nearest fleet peers |
 | `id_col` | `text` | `'id'` | the column to return as the track id (must be bigint-castable) |
 
@@ -944,7 +944,7 @@ empty. `id_col` must be bigint-castable.
 
 ---
 
-### Network coverage alert — `fractal_agent_network_coverage_alert`
+### Network coverage alert: `fractal_agent_network_coverage_alert`
 **Smart-cities coverage alert: spatial morphology + telemetry drift.**
 
 Use it for Smart-Cities sensor-grid coverage alerts, or any spatial-morphology +
@@ -956,8 +956,8 @@ reasons an alert.
 
 | Argument | Type | Default | What it is |
 | --- | --- | --- | --- |
-| `point_cloud` | `float8[]` | — | the sensor grid as a flat interleaved point array |
-| `drift_series` | `float8[]` | — | the telemetry series |
+| `point_cloud` | `float8[]` | (none) | the sensor grid as a flat interleaved point array |
+| `drift_series` | `float8[]` | (none) | the telemetry series |
 | `boxcount_dim` | `int` | `2` | the morphology box-counting dimension |
 | `drift_win` | `int` | `48` | the drift recent-window size |
 | `drift_threshold` | `float8` | `0.5` | `drift_detected = \|drift\| > drift_threshold` |
@@ -999,7 +999,7 @@ comparison.
 
 ---
 
-### Regime triage — `fractal_agent_regime_triage`
+### Regime triage: `fractal_agent_regime_triage`
 **Triage a regime change in a single series (array-in, no table).**
 
 Use it for any single-series regime-change triage (Quant-Finance market regime,
@@ -1012,7 +1012,7 @@ long-range-correlation exponent and the regime-change drift, then reasons.
 
 | Argument | Type | Default | What it is |
 | --- | --- | --- | --- |
-| `series` | `float8[]` | — | the time series |
+| `series` | `float8[]` | (none) | the time series |
 | `win` | `int` | `64` | the drift recent-window size |
 | `drift_threshold` | `float8` | `0.5` | `drift_detected = \|drift\| > drift_threshold` |
 | `context` | `text` | `'{}'` | optional label passed to the reason call |
@@ -1046,15 +1046,15 @@ the boolean comparison.
 ### A note on id resolution
 
 `fractal_search_telemetry` and `fractal_hybrid_clinical_search` return `doc_id`
-as the **row's SQLite `rowid`** — a real row locator, the analog of the server
-edition's `ctid` — plus the raw 0-indexed scan position alongside as
+as the **row's SQLite `rowid`** (a real row locator, the analog of the server
+edition's `ctid`), plus the raw 0-indexed scan position alongside as
 `scan_pos`. Resolve back to the row with a direct locator predicate, e.g.
 `JOIN tbl t ON t.rowid = json_extract(je.value, '$.doc_id')`.
 
 The table-searching agents (`route_task`, `recall_hybrid`,
 `recommend_diverse`, `patient_deterioration_triage`, `schedule_workload`)
 resolve the returned `doc_id` to your named id column (`id_col`) with a direct
-`rowid` predicate — `WHERE rowid = doc_id` — with no positional mapping in
+`rowid` predicate (`WHERE rowid = doc_id`) with no positional mapping in
 between. The three trajectory-backed agents (`rebalance_sibling`,
 `detour_classify`, `track_anomaly`) still resolve through the
 `row_number() OVER (ORDER BY rowid) - 1` mapping, because
@@ -1077,7 +1077,7 @@ clean without caller cleanup.
 
 The installable agents above are productized recipes. Underneath them are six **Universal
 Agents**: C-level functions registered by the extension's own entrypoint the
-moment it loads (see the registration table in `src/fsql_agents.c`) —
+moment it loads (see the registration table in `src/fsql_agents.c`);
 in the SQLite integration, callable as soon as `.load
 /usr/local/lib/sqlite3/fractalsql` runs, with no separate install/activation
 step and no separate agents extension. These are the building
@@ -1088,7 +1088,7 @@ require a reasoning plugin plus an OpenAI-compatible chat endpoint (and, for the
 agents that embed a query, an embeddings endpoint) configured via
 `fractalsql_set(...)` per connection. See [`reasoning-setup.md`](reasoning-setup.md). Signatures
 mirror the C in `src/fsql_agents.c` exactly (argument order, types, defaults, and
-`STRICT`ness — SQLite wrappers carry the same NULL-propagating behavior as the
+`STRICT`ness; SQLite wrappers carry the same NULL-propagating behavior as the
 server edition's own strict-argument declarations).
 
 *Shape differences in the SQLite integration:* SQLite scalar functions cannot
@@ -1097,7 +1097,7 @@ single **TEXT JSON document** per call (pick fields with `json_extract(...)`);
 `table_names` is a **JSON array TEXT** (there is no `text[]`); `detect_loop`'s
 state log is the **flattened state-vector log as JSON/CSV TEXT or float32
 BLOB** (no `float8[]`); and the id-resolution
-mapping uses SQLite's `rowid` — SQLite has no separate physical-row-identifier
+mapping uses SQLite's `rowid`: SQLite has no separate physical-row-identifier
 pseudo-column, so `rowid` fills that role directly.
 
 ### `fractal_search_agent`
@@ -1140,7 +1140,7 @@ fractal_search_agent(
 ### `fractal_sql_agent`
 **Self-Correcting SQL Agent**
 
-Generates SQL from natural language and automatically retries upon prepare-check or execution failure (SQLite has no `EXPLAIN` gate — the parse/readonly check plays that role).
+Generates SQL from natural language and automatically retries upon prepare-check or execution failure (SQLite has no `EXPLAIN` gate; the parse/readonly check plays that role).
 
 ```sql
 fractal_sql_agent(
@@ -1178,7 +1178,7 @@ Each returned branch carries its own `plan_trajectory`: the **matched
 strategy's** embedding (the corpus row at that branch's result index), so the
 branches are distinct rather than all echoing the query vector.
 `confidence_score` is `1.0 − distance`. The branches come back as **one JSON
-document** (SQLite scalar functions can't return sets — there's no
+document** (SQLite scalar functions can't return sets; there's no
 set-returning-function shape to fall back on here).
 - `branch_id`: Unique identifier for the explored trajectory.
 - `plan_trajectory`: The converged state vector for this branch.
@@ -1239,11 +1239,11 @@ BY event_ts, dim) || ']'` over your agent's state-vector log. A loop is
 flagged when **either** signal fires:
 
 - the DFA exponent over the per-state L2-norm trajectory exceeds 0.9
-  (drift-to-chaos / random-walk-like cycling — a real, continuous
+  (drift-to-chaos / random-walk-like cycling: a real, continuous
   magnitude-wander signal the cycle check can miss if the wander never
   closes within `hamming_threshold`), **or**
 - the SimHash fingerprint stream closes a cycle in Brent's detector within
-  `hamming_threshold` — a tolerant "have I basically been in this state
+  `hamming_threshold`, a tolerant "have I basically been in this state
   before" check that catches near-enough wobbles an exact-hash period scan
   would miss. Only the **first** closed cycle is reported: detection stops
   the stream at the first hit.
@@ -1256,7 +1256,7 @@ flagged when **either** signal fires:
 > `fsql_state_fingerprint` (the SimHash kernel inside) is
 > **direction-based**, so encode scalar states into a distinguishable
 > direction, for example one-hot, rather than casting them to 1-dimensional
-> vectors — a same-signed scalar log would otherwise collapse to one
+> vectors: a same-signed scalar log would otherwise collapse to one
 > fingerprint and false-positive as "looping" regardless of its values.
 
 ### `fractal_rag_agent`
@@ -1271,6 +1271,22 @@ top-k vectors. See that function's note for why. The chat-dispatch return
 code is checked: a reasoning-endpoint failure raises a clean error with the
 plugin's detail, instead
 of returning a NULL/garbage answer.
+
+> **Partial-result honesty (opt-in).** By default the clean-error
+> raise above applies. Setting
+> `fractalsql_set('agent_partial_reasoning_fail','on')` changes the
+> failure mode for the agent functions that compose a *data step plus* the
+> final reasoning call (the `fractal_agent_*` domain agents,
+> `fractal_search_agent`, and `fractal_rag_agent`): if the reasoning
+> endpoint fails **after** the data step has already computed, the function
+> returns its computed data half and adds a `"reasoning_step_failed"` field
+> carrying the plugin's error detail verbatim, instead of raising. The
+> reasoning surface itself (`fractal_reason`, `fractal_text_to_sql`) is not
+> covered (there, the reasoning call *is* the whole result, so its failure
+> is the error), and an *unconfigured* `reasoning_plugin` still raises in
+> both modes, because that is a setup error rather than a transient
+> endpoint failure. The MCP plugin sets this flag on its sessions at
+> connect time; see `docs/mcp-plugin.md`.
 
 ```sql
 fractal_rag_agent(
@@ -1291,14 +1307,14 @@ currently accepted but not yet applied to the search.
 
 The three agentic-vertical demos (`demo/demo-vertical-agentic-ops-devops.sql`,
 `-fintech-mcts.sql`, `-customer-support.sql`) hand-compose six **Domain
-Agent** blueprints straight in SQL — the raw primitive calls, wired together —
+Agent** blueprints straight in SQL (the raw primitive calls, wired together),
 then follow each one with a `.print --- the shipped agent: same composition,
 one call ---` marker and a call to the installed `fractal_agent_*` function
 that generalizes it, so you can see the hand-rolled composition and the
 productized one side by side. Every demo is a clean, re-runnable regression
 test: it drops and recreates its tables at the top, so run it again safely.
 
-### DevOps / SRE — `demo/demo-vertical-agentic-ops-devops.sql`
+### DevOps / SRE: `demo/demo-vertical-agentic-ops-devops.sql`
 
 | Domain Agent | Composes | Purpose |
 | --- | --- | --- |
@@ -1306,13 +1322,13 @@ test: it drops and recreates its tables at the top, so run it again safely.
 | `fractal_agent_outlier_intercept(state_vec, history_table, emb_col, threshold, metric)` → `(intercepted, reason)` | `fractal_search_telemetry` | Pre-commit safety barrier: screens a proposed action's state vector against known-bad state clusters and intercepts it when the nearest bad state is within `threshold`, measured by `metric` (`'cosine'` by default, or `'l2'`). |
 | `fractal_agent_threat_triage(host_id, log_table, baseline_window)` → `(threat_score, anomaly_type, triage_summary)` | `fractal_dimension_drift` + `fractal_reason` | SOC incident triage: scores drift on the host's latency series, then reasons a human-readable triage summary over the drift result. |
 
-### FinTech — `demo/demo-vertical-agentic-fintech-mcts.sql`
+### FinTech: `demo/demo-vertical-agentic-fintech-mcts.sql`
 
 | Domain Agent | Composes | Purpose |
 | --- | --- | --- |
 | `fractal_agent_portfolio_rebalance(portfolio_id, target_cardinality)` → `(new_weights, drift_score, rationale)` | `fractal_optimize_portfolio` + `fractal_reason` | Cardinality-constrained rebalance: runs the SFS Sharpe optimizer for the target asset count, then reasons a rationale for the weight shift. |
 
-### Customer Support — `demo/demo-vertical-agentic-customer-support.sql`
+### Customer Support: `demo/demo-vertical-agentic-customer-support.sql`
 
 | Domain Agent | Composes | Purpose |
 | --- | --- | --- |
@@ -1345,7 +1361,7 @@ into vertical workflows. If your problem doesn't match one of the sixteen
 recipes, compose your own: in the server edition that's a server-side
 procedural language, in the
 SQLite integration there is no server-side procedural language, so a custom
-agent is ordinary application code — a query that calls one primitive, feeds
+agent is ordinary application code: a query that calls one primitive, feeds
 its output into the next's input, and shapes the result. The composition
 principle (and every primitive) is identical across both editions.
 

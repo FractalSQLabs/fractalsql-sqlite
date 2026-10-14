@@ -163,7 +163,7 @@ static const char *agents_core_detail(const FsqlState *st) {
     return (detail && *detail) ? detail : "(no detail)";
 }
 
-/* Growable append buffer — the allocation pattern this TU needs for
+/* Growable append buffer: the allocation pattern this TU needs for
  * JSON assembly. All appends are bounds-checked; an OOM latches
  * b->oom and the caller checks it once at the end. */
 typedef struct StrBuf {
@@ -251,8 +251,8 @@ static void sb_json_string(StrBuf *b, const char *s) {
     sb_puts(b, "\"");
 }
 
-/* Append a JSON array of doubles: [1.5,-2,...] ("%.17g" — round-trip
- * exact). */
+/* Append a JSON array of doubles: [1.5,-2,...] ("%.17g" is
+ * round-trip exact). */
 static void sb_json_doubles(StrBuf *b, const double *v, int n) {
     sb_puts(b, "[");
     for (int i = 0; i < n; i++) {
@@ -295,7 +295,7 @@ static void sb_sql_ident(StrBuf *sql, const char *ident) {
 
 /* A table column scanned into a flat row-major double corpus. Scanned
  * with ORDER BY rowid so doc_id (the 0-indexed scan position) is
- * deterministic — the same doc_id convention fractal_feedback_report's
+ * deterministic: the same doc_id convention fractal_feedback_report's
  * result_handle shares. Rows may keep their rowid so search-result
  * positions map back to physical rows for content retrieval. */
 typedef struct AgentCorpus {
@@ -468,7 +468,7 @@ static int agents_embed_query(FsqlState *st, const char *text,
         return -1;
     }
     if (!st->cfg.http_embed_url || !*st->cfg.http_embed_url) {
-        /* No fallback to the chat http_url — a chat model is not a
+        /* No fallback to the chat http_url: a chat model is not a
          * substitute for a purpose-trained embedding model. */
         agents_set_err(err, err_cap,
                        "fractalsql: http_embed_url is not configured (set "
@@ -478,8 +478,8 @@ static int agents_embed_query(FsqlState *st, const char *text,
 
     /* Dispatch context is empty: embed configuration (endpoint, model,
      * embedding mode, token) reaches the plugin through the
-     * FSQL_REASONING_TIER_EMBED tier's env block in fsql_reasoning.c —
-     * the plugin embeds per-call context into the prompt as data, so
+     * FSQL_REASONING_TIER_EMBED tier's env block in fsql_reasoning.c.
+     * The plugin embeds per-call context into the prompt as data, so
      * it must never carry config keys. */
     char *resp = NULL;
     int rc = fsql_reasoning_generate(st, FSQL_REASONING_TIER_EMBED,
@@ -554,11 +554,10 @@ static int agents_scout_search(FsqlState *st, const AgentCorpus *c,
 
 /* Table-backed top-k telemetry search.
  * Emits a JSON array ascending by distance. In locator mode (the
- * fractal_search_telemetry / fractal_hybrid_clinical_search surface,
- * pg parity): {"doc_id":<rowid>,"distance":D,"scan_pos":<i>} -- doc_id
- * is the row's real rowid (SQLite's physical row locator, the analog
- * of the server edition's ctid: it keeps resolving to the correct row
- * even if an UPDATE rewrites it between the search and the lookup),
+ * fractal_search_telemetry / fractal_hybrid_clinical_search surface): {"doc_id":<rowid>,"distance":D,"scan_pos":<i>} -- doc_id
+ * is the row's real rowid (SQLite's physical row locator: it keeps
+ * resolving to the correct row even if an UPDATE rewrites it between
+ * the search and the lookup),
  * and scan_pos is the raw 0-indexed position within THIS call's corpus
  * (the result_handle convention fractal_feedback_report shares).
  * Outside locator mode (fractal_search_trajectory,
@@ -615,7 +614,7 @@ static int agents_topk_json(FsqlState *st, const AgentCorpus *c,
          * (fsql_extract_topk validates only >= 0): skip an index outside
          * the corpus scan rather than reading doc_id_map past its n_rows
          * entries or reporting a corpus position that was never searched
-         * (pg parity -- the reference wrapper skips and returns the rest). */
+         * (the reference wrapper skips and returns the rest). */
         if (idx[i] < 0 || (size_t)idx[i] >= c->n_rows) continue;
         if (emitted) sb_puts(out, ",");
         emitted = 1;
@@ -677,7 +676,7 @@ static int agents_validate_sfs_params(int dim, int iterations, int pop_size,
 /* ------------------------------------------------------------------ */
 
 /* Serialize one column value as JSON. BLOBs have no lossless JSON
- * form worth feeding an LLM context — emitted as null. */
+ * form worth feeding an LLM context, so they are emitted as null. */
 static void sb_json_column(StrBuf *b, sqlite3_stmt *stmt, int i) {
     switch (sqlite3_column_type(stmt, i)) {
     case SQLITE_INTEGER:
@@ -698,7 +697,7 @@ static void sb_json_column(StrBuf *b, sqlite3_stmt *stmt, int i) {
 }
 
 /* Fetch the matched rows' content (all columns except the embedding
- * column) as a compact JSON array — the LLM never sees raw embedding
+ * column) as a compact JSON array: the LLM never sees raw embedding
  * vectors (they are large and useless to it). Returns a malloc'd JSON
  * string ("[]" when nothing matches), or NULL with err set. */
 static char *agents_retrieval_context(FsqlState *st, const char *table,
@@ -934,7 +933,7 @@ static void fractal_search_debug_fn(sqlite3_context *ctx, int argc,
         agents_result_err(ctx, err);
         return;
     }
-    /* result_json is owned by st->ctx until its next search — copy. */
+    /* result_json is owned by st->ctx until its next search; copy. */
     sqlite3_result_text(ctx, result_json, (int)result_len, SQLITE_TRANSIENT);
 }
 
@@ -951,11 +950,13 @@ static int agents_rag_pipeline(FsqlState *st, const char *who,
                                const char *col, int pop_size, int iterations,
                                char **out_answer,
                                int **out_idx, double **out_dist, int *out_got,
+                               int *reasoning_failed,
                                char *err, size_t err_cap) {
     *out_answer = NULL;
     *out_idx = NULL;
     *out_dist = NULL;
     *out_got = 0;
+    if (reasoning_failed) *reasoning_failed = 0;
 
     /* 1. Embed the natural-language query (embed tier; errors clearly
      * when http_embed_url is unset). */
@@ -1029,6 +1030,18 @@ static int agents_rag_pipeline(FsqlState *st, const char *who,
                                  ctx_json, &answer, err, err_cap);
     free(ctx_json);
     if (rc != 0) {
+        /* Partial-result honesty (opt-in): the embed + search
+         * data half is DONE and idx/dist/got are valid, so hand them
+         * back and let the caller emit them plus reasoning_step_failed
+         * instead of discarding the retrieval (-2 = partial). */
+        if (reasoning_failed && st->cfg.agent_partial_reasoning_fail) {
+            *reasoning_failed = 1;
+            *out_idx = idx;
+            *out_dist = dist;
+            *out_got = got;
+            *out_answer = NULL;
+            return -2;
+        }
         free(idx); free(dist);
         return -1;
     }
@@ -1086,9 +1099,36 @@ static void fractal_search_agent_fn(sqlite3_context *ctx, int argc,
     int *idx = NULL;
     double *dist = NULL;
     int got = 0;
-    if (agents_rag_pipeline(st, "fractal_search_agent", query, table, col,
-                            pop_size, iterations, &answer,
-                            &idx, &dist, &got, err, sizeof err) != 0) {
+    int rfailed = 0;
+    int prc = agents_rag_pipeline(st, "fractal_search_agent", query, table, col,
+                                  pop_size, iterations, &answer,
+                                  &idx, &dist, &got, &rfailed,
+                                  err, sizeof err);
+    if (prc == -2) {
+        /* Partial-result mode: the embed + Scout search data half is done; emit
+         * it plus reasoning_step_failed instead of raising. */
+        StrBuf out;
+        sb_init(&out);
+        sb_puts(&out, "{\"answer\":null,\"reasoning_step_failed\":");
+        sb_json_string(&out, err);
+        sb_puts(&out, ",\"source_doc_ids\":[");
+        for (int i = 0; i < got; i++) {
+            if (i) sb_puts(&out, ",");
+            sb_printf(&out, "%d", idx[i]);
+        }
+        sb_puts(&out, "],\"execution_time_ms\":100}");
+        free(idx);
+        free(dist);
+        if (sb_failed(&out)) {
+            sb_free(&out);
+            sqlite3_result_error_nomem(ctx);
+            return;
+        }
+        sqlite3_result_text(ctx, out.buf, (int)out.len, SQLITE_TRANSIENT);
+        sb_free(&out);
+        return;
+    }
+    if (prc != 0) {
         agents_result_err(ctx, err);
         return;
     }
@@ -1163,16 +1203,39 @@ static void fractal_rag_agent_fn(sqlite3_context *ctx, int argc,
     int *idx = NULL;
     double *dist = NULL;
     int got = 0;
-    if (agents_rag_pipeline(st, "fractal_rag_agent", query, table, col,
-                            /*pop_size*/ 50, /*iterations*/ 15, &answer,
-                            &idx, &dist, &got, err, sizeof err) != 0) {
+    int rfailed = 0;
+    int prc = agents_rag_pipeline(st, "fractal_rag_agent", query, table, col,
+                                  /*pop_size*/ 50, /*iterations*/ 15, &answer,
+                                  &idx, &dist, &got, &rfailed,
+                                  err, sizeof err);
+    if (prc == -2) {
+        /* Partial-result mode: the embed + Scout search data half is done; emit
+         * it plus reasoning_step_failed instead of raising. The
+         * rag_agent result shape is {answer} only, so the honest
+         * partial adds the two error-context fields around it. */
+        StrBuf out;
+        sb_init(&out);
+        sb_puts(&out, "{\"answer\":null,\"reasoning_step_failed\":");
+        sb_json_string(&out, err);
+        sb_puts(&out, "}");
+        free(idx);
+        free(dist);
+        if (sb_failed(&out)) {
+            sb_free(&out);
+            sqlite3_result_error_nomem(ctx);
+            return;
+        }
+        sqlite3_result_text(ctx, out.buf, (int)out.len, SQLITE_TRANSIENT);
+        sb_free(&out);
+        return;
+    }
+    if (prc != 0) {
         agents_result_err(ctx, err);
         return;
     }
     free(idx);
     free(dist);
 
-    /* Result JSON has the single attribute `answer`. */
     StrBuf out;
     sb_init(&out);
     sb_puts(&out, "{\"answer\":");
@@ -1364,7 +1427,7 @@ static char *agents_strip_sql_fence(const char *s) {
     return out;
 }
 
-/* Allowlist check for model-generated SQL — prepare-based (see the
+/* Allowlist check for model-generated SQL, prepare-based (see the
  * header comment). Returns NULL when the statement passes, else a
  * malloc'd rejection reason to feed back to the next GENERATE attempt
  * (the t2s_check_allowlist contract). */
@@ -1539,7 +1602,7 @@ static void fractal_sql_agent_fn(sqlite3_context *ctx, int argc,
     int allow_writes = (mode && strcmp(mode, "select_insert_update") == 0);
 
     /* GENERATE -> allowlist -> retry loop. Validates by preparing
-     * rather than EXPLAINing — preparing is the same mechanical parse
+     * rather than EXPLAINing: preparing is the same mechanical parse
      * check and never executes. */
     char *final_sql  = NULL;
     char *feedback   = NULL;
@@ -1575,7 +1638,7 @@ static void fractal_sql_agent_fn(sqlite3_context *ctx, int argc,
         }
 
         /* Runs on the T2S tier so the T2S env block applies
-         * (RESPONSE_MODE=code, SYSTEM_TAG=sqlite) — see the header
+         * (RESPONSE_MODE=code, SYSTEM_TAG=sqlite); see the header
          * comment, fractal_sql_agent bullet. */
         char *resp = NULL;
         int grc = fsql_reasoning_generate(st, FSQL_REASONING_TIER_T2S,
@@ -1631,7 +1694,6 @@ static void fractal_sql_agent_fn(sqlite3_context *ctx, int argc,
         }
     }
 
-    /* Composite result as JSON. */
     StrBuf out;
     sb_init(&out);
     sb_puts(&out, "{\"generated_sql\":");
@@ -2039,19 +2101,19 @@ static void fractal_trajectory_predict_fn(sqlite3_context *ctx, int argc,
  * DFA-alpha>0.9 heuristic over those same hash values. Two real problems
  * with that: exact equality only catches bit-identical repeats (misses a
  * "near enough" wobble), and DFA over arbitrary hash values has no
- * numerical continuity to begin with — it was really just borrowing DFA
+ * numerical continuity to begin with: it was really just borrowing DFA
  * as a crude randomness detector, not a principled choice. This version
  * takes the actual state vectors (state_log, flattened row-major:
  * n_states * dim doubles, matching this file's existing corpus-
- * flattening convention — see agents_scan_corpus) and:
+ * flattening convention; see agents_scan_corpus) and:
  *
  *   - fingerprints each state via fsql_state_fingerprint (SimHash) and
  *     streams the fingerprints through fsql_cycle_detect_init/_feed
  *     (Brent's), which tolerates near-identical states within
- *     hamming_threshold instead of requiring byte-exact repeats —
- *     replaces detect_short_period.
+ *     hamming_threshold instead of requiring byte-exact repeats
+ *     (replaces detect_short_period).
  *   - runs DFA over each state's L2 norm across the trajectory instead
- *     of over hash values — a real, continuous drift-to-chaos signal
+ *     of over hash values: a real, continuous drift-to-chaos signal
  *     (magnitude wander over time), still flagging alpha > 0.9 as a
  *     random-walk-like loop the fingerprint-cycle check can miss if the
  *     wander never closes within hamming_threshold. */
@@ -2177,8 +2239,8 @@ static void fractal_detect_loop_fn(sqlite3_context *ctx, int argc,
         return;
     }
 
-    /* Secondary signal: DFA over each state's L2 norm across the
-     * trajectory. */
+    /* Secondary signal: DFA over each state's L2 norm (computed below)
+     * across the trajectory. */
     double *norms = (double *)malloc((size_t)n_states * sizeof(double));
     if (!norms) {
         free(flat);
@@ -2306,10 +2368,10 @@ static int agents_i64_sorted_contains(const int64_t *a, int n, int64_t key) {
  * (scan-position mode) is in the (sorted) cohort are searched, and the
  * kept-id map translates filtered scan positions back to per-row ids.
  * In locator mode (fractal_search_telemetry /
- * fractal_hybrid_clinical_search, pg parity) the corpus is scanned
+ * fractal_hybrid_clinical_search) the corpus is scanned
  * with its rowids and the result's doc_id is the row's real rowid
- * (SQLite's physical row locator, the analog of the server edition's
- * ctid), with the raw scan position reported separately as scan_pos.
+ * (SQLite's physical row locator), with the raw scan position
+ * reported separately as scan_pos.
  * In scan-position mode (fractal_search_trajectory,
  * fractal_cross_modal_search, and the internal result_handle callers)
  * doc_id stays the 0-indexed scan position. */
@@ -2472,8 +2534,8 @@ static void fractal_hybrid_clinical_search_fn(sqlite3_context *ctx, int argc,
     }
 
     /* doc_ids arrives as a JSON/CSV array of rowids as TEXT (the same
-     * physical row locator the result's doc_id field reports -- the
-     * analog of the server edition's ctid cohort), parsed with the
+     * physical row locator the result's doc_id field reports), parsed
+     * with the
      * shared numeric-series parser. */
     double *raw = (double *)malloc(
         (size_t)FSQL_ARENA_MAX_DIM * sizeof(double));
@@ -2589,7 +2651,7 @@ static void fractal_cross_modal_search_fn(sqlite3_context *ctx, int argc,
  * by form: a canonical-BLOB pair subtracts in core's float32
  * fsql_vector_sub and widens to double ONCE at this boundary; anything
  * else (CSV/JSON text) subtracts in double. The delta vector (current
- * - baseline) is what actually gets searched — "what has changed"
+ * - baseline) is what actually gets searched: "what has changed"
  * rather than "where am I", the natural query shape for
  * drift/trajectory monitoring. Output shape and doc_id convention
  * match fractal_search_telemetry (no cohort filter). STRICT: NULL in,
@@ -2969,7 +3031,7 @@ static void fractal_mine_topology_negatives_fn(sqlite3_context *ctx, int argc,
 /* All INNOCUOUS, none DETERMINISTIC: the agent tier touches LLMs,
  * stochastic SFS, and per-session Diversify state (see the header
  * comment). user_data is the shared per-connection state; xDestroy is
- * NULL everywhere — the entry TU's fractal_search registration owns
+ * NULL everywhere: the entry TU's fractal_search registration owns
  * fsql_state_destroy. */
 int fsql_agents_register(sqlite3 *db, FsqlState *st) {
     static const int flags = SQLITE_UTF8 | SQLITE_INNOCUOUS;

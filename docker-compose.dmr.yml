@@ -1,0 +1,22 @@
+# Optional override: point the demo container at Docker Desktop's built-in
+# Docker Model Runner instead of the bundled `ollama` container. Docker
+# Desktop only (Model Runner isn't available on a plain Docker Engine
+# install); see docs/docker-demo.md and docs/reasoning-setup.md.
+#
+# Usage:
+#   docker model pull ai/gpt-oss:20b
+#   docker model pull ai/nomic-embed-text-v1.5
+#   docker compose -f docker-compose.yml -f docker-compose.dmr.yml up -d demo
+#
+# model-runner.docker.internal resolves from inside any container once
+# Model Runner is enabled (Settings > Beta features, or
+# `docker desktop enable model-runner`) -- no port, no extra_hosts entry,
+# and no dependency on the ollama/pull-model services.
+services:
+  demo:
+    depends_on: !reset null
+    environment:
+      FRACTALSQL_HTTP_URL: http://model-runner.docker.internal/engines/v1/chat/completions
+      FRACTALSQL_HTTP_MODEL: ai/gpt-oss:20b  # or ai/gemma4:12b / ai/phi4
+      FRACTALSQL_HTTP_EMBED_URL: http://model-runner.docker.internal/engines/v1/embeddings
+      FRACTALSQL_HTTP_EMBED_MODEL: ai/nomic-embed-text-v1.5

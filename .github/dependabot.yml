@@ -12,6 +12,17 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      # github/codeql-action ships init/autobuild/analyze as separate
+      # action references pinned to the same SHA in codeql.yml; an
+      # ungrouped bump of just one (reproduced by PR #14: analyze
+      # alone moved onto a newer SHA under the release's own v3-vs-v4
+      # moving-tag confusion) desyncs them and CodeQL hard-refuses to
+      # run ("must use the same version"). Grouping keeps every
+      # codeql-action reference moving together in one PR.
+      codeql-action:
+        patterns:
+          - "github/codeql-action/*"
 
   # bench/requirements.txt — the benchmark tooling's Python deps.
   - package-ecosystem: pip

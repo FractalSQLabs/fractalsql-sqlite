@@ -1,4 +1,4 @@
-/* src/fsql_vector.h — fractal_vector BLOB convention + vector math.
+/* src/fsql_vector.h: fractal_vector BLOB convention + vector math.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: 2026 Daniel Gardiner d/b/a FractalSQLabs

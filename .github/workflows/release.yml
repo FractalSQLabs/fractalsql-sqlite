@@ -34,9 +34,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { architecture: amd64, profile: modern, runner: ubuntu-latest }
-          - { architecture: amd64, profile: legacy, runner: ubuntu-latest }
-          - { architecture: amd64, profile: musl,   runner: ubuntu-latest }
+          - { architecture: amd64, profile: modern, runner: ubuntu-24.04 }
+          - { architecture: amd64, profile: legacy, runner: ubuntu-24.04 }
+          - { architecture: amd64, profile: musl,   runner: ubuntu-24.04 }
           - { architecture: arm64, profile: modern, runner: ubuntu-24.04-arm }
           - { architecture: arm64, profile: legacy, runner: ubuntu-24.04-arm }
           - { architecture: arm64, profile: musl,   runner: ubuntu-24.04-arm }
@@ -47,6 +47,22 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+
+      - name: SQLite amalgamation (for the bundled MCP server)
+        run: |
+          set -euo pipefail
+          # docker/Dockerfile COPYs deps/sqlite/sqlite3.{c,h} into the MCP
+          # build stages (mcp/Makefile compiles the amalgamation directly
+          # rather than linking system libsqlite3) -- without this the
+          # Docker build fails on "COPY failed: file not found" the
+          # moment it reaches those stages. Same fetch build-test.yml's
+          # POSIX jobs use.
+          zip_name="sqlite-amalgamation-${SQLITE_VERSION}.zip"
+          url="https://www.sqlite.org/${SQLITE_YEAR}/${zip_name}"
+          mkdir -p deps
+          curl -fsSL -o deps/sqlite.zip "$url"
+          unzip -q deps/sqlite.zip -d deps
+          mv "deps/sqlite-amalgamation-${SQLITE_VERSION}" deps/sqlite
 
       - name: Install Packaging Tools
         run: |
@@ -93,7 +109,7 @@ jobs:
           # yields the wrong "sqlite3_fractalsqllegacy_init".
           OUT=$(sqlite3 :memory: ".load ${SO} sqlite3_fractalsql_init" "SELECT fractalsql_edition() || '|' || fractalsql_version();")
           echo "result: ${OUT}"
-          test "${OUT}" = "Community|2.0.5"
+          test "${OUT}" = "Community|2.0.6"
           DIST=$(sqlite3 :memory: ".load ${SO} sqlite3_fractalsql_init" "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');")
           echo "self-search distance: ${DIST}"
           awk -v d="${DIST}" 'BEGIN { if (d >= 1e-6) exit 1 }'
@@ -120,7 +136,7 @@ jobs:
             test "${OUT}" = "Community"
             OUT=$(sqlite3 :memory: ".load '"${SO}"' sqlite3_fractalsql_init" "SELECT fractalsql_version();")
             echo "version: ${OUT}"
-            test "${OUT}" = "2.0.5"
+            test "${OUT}" = "2.0.6"
           '
 
       # Every profile installs to the SAME fixed path regardless of the
@@ -215,14 +231,68 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
-      - name: Install SQLite headers
+      - name: Install SQLite headers + OpenSSL (for the MCP server)
         run: |
           set -euo pipefail
           # Homebrew's sqlite provides sqlite3ext.h (newer than the
           # macOS-SDK-bundled one, which is sometimes stripped).
-          brew install sqlite
+          # openssl@3 isn't in the macOS SDK at all (Apple dropped it
+          # long ago) — package-darwin.sh resolves its keg-only prefix
+          # explicitly to build the bundled MCP server.
+          brew install sqlite openssl@3
+
+      - name: SQLite amalgamation (for the bundled MCP server)
+        run: |
+          set -euo pipefail
+          # mcp/Makefile compiles the vendored sqlite3 amalgamation
+          # directly (deps/sqlite/sqlite3.c) rather than linking system
+          # libsqlite3 -- Homebrew's sqlite formula above only ships
+          # headers/lib, not sqlite3.c, so package-darwin.sh's
+          # `make -C mcp` has nothing to compile without this. Same
+          # fetch build-test.yml's POSIX jobs use.
+          zip_name="sqlite-amalgamation-${SQLITE_VERSION}.zip"
+          url="https://www.sqlite.org/${SQLITE_YEAR}/${zip_name}"
+          mkdir -p deps
+          curl -fsSL -o deps/sqlite.zip "$url"
+          unzip -q deps/sqlite.zip -d deps
+          mv "deps/sqlite-amalgamation-${SQLITE_VERSION}" deps/sqlite
+
+      # x86_64 only: Homebrew no longer ships x86_64 bottles for openssl@3
+      # on Apple Silicon (Intel support discontinued), so on this arm64
+      # runner `brew --prefix openssl@3` resolves to an arm64-only keg.
+      # ld silently ignores the mismatched-arch .dylib (just a warning)
+      # and the link then fails with "Undefined symbols for architecture
+      # x86_64" for every OpenSSL symbol -- reproduced directly. Same
+      # problem (and same fix) as fractalsql-mariadb's release.yml
+      # solves for its daemon's libcrypto-only need; the MCP server
+      # additionally links libssl (for the --https transport), so this
+      # cross-builds the full static library, not just libcrypto: clang
+      # -arch x86_64 emits x86_64 objects at full speed on the arm64
+      # host, no Rosetta needed, since only the archive is linked and
+      # its binaries are never run.
+      - name: Cross-build x86_64 OpenSSL from source (for the MCP server)
+        if: matrix.fsql_arch == 'x86_64'
+        run: |
+          set -euo pipefail
+          curl -fsSLO --proto '=https' https://github.com/openssl/openssl/releases/download/openssl-3.5.8/openssl-3.5.8.tar.gz
+          echo "a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2  openssl-3.5.8.tar.gz" | shasum -a 256 -c -
+          tar xf openssl-3.5.8.tar.gz
+          cd openssl-3.5.8
+          ./Configure darwin64-x86_64 no-shared no-tests \
+              --prefix=/tmp/openssl-x64 \
+              -mmacosx-version-min=13.3 -fPIC
+          # opensslv.h and friends are generated at build time; force the
+          # header-generation step first (serially) before build_libs --
+          # same ordering fractalsql-mariadb's identical step uses, to
+          # avoid racing the first .o compiles against ungenerated
+          # headers under -j.
+          make -j1 -s build_generated
+          make -j"$(sysctl -n hw.ncpu)" -s build_libs
+          make -s install_sw
 
       - name: Build + package dylib
+        env:
+          OPENSSL_PREFIX: ${{ matrix.fsql_arch == 'x86_64' && '/tmp/openssl-x64' || '' }}
         run: |
           set -euo pipefail
           chmod +x scripts/package-darwin.sh
@@ -234,9 +304,23 @@ jobs:
           # macos-13 image was retired) and arm64 builds native. The
           # script passes -arch itself — without it clang would target
           # the arm64 host on both legs and the x86_64 link would come
-          # up empty against the x86_64 vendored archive.
+          # up empty against the x86_64 vendored archive. OPENSSL_PREFIX
+          # (set above for x86_64 only) overrides package-darwin.sh's
+          # own `brew --prefix openssl@3` default, pointing it at the
+          # cross-built x86_64 static library instead of the arm64 keg.
           FSQL_DARWIN_ARCH=${{ matrix.fsql_arch }} ./scripts/package-darwin.sh
           ls -l dist/packages
+
+      # arm64 only: native leg can actually execute the binary it just
+      # built; the x86_64 leg cross-builds on this same arm64 runner
+      # (see the job header comment) and can't run its own output.
+      - name: Smoke-check fractalsql-sqlite-mcp
+        if: matrix.fsql_arch == 'arm64'
+        run: |
+          set -euo pipefail
+          test -f mcp/fractalsql-sqlite-mcp
+          ./mcp/fractalsql-sqlite-mcp --version
+          ./mcp/fractalsql-sqlite-mcp --list-tools | head -5
 
       - name: Posture checks (otool, size, exports)
         run: |
@@ -293,7 +377,7 @@ jobs:
               ".load ${DYLIB}" \
               "SELECT fractalsql_edition() || '|' || fractalsql_version();")
           echo "result: ${OUT}"
-          test "${OUT}" = "Community|2.0.5"
+          test "${OUT}" = "Community|2.0.6"
           DIST=$("${SQLITE_BIN}" :memory: \
               ".load ${DYLIB}" \
               "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');")
@@ -346,7 +430,7 @@ jobs:
       matrix:
         include:
           - arch: x64
-            runner: windows-latest
+            runner: windows-2022
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout Code
@@ -427,6 +511,34 @@ jobs:
           }
           Write-Host '==> OK: no MSVC redistributable imports'
 
+      # The windows-2022 runner image ships vcpkg preinstalled at
+      # %VCPKG_INSTALLATION_ROOT%; mcp\scripts\windows\build.bat looks
+      # for VCPKG_ROOT specifically (same env var name the sibling
+      # repos' own build.bat scripts already standardize on), so this
+      # step just points one at the other rather than bootstrapping a
+      # second vcpkg checkout from scratch.
+      - name: Install OpenSSL (vcpkg, for the MCP server)
+        shell: cmd
+        run: |
+          echo VCPKG_ROOT=%VCPKG_INSTALLATION_ROOT%>>%GITHUB_ENV%
+          "%VCPKG_INSTALLATION_ROOT%\vcpkg" install openssl:x64-windows-static
+          if errorlevel 1 exit /b 1
+
+      - name: Build fractalsql-sqlite-mcp.exe
+        shell: cmd
+        run: |
+          call mcp\scripts\windows\build.bat
+          if errorlevel 1 exit /b 1
+          dir mcp\dist\windows-mcp\fractalsql-sqlite-mcp.exe
+
+      - name: Smoke-check fractalsql-sqlite-mcp.exe
+        shell: cmd
+        run: |
+          mcp\dist\windows-mcp\fractalsql-sqlite-mcp.exe --version
+          if errorlevel 1 exit /b 1
+          mcp\dist\windows-mcp\fractalsql-sqlite-mcp.exe --list-tools
+          if errorlevel 1 exit /b 1
+
       - name: Build MSI (candle + light, ${{ matrix.arch }})
         shell: cmd
         env:
@@ -470,7 +582,7 @@ jobs:
           $load = '.load "C:/Program Files/FractalSQL/fractalsql.dll"'
           $out = & $cmd.Source ':memory:' $load "SELECT fractalsql_edition() || '|' || fractalsql_version();"
           Write-Host "result: $out"
-          if ($out -ne 'Community|2.0.5') { Write-Host "FATAL: unexpected edition|version: $out"; exit 1 }
+          if ($out -ne 'Community|2.0.6') { Write-Host "FATAL: unexpected edition|version: $out"; exit 1 }
 
           $dist = & $cmd.Source ':memory:' $load "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');"
           Write-Host "self-search distance: $dist"

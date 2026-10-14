@@ -1,0 +1,34 @@
+.git/
+dist/
+dist/packages/
+
+# Build byproducts that must never ride along in a COPY — a locally
+# make'd .o/.exe built against the HOST's toolchain/glibc looks
+# "already up to date" to make inside the container and gets linked
+# as-is instead of rebuilt, silently mixing host-glibc binaries into a
+# container targeting a different glibc (reproduced directly: this is
+# exactly what caused mcp's "undefined reference to __isoc23_*" build
+# failures before this file existed).
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+fractalsql.so
+fractalsql.dylib
+mcp/fractalsql-sqlite-mcp
+mcp/fractalsql-sqlite-mcp.exe
+
+*.gcno
+*.gcda
+*.gcov
+
+__pycache__/
+.pytest_cache/
+.coverage
+coverage_html/
+coverage_html_mcp/

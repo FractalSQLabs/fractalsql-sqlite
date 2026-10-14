@@ -5,7 +5,9 @@ Maintainer: FractalSQLabs
 Build-Depends:
  debhelper-compat (= 13),
  gcc,
+ g++,
  libsqlite3-dev,
+ libssl-dev,
  pkg-config,
  python3
 Standards-Version: 4.6.2
@@ -16,7 +18,8 @@ Architecture: amd64 arm64
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
- libc6 (>= 2.34)
+ libc6 (>= 2.34),
+ libssl3 | libssl1.1
 Recommends:
  sqlite3
 Description: Stochastic Fractal Search SQLite loadable extension (Community)
@@ -27,7 +30,13 @@ Description: Stochastic Fractal Search SQLite loadable extension (Community)
  fractal dimension analysis, and the QTL ledger — statically linked
  against the vendored pure-C FractalSQL core.
  .
- Community Edition (v2.0.5): Salimi 2014 canonical SFS with Gaussian
+ Also installs fractalsql-sqlite-mcp (/usr/local/bin), an MCP (Model
+ Context Protocol) JSON-RPC server exposing the same surface as
+ one-tool-per-function for external agent clients (Claude Desktop,
+ Cursor, etc.) over stdio or an optional Bearer-token-authenticated
+ HTTP transport.
+ .
+ Community Edition (v2.0.6): Salimi 2014 canonical SFS with Gaussian
  diffusion and greedy sniper selection; sovereign-tier features drive
  an optional reasoning plugin (fractalsql-reasoning-http).
  .

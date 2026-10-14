@@ -29,8 +29,8 @@
  *
  * doc_id resolution: the telemetry/hybrid searches (fractal_search_
  * telemetry, fractal_hybrid_clinical_search) report doc_id as the
- * row's real rowid -- SQLite's physical row locator, the analog of the
- * server edition's ctid -- so the engines that consume them
+ * row's real rowid -- SQLite's physical row locator -- so the
+ * engines that consume them
  * (route_task, recall_hybrid, recommend_diverse, patient_deterioration_
  * triage, schedule_workload) resolve ids with a direct rowid predicate
  * (da_resolve_rowid / `rowid AS __rid` joins). The trajectory-backed
@@ -351,15 +351,31 @@ static int da_require_reasoning(FsqlState *st, const char *who,
     return 0;
 }
 
-/* Returns a malloc'd response (caller frees) or NULL with err filled. */
+/* Returns a malloc'd response (caller frees) or NULL with err filled.
+ *
+ * reasoning_failed (may be NULL) is set to 1 when the call failed BUT
+ * the opt-in partial-result honesty mode applies
+ * (st->cfg.agent_partial_reasoning_fail): the failure came from the
+ * reasoning layer itself -- load or dispatch -- with the data step
+ * already computed, so the caller should emit its data half plus
+ * "reasoning_step_failed": err rather than raise (documented in
+ * docs/api-agency.md). da_require_reasoning's not-configured error
+ * still returns plain NULL: that is a setup mistake, not a transient
+ * endpoint failure, and failing loudly on it is the documented
+ * behavior. */
 static char *da_reason(FsqlState *st, const char *who, const char *prompt,
-                       const char *context_json, char *err, size_t err_cap) {
+                       const char *context_json, char *err, size_t err_cap,
+                       int *reasoning_failed) {
+    if (reasoning_failed) *reasoning_failed = 0;
     if (da_require_reasoning(st, who, err, err_cap) != 0) return NULL;
     char *resp = NULL;
     if (fsql_reasoning_generate(st, FSQL_REASONING_TIER_CHAT, prompt,
                                 (context_json && *context_json) ? context_json : "{}",
-                                &resp, err, err_cap) != 0)
+                                &resp, err, err_cap) != 0) {
+        if (reasoning_failed && st->cfg.agent_partial_reasoning_fail)
+            *reasoning_failed = 1;
         return NULL;
+    }
     return resp;
 }
 
@@ -434,7 +450,7 @@ static char *da_resolve_id(FsqlState *st, const char *table, const char *id_col,
 }
 
 /* Resolves a real rowid (the telemetry/hybrid searches' doc_id -- the
- * physical row locator, the analog of the server edition's ctid)
+ * physical row locator)
  * directly back to the named id column's value via WHERE rowid = ?1.
  * No scan-position mapping is needed: the rowid IS the locator. Same
  * contract as da_resolve_id (NULL = not found, distinguish real errors
@@ -537,8 +553,7 @@ static char *da_build_cohort(FsqlState *st, const char *table,
                              const char *filter_col, const char *filter_val,
                              char *err, size_t err_cap) {
     /* The cohort holds the rows' real rowids -- the same physical row
-     * locator the hybrid search's result doc_id reports (the analog of
-     * the server edition's ctid cohort, built with array_agg(ctid)).
+     * locator the hybrid search's result doc_id reports.
      * A rowid needs no scan-position numbering, so the old
      * row_number()-over-the-FULL-table subtlety disappears: the filter
      * can filter directly. */
@@ -665,7 +680,7 @@ static void da_audit_log_best_effort(FsqlState *st, const char *entry_type,
 static void agent_anomaly_triage_fn(sqlite3_context *ctx, int argc,
                                     sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    char err[512] = { 0 };
     if (argc < 5 || argc > 6) {
         sqlite3_result_error(ctx,
             "fractal_agent_anomaly_triage(log_table, metric_col, time_col, "
@@ -748,9 +763,25 @@ static void agent_anomaly_triage_fn(sqlite3_context *ctx, int argc,
         sqlite3_result_error_nomem(ctx);
         return;
     }
+    int rfailed = 0;
     char *rationale = da_reason(st, "fractal_agent_anomaly_triage",
-                                prompt.buf, cjson.buf, err, sizeof err);
+                                prompt.buf, cjson.buf, err, sizeof err, &rfailed);
     sb_free(&prompt); sb_free(&cjson);
+    if (!rationale && rfailed) {
+        /* Partial-result honesty:the drift data half is done; report it plus the
+         * reasoning failure instead of discarding the computation. */
+        StrBuf out; sb_init(&out);
+        sb_printf(&out, "{\"threat_score\":%.10f,\"anomaly_type\":"
+                        "\"vector_drift\",\"triage_summary\":null,"
+                        "\"reasoning_step_failed\":", threat_score);
+        sb_json_string(&out, err);
+        sb_puts(&out, "}");
+        if (sb_failed(&out)) { sqlite3_result_error_nomem(ctx); return; }
+        da_audit_log_best_effort(st, "agent_anomaly_triage", out.buf);
+        sqlite3_result_text(ctx, out.buf, (int)out.len, SQLITE_TRANSIENT);
+        sb_free(&out);
+        return;
+    }
     if (!rationale) { da_result_err(ctx, err); return; }
 
     StrBuf audit; sb_init(&audit);
@@ -780,7 +811,7 @@ static void agent_anomaly_triage_fn(sqlite3_context *ctx, int argc,
 static void agent_allocate_fn(sqlite3_context *ctx, int argc,
                               sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    char err[512] = { 0 };
     if (argc < 3 || argc > 4) {
         sqlite3_result_error(ctx,
             "fractal_agent_allocate(mu, cov, cardinality [, context]) "
@@ -833,9 +864,26 @@ static void agent_allocate_fn(sqlite3_context *ctx, int argc,
                     "risk/return: ");
     sb_puts(&prompt, opt);
     if (sb_failed(&prompt)) { sb_free(&prompt); free(opt); sqlite3_result_error_nomem(ctx); return; }
+    int rfailed = 0;
     char *rationale = da_reason(st, "fractal_agent_allocate", prompt.buf, context,
-                                err, sizeof err);
+                                err, sizeof err, &rfailed);
     sb_free(&prompt);
+    if (!rationale && rfailed) {
+        /* Partial-result honesty:the SFS allocation data half is done; report it. */
+        StrBuf out; sb_init(&out);
+        sb_puts(&out, "{\"allocation\":");
+        sb_json_raw_or_string(&out, opt);
+        sb_printf(&out, ",\"sharpe\":%.10f,\"rationale\":null,"
+                        "\"reasoning_step_failed\":", sharpe);
+        sb_json_string(&out, err);
+        sb_puts(&out, "}");
+        free(opt);
+        if (sb_failed(&out)) { sqlite3_result_error_nomem(ctx); return; }
+        da_audit_log_best_effort(st, "agent_allocate", out.buf);
+        sqlite3_result_text(ctx, out.buf, (int)out.len, SQLITE_TRANSIENT);
+        sb_free(&out);
+        return;
+    }
     if (!rationale) { free(opt); da_result_err(ctx, err); return; }
 
     StrBuf audit; sb_init(&audit);
@@ -867,7 +915,7 @@ static void agent_allocate_fn(sqlite3_context *ctx, int argc,
 static void agent_route_task_fn(sqlite3_context *ctx, int argc,
                                 sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    char err[512] = { 0 };
     if (argc < 5 || argc > 6) {
         sqlite3_result_error(ctx,
             "fractal_agent_route_task(task_emb, cap_table, cap_emb_col, "
@@ -935,8 +983,7 @@ static void agent_route_task_fn(sqlite3_context *ctx, int argc,
     }
 
     /* doc_id is the row's real rowid (the telemetry search's row
-     * locator), so resolve it with a direct rowid predicate -- the
-     * analog of the server edition's direct ctid predicate. */
+     * locator), so resolve it with a direct rowid predicate. */
     char *routed_to = da_resolve_rowid(st, cap_table, cap_id_col, doc_id, err, sizeof err);
     if (!routed_to && err[0]) { da_result_err(ctx, err); return; }
 
@@ -951,9 +998,29 @@ static void agent_route_task_fn(sqlite3_context *ctx, int argc,
         sqlite3_result_error_nomem(ctx);
         return;
     }
+    int rfailed = 0;
     char *rationale = da_reason(st, "fractal_agent_route_task", prompt.buf, cjson.buf,
-                                err, sizeof err);
+                                err, sizeof err, &rfailed);
     sb_free(&prompt); sb_free(&cjson);
+    if (!rationale && rfailed) {
+        /* Partial-result honesty:telemetry search + routing data half is done;
+         * report it plus the reasoning failure. */
+        double confidence = 1.0 / (1.0 + dist);
+        StrBuf out; sb_init(&out);
+        sb_puts(&out, "{\"routed_to\":");
+        if (routed_to) sb_json_string(&out, routed_to); else sb_puts(&out, "null");
+        sb_printf(&out, ",\"confidence\":%.10f,\"remaining_budget\":%d,"
+                        "\"rationale\":null,\"reasoning_step_failed\":",
+                 confidence, budget - cost_per_route);
+        sb_json_string(&out, err);
+        sb_puts(&out, "}");
+        free(routed_to);
+        if (sb_failed(&out)) { sqlite3_result_error_nomem(ctx); return; }
+        da_audit_log_best_effort(st, "agent_route_task", out.buf);
+        sqlite3_result_text(ctx, out.buf, (int)out.len, SQLITE_TRANSIENT);
+        sb_free(&out);
+        return;
+    }
     if (!rationale) { free(routed_to); da_result_err(ctx, err); return; }
 
     double confidence = 1.0 / (1.0 + dist);
@@ -988,7 +1055,7 @@ static void agent_route_task_fn(sqlite3_context *ctx, int argc,
 static void agent_outlier_intercept_fn(sqlite3_context *ctx, int argc,
                                        sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    char err[512] = { 0 };
     if (argc != 4 && argc != 5) {
         sqlite3_result_error(ctx,
             "fractal_agent_outlier_intercept(state_vec, history_table, emb_col, "
@@ -1059,9 +1126,9 @@ static void agent_outlier_intercept_fn(sqlite3_context *ctx, int argc,
      * finds the nearest bad state with an exact ORDER BY over the
      * extension's own fractal_vector_l2_distance function (there is
      * no operator syntax in SQLite; the function IS the operator),
-     * and the captured rowid — SQLite's physical row locator, the
-     * analog of the server edition's ctid — keeps resolving to the
-     * correct row even if the table is rewritten between the search
+     * and the captured rowid (SQLite's physical row locator) keeps
+     * resolving to the correct row even if the table is rewritten between
+     * the search
      * and any followup lookup. The telemetry call takes its
      * table/column names as string values (sb_sql_lit, NOT
      * identifiers), and the state vector is a bound parameter, so no
@@ -1148,9 +1215,27 @@ static void agent_outlier_intercept_fn(sqlite3_context *ctx, int argc,
         sqlite3_result_error_nomem(ctx);
         return;
     }
+    int rfailed = 0;
     char *reason = da_reason(st, "fractal_agent_outlier_intercept", prompt.buf, cjson.buf,
-                             err, sizeof err);
+                             err, sizeof err, &rfailed);
     sb_free(&prompt); sb_free(&cjson);
+    if (!reason && rfailed) {
+        /* Partial-result honesty:the distance computation is done; report it plus
+         * the reasoning failure. */
+        StrBuf out; sb_init(&out);
+        sb_printf(&out, "{\"intercepted\":%s,\"nearest_distance\":%.10f,"
+                        "\"threshold\":%.10f,\"metric\":",
+                 intercepted ? "true" : "false", dist, threshold);
+        sb_json_string(&out, metric);
+        sb_puts(&out, ",\"reason\":null,\"reasoning_step_failed\":");
+        sb_json_string(&out, err);
+        sb_puts(&out, "}");
+        if (sb_failed(&out)) { sqlite3_result_error_nomem(ctx); return; }
+        da_audit_log_best_effort(st, "agent_outlier_intercept", out.buf);
+        sqlite3_result_text(ctx, out.buf, (int)out.len, SQLITE_TRANSIENT);
+        sb_free(&out);
+        return;
+    }
     if (!reason) { da_result_err(ctx, err); return; }
 
     StrBuf audit; sb_init(&audit);
@@ -1186,7 +1271,7 @@ static void agent_outlier_intercept_fn(sqlite3_context *ctx, int argc,
 static void agent_recall_hybrid_fn(sqlite3_context *ctx, int argc,
                                    sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    char err[512] = { 0 };
     if (argc < 3 || argc > 8) {
         sqlite3_result_error(ctx,
             "fractal_agent_recall_hybrid(mem_table, vec_col, query_vec "
@@ -1296,7 +1381,7 @@ static void agent_recall_hybrid_fn(sqlite3_context *ctx, int argc,
 static void agent_recommend_diverse_fn(sqlite3_context *ctx, int argc,
                                        sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    char err[512] = { 0 };
     if (argc < 3 || argc > 5) {
         sqlite3_result_error(ctx,
             "fractal_agent_recommend_diverse(catalog_table, emb_col, query_vec "
@@ -1375,7 +1460,7 @@ static void agent_recommend_diverse_fn(sqlite3_context *ctx, int argc,
 static void agent_data_analyst_fn(sqlite3_context *ctx, int argc,
                                   sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    char err[512] = { 0 };
     if (argc < 1 || argc > 4) {
         sqlite3_result_error(ctx,
             "fractal_agent_data_analyst(question [, table_names, max_retries, "
@@ -1443,9 +1528,31 @@ static void agent_data_analyst_fn(sqlite3_context *ctx, int argc,
         sqlite3_result_error_nomem(ctx);
         return;
     }
+    int rfailed = 0;
     char *analysis = da_reason(st, "fractal_agent_data_analyst", prompt.buf, context,
-                               err, sizeof err);
+                               err, sizeof err, &rfailed);
     sb_free(&prompt);
+    if (!analysis && rfailed) {
+        /* Partial-result honesty:the sql_agent execution data half is done; report
+         * its generated_sql / result_json / execution_status plus the
+         * reasoning failure. */
+        StrBuf out; sb_init(&out);
+        sb_puts(&out, "{\"generated_sql\":");
+        if (generated_sql) sb_json_raw_or_string(&out, generated_sql); else sb_puts(&out, "null");
+        sb_puts(&out, ",\"execution_status\":");
+        if (execution_status) sb_json_raw_or_string(&out, execution_status); else sb_puts(&out, "null");
+        sb_puts(&out, ",\"result_json\":");
+        if (result_json) sb_json_raw_or_string(&out, result_json); else sb_puts(&out, "null");
+        sb_puts(&out, ",\"analysis\":null,\"reasoning_step_failed\":");
+        sb_json_string(&out, err);
+        sb_puts(&out, "}");
+        free(generated_sql); free(result_json); free(execution_status);
+        if (sb_failed(&out)) { sqlite3_result_error_nomem(ctx); return; }
+        da_audit_log_best_effort(st, "agent_data_analyst", out.buf);
+        sqlite3_result_text(ctx, out.buf, (int)out.len, SQLITE_TRANSIENT);
+        sb_free(&out);
+        return;
+    }
     if (!analysis) {
         free(generated_sql); free(result_json); free(execution_status);
         da_result_err(ctx, err); return;
@@ -1490,7 +1597,7 @@ static void agent_data_analyst_fn(sqlite3_context *ctx, int argc,
 static void agent_patient_deterioration_triage_fn(sqlite3_context *ctx, int argc,
                                                    sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    char err[512] = { 0 };
     if (argc < 5 || argc > 8) {
         sqlite3_result_error(ctx,
             "fractal_agent_patient_deterioration_triage(patient_table, vec_col, "
@@ -1636,9 +1743,30 @@ static void agent_patient_deterioration_triage_fn(sqlite3_context *ctx, int argc
         sqlite3_result_error_nomem(ctx);
         return;
     }
+    int rfailed = 0;
     char *rationale = da_reason(st, "fractal_agent_patient_deterioration_triage",
-                                prompt.buf, cjson.buf, err, sizeof err);
+                                prompt.buf, cjson.buf, err, sizeof err, &rfailed);
     sb_free(&prompt); sb_free(&cjson);
+    if (!rationale && rfailed) {
+        /* Partial-result honesty:cohort scan + trajectory/drift data half is done;
+         * report it plus the reasoning failure. */
+        StrBuf out; sb_init(&out);
+        sb_puts(&out, "{\"nearest_cohort_id\":");
+        if (resolved_id) sb_json_id_value(&out, resolved_id); else sb_puts(&out, "null");
+        sb_printf(&out, ",\"cohort_distance\":%.10f,\"drift_distance\":%.10f,"
+                  "\"rationale\":null,\"reasoning_step_failed\":",
+                  cohort_dist, traj_dist);
+        sb_json_string(&out, err);
+        sb_puts(&out, ",\"cohort_matches\":");
+        sb_json_raw_or_string(&out, matches);
+        sb_puts(&out, "}");
+        free(matches); free(resolved_id);
+        if (sb_failed(&out)) { sqlite3_result_error_nomem(ctx); return; }
+        da_audit_log_best_effort(st, "agent_patient_deterioration_triage", out.buf);
+        sqlite3_result_text(ctx, out.buf, (int)out.len, SQLITE_TRANSIENT);
+        sb_free(&out);
+        return;
+    }
     if (!rationale) { free(matches); free(resolved_id); da_result_err(ctx, err); return; }
 
     StrBuf audit; sb_init(&audit);
@@ -1679,7 +1807,7 @@ static void agent_patient_deterioration_triage_fn(sqlite3_context *ctx, int argc
 static void agent_feedback_audit_fn(sqlite3_context *ctx, int argc,
                                     sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    char err[512] = { 0 };
     if (argc < 5 || argc > 7) {
         sqlite3_result_error(ctx,
             "fractal_agent_feedback_audit(catalog_table, emb_col, query_vec, "
@@ -1788,9 +1916,8 @@ static void agent_feedback_audit_fn(sqlite3_context *ctx, int argc,
     int64_t target_doc = -1; double target_dist = 0.0;
     /* The audit target feeds fractal_isolate_background, which expects
      * the result_handle convention (the 0-indexed scan position), NOT
-     * the rowid doc_id -- so read scan_pos here (pg parity: the
-     * server edition's feedback_audit reads scan_pos after its ctid
-     * remap for exactly the same reason). */
+     * the rowid doc_id -- so scan_pos is the field this nearest-1 call
+     * must read. */
     int rc = da_nearest1(st, tsql.buf, bind_one_text, &bind, "scan_pos",
                          &target_doc, &target_dist,
                          err, sizeof err);
@@ -1846,7 +1973,7 @@ static void agent_feedback_audit_fn(sqlite3_context *ctx, int argc,
 static void agent_schedule_workload_fn(sqlite3_context *ctx, int argc,
                                        sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    char err[512] = { 0 };
     if (argc < 4 || argc > 8) {
         sqlite3_result_error(ctx,
             "fractal_agent_schedule_workload(task_vec, node_table, node_emb_col, "
@@ -1927,8 +2054,7 @@ static void agent_schedule_workload_fn(sqlite3_context *ctx, int argc,
     }
 
     /* doc_id is the row's real rowid (the telemetry search's row
-     * locator), so resolve it with a direct rowid predicate -- the
-     * analog of the server edition's direct ctid predicate. */
+     * locator), so resolve it with a direct rowid predicate. */
     char *assigned = da_resolve_rowid(st, node_table, node_id_col, doc_id, err, sizeof err);
     if (!assigned && err[0]) { da_result_err(ctx, err); return; }
 
@@ -1938,9 +2064,27 @@ static void agent_schedule_workload_fn(sqlite3_context *ctx, int argc,
              "fractal_search refinement). Justify the placement in one sentence.",
              assigned ? assigned : "?", dist);
     if (sb_failed(&prompt)) { sb_free(&prompt); free(assigned); sqlite3_result_error_nomem(ctx); return; }
+    int rfailed = 0;
     char *rationale = da_reason(st, "fractal_agent_schedule_workload", prompt.buf, context,
-                                err, sizeof err);
+                                err, sizeof err, &rfailed);
     sb_free(&prompt);
+    if (!rationale && rfailed) {
+        /* Partial-result honesty:node-scan + search data half is done; report it. */
+        double confidence = 1.0 / (1.0 + dist);
+        StrBuf out; sb_init(&out);
+        sb_puts(&out, "{\"assigned_node\":");
+        if (assigned) sb_json_string(&out, assigned); else sb_puts(&out, "null");
+        sb_printf(&out, ",\"confidence\":%.10f,\"rationale\":null,"
+                        "\"reasoning_step_failed\":", confidence);
+        sb_json_string(&out, err);
+        sb_puts(&out, "}");
+        free(assigned);
+        if (sb_failed(&out)) { sqlite3_result_error_nomem(ctx); return; }
+        da_audit_log_best_effort(st, "agent_schedule_workload", out.buf);
+        sqlite3_result_text(ctx, out.buf, (int)out.len, SQLITE_TRANSIENT);
+        sb_free(&out);
+        return;
+    }
     if (!rationale) { free(assigned); da_result_err(ctx, err); return; }
 
     double confidence = 1.0 / (1.0 + dist);
@@ -1976,7 +2120,7 @@ static void agent_schedule_workload_fn(sqlite3_context *ctx, int argc,
 static void agent_rebalance_sibling_fn(sqlite3_context *ctx, int argc,
                                        sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    char err[512] = { 0 };
     if (argc < 6 || argc > 10) {
         sqlite3_result_error(ctx,
             "fractal_agent_rebalance_sibling(mu, cov, cardinality, alloc_table, "
@@ -2098,9 +2242,29 @@ static void agent_rebalance_sibling_fn(sqlite3_context *ctx, int argc,
         sqlite3_result_error_nomem(ctx);
         return;
     }
+    int rfailed = 0;
     char *rationale = da_reason(st, "fractal_agent_rebalance_sibling", prompt.buf, context,
-                                err, sizeof err);
+                                err, sizeof err, &rfailed);
     sb_free(&prompt);
+    if (!rationale && rfailed) {
+        /* Partial-result honesty:SFS rebalance + nearest-sibling search data half is
+         * done; report it plus the reasoning failure. */
+        StrBuf out; sb_init(&out);
+        sb_printf(&out, "{\"sharpe\":%.10f,\"weights\":", sharpe);
+        sb_json_raw_or_string(&out, weights_vec_json);
+        sb_puts(&out, ",\"nearest_alloc_id\":");
+        if (resolved_id) sb_json_id_value(&out, resolved_id); else sb_puts(&out, "null");
+        sb_printf(&out, ",\"nearest_distance\":%.10f,\"rationale\":null,"
+                        "\"reasoning_step_failed\":", nearest_dist);
+        sb_json_string(&out, err);
+        sb_puts(&out, "}");
+        free(opt); free(weights_vec_json); free(resolved_id);
+        if (sb_failed(&out)) { sqlite3_result_error_nomem(ctx); return; }
+        da_audit_log_best_effort(st, "agent_rebalance_sibling", out.buf);
+        sqlite3_result_text(ctx, out.buf, (int)out.len, SQLITE_TRANSIENT);
+        sb_free(&out);
+        return;
+    }
     if (!rationale) { free(opt); free(weights_vec_json); free(resolved_id); da_result_err(ctx, err); return; }
 
     StrBuf audit; sb_init(&audit);
@@ -2137,7 +2301,7 @@ static void agent_rebalance_sibling_fn(sqlite3_context *ctx, int argc,
 static void agent_detour_classify_fn(sqlite3_context *ctx, int argc,
                                      sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    char err[512] = { 0 };
     if (argc < 5 || argc > 8) {
         sqlite3_result_error(ctx,
             "fractal_agent_detour_classify(vehicle_table, emb_col, baseline_vec, "
@@ -2242,9 +2406,27 @@ static void agent_detour_classify_fn(sqlite3_context *ctx, int argc,
         sqlite3_result_error_nomem(ctx);
         return;
     }
+    int rfailed = 0;
     char *rationale = da_reason(st, "fractal_agent_detour_classify", prompt.buf, cjson.buf,
-                                err, sizeof err);
+                                err, sizeof err, &rfailed);
     sb_free(&prompt); sb_free(&cjson);
+    if (!rationale && rfailed) {
+        /* Partial-result honesty:trajectory search + box-count data half is done;
+         * report it plus the reasoning failure. */
+        StrBuf out; sb_init(&out);
+        sb_puts(&out, "{\"nearest_fleet_id\":");
+        if (resolved_id) sb_json_id_value(&out, resolved_id); else sb_puts(&out, "null");
+        sb_printf(&out, ",\"trajectory_distance\":%.10f,\"trace_complexity\":%.10f,"
+                  "\"rationale\":null,\"reasoning_step_failed\":", nearest_dist, bc);
+        sb_json_string(&out, err);
+        sb_puts(&out, "}");
+        free(resolved_id);
+        if (sb_failed(&out)) { sqlite3_result_error_nomem(ctx); return; }
+        da_audit_log_best_effort(st, "agent_detour_classify", out.buf);
+        sqlite3_result_text(ctx, out.buf, (int)out.len, SQLITE_TRANSIENT);
+        sb_free(&out);
+        return;
+    }
     if (!rationale) { free(resolved_id); da_result_err(ctx, err); return; }
 
     StrBuf audit; sb_init(&audit);
@@ -2281,7 +2463,7 @@ static void agent_detour_classify_fn(sqlite3_context *ctx, int argc,
 static void agent_track_anomaly_fn(sqlite3_context *ctx, int argc,
                                    sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    char err[512] = { 0 };
     if (argc < 5 || argc > 7) {
         sqlite3_result_error(ctx,
             "fractal_agent_track_anomaly(track_table, emb_col, baseline_vec, "
@@ -2383,9 +2565,27 @@ static void agent_track_anomaly_fn(sqlite3_context *ctx, int argc,
         sqlite3_result_error_nomem(ctx);
         return;
     }
+    int rfailed = 0;
     char *rationale = da_reason(st, "fractal_agent_track_anomaly", prompt.buf, cjson.buf,
-                                err, sizeof err);
+                                err, sizeof err, &rfailed);
     sb_free(&prompt); sb_free(&cjson);
+    if (!rationale && rfailed) {
+        /* Partial-result honesty:trajectory search + heading-DFA data half is done;
+         * report it plus the reasoning failure. */
+        StrBuf out; sb_init(&out);
+        sb_puts(&out, "{\"nearest_fleet_id\":");
+        if (resolved_id) sb_json_id_value(&out, resolved_id); else sb_puts(&out, "null");
+        sb_printf(&out, ",\"trajectory_distance\":%.10f,\"dfa_exponent\":%.10f,"
+                  "\"rationale\":null,\"reasoning_step_failed\":", nearest_dist, dfa);
+        sb_json_string(&out, err);
+        sb_puts(&out, "}");
+        free(resolved_id);
+        if (sb_failed(&out)) { sqlite3_result_error_nomem(ctx); return; }
+        da_audit_log_best_effort(st, "agent_track_anomaly", out.buf);
+        sqlite3_result_text(ctx, out.buf, (int)out.len, SQLITE_TRANSIENT);
+        sb_free(&out);
+        return;
+    }
     if (!rationale) { free(resolved_id); da_result_err(ctx, err); return; }
 
     StrBuf audit; sb_init(&audit);
@@ -2422,7 +2622,7 @@ static void agent_track_anomaly_fn(sqlite3_context *ctx, int argc,
 static void agent_network_coverage_alert_fn(sqlite3_context *ctx, int argc,
                                             sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    char err[512] = { 0 };
     if (argc < 2 || argc > 6) {
         sqlite3_result_error(ctx,
             "fractal_agent_network_coverage_alert(point_cloud, drift_series "
@@ -2489,9 +2689,25 @@ static void agent_network_coverage_alert_fn(sqlite3_context *ctx, int argc,
              "alert in one sentence.",
              md, lac, dv, dd ? "true" : "false", drift_threshold);
     if (sb_failed(&prompt)) { sb_free(&prompt); sqlite3_result_error_nomem(ctx); return; }
+    int rfailed = 0;
     char *rationale = da_reason(st, "fractal_agent_network_coverage_alert", prompt.buf,
-                                context, err, sizeof err);
+                                context, err, sizeof err, &rfailed);
     sb_free(&prompt);
+    if (!rationale && rfailed) {
+        /* Partial-result honesty:morphology + drift data half is done; report it. */
+        StrBuf out; sb_init(&out);
+        sb_printf(&out, "{\"morph_dimension\":%.10f,\"lacunarity\":%.10f,"
+                  "\"drift_detected\":%s,\"rationale\":null,"
+                  "\"reasoning_step_failed\":",
+                  md, lac, dd ? "true" : "false");
+        sb_json_string(&out, err);
+        sb_puts(&out, "}");
+        if (sb_failed(&out)) { sqlite3_result_error_nomem(ctx); return; }
+        da_audit_log_best_effort(st, "agent_network_coverage_alert", out.buf);
+        sqlite3_result_text(ctx, out.buf, (int)out.len, SQLITE_TRANSIENT);
+        sb_free(&out);
+        return;
+    }
     if (!rationale) { da_result_err(ctx, err); return; }
 
     StrBuf audit; sb_init(&audit);
@@ -2525,7 +2741,7 @@ static void agent_network_coverage_alert_fn(sqlite3_context *ctx, int argc,
 static void agent_regime_triage_fn(sqlite3_context *ctx, int argc,
                                    sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    char err[512] = { 0 };
     if (argc < 1 || argc > 4) {
         sqlite3_result_error(ctx,
             "fractal_agent_regime_triage(series [, win, drift_threshold, "
@@ -2576,9 +2792,26 @@ static void agent_regime_triage_fn(sqlite3_context *ctx, int argc,
              "Triage the regime change in one sentence.",
              dfa, dv, dd ? "true" : "false", ra, ba);
     if (sb_failed(&prompt)) { sb_free(&prompt); sqlite3_result_error_nomem(ctx); return; }
+    int rfailed = 0;
     char *rationale = da_reason(st, "fractal_agent_regime_triage", prompt.buf, context,
-                                err, sizeof err);
+                                err, sizeof err, &rfailed);
     sb_free(&prompt);
+    if (!rationale && rfailed) {
+        /* Partial-result honesty:DFA + drift data half is done; report it plus the
+         * reasoning failure. */
+        StrBuf out; sb_init(&out);
+        sb_printf(&out, "{\"dfa_exponent\":%.10f,\"drift_detected\":%s,"
+                  "\"recent_alpha\":%.10f,\"baseline_alpha\":%.10f,"
+                  "\"rationale\":null,\"reasoning_step_failed\":",
+                  dfa, dd ? "true" : "false", ra, ba);
+        sb_json_string(&out, err);
+        sb_puts(&out, "}");
+        if (sb_failed(&out)) { sqlite3_result_error_nomem(ctx); return; }
+        da_audit_log_best_effort(st, "agent_regime_triage", out.buf);
+        sqlite3_result_text(ctx, out.buf, (int)out.len, SQLITE_TRANSIENT);
+        sb_free(&out);
+        return;
+    }
     if (!rationale) { da_result_err(ctx, err); return; }
 
     StrBuf audit; sb_init(&audit);
@@ -2616,7 +2849,7 @@ static void agent_regime_triage_fn(sqlite3_context *ctx, int argc,
 static void agent_diverse_portfolios_fn(sqlite3_context *ctx, int argc,
                                         sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    char err[512] = { 0 };
     if (argc < 3 || argc > 9) {
         sqlite3_result_error(ctx,
             "fractal_agent_diverse_portfolios(mu, cov, cardinality "
@@ -2714,9 +2947,32 @@ static void agent_diverse_portfolios_fn(sqlite3_context *ctx, int argc,
     }
     sb_puts(&prompt, opt);
     if (sb_failed(&prompt)) { sb_free(&prompt); free(opt); sqlite3_result_error_nomem(ctx); return; }
+    int rfailed = 0;
     char *rationale = da_reason(st, "fractal_agent_diverse_portfolios", prompt.buf, context,
-                                err, sizeof err);
+                                err, sizeof err, &rfailed);
     sb_free(&prompt);
+    if (!rationale && rfailed) {
+        /* Partial-result honesty:the multimodal-optimizer data half is done. The
+         * success shape is a JSON array of candidate rows, so the
+         * honest partial shape is the same data wrapped as ONE doc
+         * carrying both the candidates and the reasoning failure flag
+         * (a bare array cannot carry the failure field). */
+        StrBuf out; sb_init(&out);
+        sb_puts(&out, "{\"candidates\":");
+        sb_json_raw_or_string(&out, opt);
+        sb_puts(&out, ",\"objective_mode\":");
+        sb_json_string(&out, objective_mode);
+        sb_printf(&out, ",\"n_found\":%d,\"rationale\":null,"
+                        "\"reasoning_step_failed\":", n_found);
+        sb_json_string(&out, err);
+        sb_puts(&out, "}");
+        free(opt);
+        if (sb_failed(&out)) { sqlite3_result_error_nomem(ctx); return; }
+        da_audit_log_best_effort(st, "agent_diverse_portfolios", out.buf);
+        sqlite3_result_text(ctx, out.buf, (int)out.len, SQLITE_TRANSIENT);
+        sb_free(&out);
+        return;
+    }
     if (!rationale) { free(opt); da_result_err(ctx, err); return; }
 
     StrBuf audit; sb_init(&audit);
