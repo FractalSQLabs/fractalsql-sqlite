@@ -22,6 +22,7 @@ test/__pycache__/
 *.gcda
 *.gcov
 coverage_html/
+coverage_html_mcp/
 
 !include/**/*.a
 !include/**/*.so
@@ -31,9 +32,22 @@ coverage_html/
 
 dist/
 
+# mcp build outputs (the POSIX Makefile links in place on Linux/macOS;
+# the Windows build lands in dist/windows-mcp)
+mcp/fractalsql-sqlite-mcp
+mcp/fractalsql-sqlite-mcp.exe
+
 # Windows DLL build's amalgamation-header download (build.bat's
 # SQLITE_DIR default; downloaded fresh by the CI wizard job each run).
 deps/
+
+# gate test logs
+/gate*.log
+
+# make/gcc auto-generated dependency files (mcp build)
+mcp/*.d
+mcp/src/*.d
+mcp/src/adapters/*.d
 
 bench/*.db
 

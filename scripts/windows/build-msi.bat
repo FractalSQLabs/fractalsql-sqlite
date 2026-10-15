@@ -9,6 +9,9 @@ REM   * WiX Toolset v3.x installed (candle.exe / light.exe on PATH).
 REM     Download from https://github.com/wixtoolset/wix3/releases
 REM   * dist\windows\fractalsql.dll already built via
 REM     scripts\windows\build.bat.
+REM   * mcp\dist\windows-mcp\fractalsql-sqlite-mcp.exe already built via
+REM     mcp\scripts\windows\build.bat (needs vcpkg's
+REM     openssl:x64-windows-static; see that script's own header).
 REM   * A README.txt in dist\windows\ (scripts/windows/README.txt
 REM     template is shipped in-repo; copy and customize as needed).
 
@@ -19,6 +22,11 @@ pushd %REPO_ROOT%
 
 if not exist "dist\windows\fractalsql.dll" (
     echo ==^> ERROR: dist\windows\fractalsql.dll missing — run build.bat first
+    popd
+    exit /b 1
+)
+if not exist "mcp\dist\windows-mcp\fractalsql-sqlite-mcp.exe" (
+    echo ==^> ERROR: mcp\dist\windows-mcp\fractalsql-sqlite-mcp.exe missing — run mcp\scripts\windows\build.bat first
     popd
     exit /b 1
 )
@@ -60,6 +68,12 @@ if not exist "dist\windows\README.txt" (
       echo.
       echo One arch variant ships on each release:
       echo     FractalSQL-SQLite-%MSI_VERSION%-x64.msi    64-bit Intel/AMD
+      echo.
+      echo Also installs the MCP ^(Model Context Protocol^) server,
+      echo mcp\fractalsql-sqlite-mcp.exe under the install folder — an
+      echo MCP JSON-RPC server exposing one tool per FractalSQL
+      echo function for agent clients ^(Claude Desktop, Cursor, etc.^).
+      echo See mcp\README.md for usage.
     ) > dist\windows\README.txt
 )
 if not exist "obj" mkdir obj

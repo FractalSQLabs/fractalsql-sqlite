@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: 2026 Daniel Gardiner d/b/a FractalSQLabs
  *
- * Stock SQLite cannot register new PRAGMAs, so the 17 configuration
+ * Stock SQLite cannot register new PRAGMAs, so the 18 configuration
  * keys become per-connection SQL state, validated against fixed
  * defaults/ranges:
  *
@@ -26,6 +26,7 @@
  *   enterprise_lib                       path*
  *   enterprise_ledger_key                str*
  *   enterprise_require_signature         bool
+ *   agent_partial_reasoning_fail         bool
  *
  *   * = path-type keys get extra validation at set time: they must be
  *   absolute with no traversal segments (mirroring fsql_load_reasoning's
@@ -94,6 +95,7 @@ static const CfgDef CFG_TABLE[] = {
     { "enterprise_lib",          CFG_PATH, NULL, NULL, 0, 0, NULL, NULL },
     { "enterprise_ledger_key",   CFG_STR,  NULL, NULL, 0, 0, NULL, NULL },
     { "enterprise_require_signature", CFG_BOOL, NULL, NULL, 0, 0, "0", NULL },
+    { "agent_partial_reasoning_fail", CFG_BOOL, NULL, NULL, 0, 0, "0", NULL },
 };
 #define CFG_N (sizeof(CFG_TABLE) / sizeof(CFG_TABLE[0]))
 
@@ -141,6 +143,8 @@ static int *cfg_int_slot(FsqlState *st, const CfgDef *d) {
         return &st->cfg.t2s_use_review;
     if (strcmp(d->key, "enterprise_require_signature") == 0)
         return &st->cfg.enterprise_require_signature;
+    if (strcmp(d->key, "agent_partial_reasoning_fail") == 0)
+        return &st->cfg.agent_partial_reasoning_fail;
     return NULL;
 }
 
@@ -205,7 +209,7 @@ int fsql_config_set(FsqlState *st, const char *name,
     case CFG_STR:
     case CFG_PATH: {
         if (!value || !*value) {
-            /* Empty string resets to unset, matching GUC ''=default. */
+            /* Empty string resets to unset. */
             char **slot = cfg_str_slot(st, d);
             free(*slot); *slot = NULL;
             return 0;

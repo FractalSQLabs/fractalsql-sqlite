@@ -81,6 +81,20 @@ SELECT fractalsql_set('http_model',           'gpt-oss:20b');
 ```
 *Note: Run `ollama pull gpt-oss:20b` or `ollama pull gemma4:12b` or `ollama pull phi4:14b` before connecting.*
 
+## Docker Model Runner (DMR)
+On Docker Desktop, Docker Model Runner serves local models through an
+OpenAI-compatible endpoint with no separate container to run. Enable
+host access once (`docker desktop enable model-runner --tcp 12434`,
+or Settings → Beta features in the Docker Desktop GUI):
+
+```sql
+-- Docker Model Runner (host-side access)
+SELECT fractalsql_set('http_url',             'http://127.0.0.1:12434/engines/v1/chat/completions');
+SELECT fractalsql_set('http_allow_plaintext', 'on');
+SELECT fractalsql_set('http_model',           'ai/gpt-oss:20b');   -- or 'ai/gemma4:12b' or 'ai/phi4'
+```
+*Note: Run `docker model pull ai/gpt-oss:20b` before connecting (or `ai/gemma4:12b` / `ai/phi4` for the alternatives); `docker model list` shows what's already pulled. From inside another container on Docker Desktop, use `http://model-runner.docker.internal/engines/v1/chat/completions` instead (no port, no host-TCP step needed).*
+
 ## OpenAI-Compatible (OpenAI, Together AI, Fireworks, vLLM)
 ```sql
 SELECT fractalsql_set('http_url',   'https://api.openai.com/v1/chat/completions');

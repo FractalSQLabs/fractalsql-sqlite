@@ -1,11 +1,11 @@
-/* src/fsql_vector.c — fractal_vector BLOB convention + vector math.
+/* src/fsql_vector.c: fractal_vector BLOB convention + vector math.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: 2026 Daniel Gardiner d/b/a FractalSQLabs
  *
  * See fsql_vector.h for the BLOB layout and the TEXT-coercion rule.
  * All arithmetic delegates to the vendored core's fsql_vector_* module
- * (available in every tier — pure C99 math, no VFS dependency).
+ * (available in every tier: pure C99 math, no VFS dependency).
  * Degenerate zero-norm inputs return distance=1.0 / similarity=0.0
  * (the core's documented convention) rather than NaN.
  */
@@ -137,7 +137,7 @@ static int decode_pair(sqlite3_value *a, sqlite3_value *b,
  * SQL functions
  * ------------------------------------------------------------------ */
 
-/* fractal_vector(dim) — zero vector with canonical header. */
+/* fractal_vector(dim): zero vector with canonical header. */
 static void fv_construct_fn(sqlite3_context *ctx, int argc,
                             sqlite3_value **argv) {
     (void)argc;
@@ -515,7 +515,7 @@ static void fv_hamming_distance_fn(sqlite3_context *ctx, int argc,
  * Registration
  * ------------------------------------------------------------------ */
 
-/* Pure math — DETERMINISTIC | INNOCUOUS everywhere. user_data carries
+/* Pure math: DETERMINISTIC | INNOCUOUS everywhere. user_data carries
  * a small int tag for the shared-binary dispatchers. */
 int fsql_vector_register(sqlite3 *db, FsqlState *st) {
     (void)st;

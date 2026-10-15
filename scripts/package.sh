@@ -10,6 +10,19 @@
 #          plugin is shipped alongside when present (sovereign-tier
 #          reasoning/embedding support).
 #
+#          The MCP server (dist/${arch}/fractalsql-sqlite-mcp) is
+#          bundled into the same .deb/.rpm/.zip, installed to
+#          /usr/local/bin. It's built by ../build.sh/docker/Dockerfile
+#          INSIDE each profile's own base image (rockylinux:9 /
+#          manylinux_2_28 / alpine), the same way fractalsql.so is —
+#          not by this script on the packaging host. That's not a
+#          style choice: an mcp built on the packaging host's own
+#          glibc silently carries the WRONG floor for whichever
+#          profile's package it ends up in (reproduced directly: a
+#          host-built binary in the "legacy" package requires a newer
+#          glibc than the legacy profile exists to support, and would
+#          fail to even start on its actual target).
+#
 #   Windows: on a Linux / macOS host the MSI step is skipped with a
 #          pointer to scripts/windows/build.bat + build-msi.bat. The
 #          MSI is built by the CI's Windows matrix entry, not here.
@@ -72,6 +85,20 @@ HAVE_PLUGIN=0
 if [[ -f "${PLUGIN_SRC}" ]]; then HAVE_PLUGIN=1; fi
 
 # ---------------------------------------------------------------------
+# MCP server — produced by ../build.sh's Docker build (see header
+# comment above), per (arch, profile), same artifact directory as the
+# .so. Not rebuilt here; just staged if present, consistent with how
+# the reasoning plugin above is "shipped when present, absent means an
+# older vendored drop" rather than a hard requirement.
+MCP_BIN="dist/${PKG_ARCH}/fractalsql-sqlite-mcp${BIN_SUFFIX}"
+HAVE_MCP=0
+if [[ -f "${MCP_BIN}" ]]; then
+    HAVE_MCP=1
+else
+    echo "warning: ${MCP_BIN} not found — packaging without the MCP server (run ./build.sh ${PKG_ARCH} --profile=${PROFILE} with the current docker/Dockerfile to include it)" >&2
+fi
+
+# ---------------------------------------------------------------------
 # Zip (embedders, Vercel edge, Turso, Lambda layers, mobile).
 # ---------------------------------------------------------------------
 ZIP_OUT="${DIST_DIR}/fractalsql-sqlite${PKG_SUFFIX}-linux-${PKG_ARCH}.zip"
@@ -85,6 +112,13 @@ install -Dm0644 sql/load_extension.sql   "${STAGE_ZIP}/load_extension.sql"
 install -Dm0644 sql/fractalsql--1.0.sql  "${STAGE_ZIP}/fractalsql--1.0.sql"
 install -Dm0644 LICENSE                  "${STAGE_ZIP}/LICENSE"
 install -Dm0644 THIRD-PARTY-NOTICES.md   "${STAGE_ZIP}/LICENSE-THIRD-PARTY"
+if [[ "${HAVE_MCP}" = "1" ]]; then
+install -Dm0755 "${MCP_BIN}"                          "${STAGE_ZIP}/mcp/fractalsql-sqlite-mcp"
+install -Dm0644 mcp/README.md                         "${STAGE_ZIP}/mcp/README.md"
+install -Dm0644 mcp/.mcp-schema-lock                  "${STAGE_ZIP}/mcp/.mcp-schema-lock"
+install -Dm0644 mcp/.mcp-safety-annotations-lock      "${STAGE_ZIP}/mcp/.mcp-safety-annotations-lock"
+install -Dm0644 mcp/manifest.json                     "${STAGE_ZIP}/mcp/manifest.json"
+fi
 cat > "${STAGE_ZIP}/README.txt" <<EOF
 fractalsql-sqlite${PKG_SUFFIX} ${VERSION} Community (linux-${PKG_ARCH}, ${PROFILE} profile)
 
@@ -137,14 +171,29 @@ DEB_ARGS=(
 if [[ "${HAVE_PLUGIN}" = "1" ]]; then
     DEB_ARGS+=(./${PLUGIN_SRC}=/usr/local/lib/sqlite3/fractalsql-reasoning-http.so)
 fi
+DEB_DEPENDS=(
+    --depends "libc6 (>= ${GLIBC_DEP})"
+    --depends "libcurl4 | libcurl4t64"
+)
+if [[ "${HAVE_MCP}" = "1" ]]; then
+    DEB_ARGS+=(
+        ./${MCP_BIN}=/usr/local/bin/fractalsql-sqlite-mcp
+        ./mcp/README.md=/usr/share/doc/${DEB_NAME}/mcp/README.md
+        ./mcp/.mcp-schema-lock=/usr/share/doc/${DEB_NAME}/mcp/.mcp-schema-lock
+        ./mcp/.mcp-safety-annotations-lock=/usr/share/doc/${DEB_NAME}/mcp/.mcp-safety-annotations-lock
+        ./mcp/manifest.json=/usr/share/doc/${DEB_NAME}/mcp/manifest.json
+    )
+    # OR-dependency across the Debian/Ubuntu OpenSSL 3 SONAME split,
+    # same pattern as the libcurl4/libcurl4t64 line above.
+    DEB_DEPENDS+=(--depends "libssl3 | libssl1.1")
+fi
 fpm -s dir -t deb \
     -n "${DEB_NAME}" \
     -v "${VERSION}" \
     -a "${PKG_ARCH}" \
     --iteration "${ITERATION}" \
     --description "FractalSQL SQLite extension, Community Edition" \
-    --depends "libc6 (>= ${GLIBC_DEP})" \
-    --depends "libcurl4 | libcurl4t64" \
+    "${DEB_DEPENDS[@]}" \
     --after-install packaging/debian/postinst \
     -p "${DEB_OUT}" \
     "${DEB_ARGS[@]}"
@@ -175,19 +224,36 @@ install -Dm0644 LICENSE \
 install -Dm0644 THIRD-PARTY-NOTICES.md \
     "${STAGE_PKG}/usr/share/doc/${RPM_NAME}/LICENSE-THIRD-PARTY"
 
+if [[ "${HAVE_MCP}" = "1" ]]; then
+install -Dm0755 "${MCP_BIN}" \
+    "${STAGE_PKG}/usr/local/bin/fractalsql-sqlite-mcp"
+install -Dm0644 mcp/README.md \
+    "${STAGE_PKG}/usr/share/doc/${RPM_NAME}/mcp/README.md"
+install -Dm0644 mcp/.mcp-schema-lock \
+    "${STAGE_PKG}/usr/share/doc/${RPM_NAME}/mcp/.mcp-schema-lock"
+install -Dm0644 mcp/.mcp-safety-annotations-lock \
+    "${STAGE_PKG}/usr/share/doc/${RPM_NAME}/mcp/.mcp-safety-annotations-lock"
+install -Dm0644 mcp/manifest.json \
+    "${STAGE_PKG}/usr/share/doc/${RPM_NAME}/mcp/manifest.json"
+fi
+
 if [[ "${PROFILE}" != "musl" ]]; then
 # The reasoning plugin dynamically links libcurl — declare it so a
 # plain `dnf/apt install` of the package actually yields a loadable
 # plugin. (musl ships no loadable plugin, so the .apk below keeps the
-# sqlite-only depends.)
+# sqlite-only depends.) openssl-libs backs the bundled MCP server's
+# schema-lock SHA-256 + Bearer-token HTTP transport, when present.
+RPM_DEPENDS=(--depends "sqlite" --depends "libcurl")
+if [[ "${HAVE_MCP}" = "1" ]]; then
+    RPM_DEPENDS+=(--depends "openssl-libs")
+fi
 fpm -s dir -t rpm \
     -n "${RPM_NAME}" \
     -v "${VERSION}" \
     -a "${RPM_ARCH}" \
     --iteration "${ITERATION}" \
     --description "FractalSQL SQLite extension, Community Edition" \
-    --depends "sqlite" \
-    --depends "libcurl" \
+    "${RPM_DEPENDS[@]}" \
     --directories /usr/local/lib/sqlite3 \
     --after-install /dev/stdin \
     -p "${RPM_OUT}" \
@@ -212,16 +278,23 @@ fi
 # ---------------------------------------------------------------------
 # Alpine .apk — only built for the musl profile. Same install path as
 # the rpm/deb (Alpine accepts /usr/local/lib/ since it's not a managed
-# tree). Initial release is unsigned.
-# ---------------------------------------------------------------------
+# tree). Initial release is unsigned. The MCP server IS included here
+# when present — unlike the reasoning plugin (a vendored glibc .so
+# that genuinely cannot load under musl), the bundled mcp binary for
+# this profile is built by the SAME Alpine Docker stage build.sh used
+# for fractalsql.so, so it's musl-native and loadable here too.
 if [[ "${PROFILE}" = "musl" ]]; then
+APK_DEPENDS=(--depends "sqlite")
+if [[ "${HAVE_MCP}" = "1" ]]; then
+    APK_DEPENDS+=(--depends "openssl")
+fi
 fpm -s dir -t apk \
     -n "${RPM_NAME}" \
     -v "${VERSION}" \
     -a "${PKG_ARCH}" \
     --iteration "${ITERATION}" \
     --description "FractalSQL SQLite extension, Community Edition" \
-    --depends "sqlite" \
+    "${APK_DEPENDS[@]}" \
     -p "${APK_OUT}" \
     -C "${STAGE_PKG}" \
     usr

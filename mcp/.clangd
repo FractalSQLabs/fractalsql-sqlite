@@ -1,0 +1,5 @@
+# Local IDE/clangd convenience only — the real build config lives in Makefile
+# (-std=c++17 -Ivendor). Keeps the language server aligned with the build.
+CompileFlags:
+  Add: ["-std=c++17", "-I", "vendor"]
+  # mcp/src files include "../vendor/json.hpp" relative to src/

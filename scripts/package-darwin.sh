@@ -8,6 +8,13 @@
 # this artifact (fractalsql-sqlite-<version>-darwin-<arch>.tar.gz) and
 # installs the dylib into /usr/local/lib/sqlite3/.
 #
+# The tarball also bundles the MCP server (mcp/fractalsql-sqlite-mcp),
+# built from source right here with clang — plain C++17 + the vendored
+# sqlite3 amalgamation + Homebrew's OpenSSL (not in the macOS SDK, so
+# -I/-L point at `brew --prefix openssl@3` explicitly). Built once per
+# arch, same -arch cross-build posture as the dylib above; skipped
+# with a warning if Homebrew's openssl@3 isn't installed.
+#
 # The extension builds natively with clang against the vendored darwin
 # core archive (include/darwin-<arch>/libfractalsql-community-sovereign-c.a),
 # statically linked — same posture as the Linux .so and the Windows DLL:
@@ -54,6 +61,37 @@ fi
 [[ -f "${SQLITE_PREFIX}/include/sqlite3ext.h" ]] \
     || { echo "sqlite3ext.h not found under ${SQLITE_PREFIX}/include (set SQLITE_PREFIX)" >&2; exit 1; }
 
+# MCP server — built from source, same as the Linux/Windows legs; not
+# cross-built per arch via a vendored archive, just clang + this arch's
+# own object files. Homebrew's openssl@3 is keg-only (never symlinked
+# into the default -I/-L search path), so resolve its prefix explicitly;
+# skip gracefully (warning, not a hard failure) if it isn't installed.
+#
+# -mmacosx-version-min=13.3, overriding release.yml's job-level
+# MACOSX_DEPLOYMENT_TARGET=11.0 (which the dylib above DOES need, for
+# broad compatibility): mcp/src/vectors.cpp's formatDouble() uses
+# std::to_chars on a double for shortest-round-trip formatting, and
+# Apple's libc++ marks that overload unavailable before macOS 13.3
+# (reproduced directly: builds fine at the runner's native OS with no
+# deployment-target override, fails under 11.0). The MCP server is a
+# separate, new, optional binary with no compatibility promise tying
+# it to the dylib's floor, so it gets its own newer minimum instead of
+# raising the whole package's.
+HAVE_MCP=0
+OPENSSL_PREFIX="${OPENSSL_PREFIX:-$(brew --prefix openssl@3 2>/dev/null || true)}"
+if [[ -z "${OPENSSL_PREFIX}" || ! -f "${OPENSSL_PREFIX}/include/openssl/evp.h" ]]; then
+    echo "warning: Homebrew openssl@3 not found — skipping the MCP server (brew install openssl@3 to include it)" >&2
+else
+    echo "== building fractalsql-sqlite-mcp for darwin-${ARCH} ==" >&2
+    CC=clang CXX=clang++ \
+    CFLAGS="-arch ${ARCH} -mmacosx-version-min=13.3" \
+    CXXFLAGS="-std=c++17 -O2 -Wall -Wextra -arch ${ARCH} -mmacosx-version-min=13.3 -I${OPENSSL_PREFIX}/include -L${OPENSSL_PREFIX}/lib" \
+        make -C mcp
+    lipo -info mcp/fractalsql-sqlite-mcp | grep -q "${ARCH}" \
+        || { echo "mcp binary is not ${ARCH}: $(lipo -info mcp/fractalsql-sqlite-mcp)" >&2; exit 1; }
+    HAVE_MCP=1
+fi
+
 echo "== building fractalsql.dylib for darwin-${ARCH} (core: community-sovereign-c) =="
 # Static archive link: the archive must come after the objects (single
 # pass ld). -DFSQL_STATIC matches the vendored-core linkage contract;
@@ -99,6 +137,16 @@ install -m 0755 "${REASONING_SO}"             "${STAGE}/fractalsql-reasoning-htt
 install -m 0644 LICENSE                       "${STAGE}/LICENSE"
 install -m 0644 THIRD-PARTY-NOTICES.md        "${STAGE}/THIRD-PARTY-NOTICES.md"
 install -m 0644 sql/fractalsql--1.0.sql       "${STAGE}/fractalsql--1.0.sql"
+if [[ "${HAVE_MCP}" = "1" ]]; then
+    # BSD install (macOS) has no -D to create leading directories, unlike
+    # the GNU install the Linux packaging script relies on.
+    mkdir -p "${STAGE}/mcp"
+    install -m 0755 mcp/fractalsql-sqlite-mcp                 "${STAGE}/mcp/fractalsql-sqlite-mcp"
+    install -m 0644 mcp/README.md                             "${STAGE}/mcp/README.md"
+    install -m 0644 mcp/.mcp-schema-lock                      "${STAGE}/mcp/.mcp-schema-lock"
+    install -m 0644 mcp/.mcp-safety-annotations-lock          "${STAGE}/mcp/.mcp-safety-annotations-lock"
+    install -m 0644 mcp/manifest.json                         "${STAGE}/mcp/manifest.json"
+fi
 
 cat > "${STAGE}/README.txt" <<EOF
 FractalSQL for SQLite (Community) ${VERSION} — macOS ${ARCH}
@@ -123,6 +171,18 @@ fractalsql-reasoning-http.so and configure an endpoint — see
 docs/reasoning-setup.md. See fractalsql--1.0.sql for the full
 function-surface reference.
 EOF
+
+if [[ "${HAVE_MCP}" = "1" ]]; then
+cat >> "${STAGE}/README.txt" <<EOF
+
+MCP server (mcp/fractalsql-sqlite-mcp):
+  An MCP (Model Context Protocol) JSON-RPC server exposing one tool
+  per FractalSQL function, for agent clients (Claude Desktop, Cursor,
+  etc.). Unsigned, like the dylib above — clear quarantine first:
+      xattr -d com.apple.quarantine mcp/fractalsql-sqlite-mcp
+  See mcp/README.md for usage.
+EOF
+fi
 
 TARBALL="${DIST}/${PKG}.tar.gz"
 tar -C "${WORK}" -czf "${TARBALL}" "${PKG}"

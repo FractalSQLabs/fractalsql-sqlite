@@ -21,7 +21,7 @@ concurrency:
 jobs:
   sbom-attest-sign:
     name: SBOM + Attest + Sign
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Resolve release tag
         id: tag

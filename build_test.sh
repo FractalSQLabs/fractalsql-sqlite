@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Daniel Gardiner d/b/a FractalSQLabs
 #
-# build_test.sh — post-build validation gate runner for
+# build_test.sh: post-build validation gate runner for
 # fractalsql-sqlite. Mirrors what CI runs, so local == CI.
 #
 # Builds (or accepts a prebuilt) extension and validates it against a
 # THROWAWAY fixture database (a plain file under the temp root, opened
-# in WAL mode and torn down on exit) — no server install, no root.
+# in WAL mode and torn down on exit): no server install, no root.
 #
 # 27 numbered gates; the structural rationale for each is documented
 # per gate below.
@@ -16,16 +16,16 @@
 #   01  build          make (or accept a prebuilt artifact)             ~5s
 #   02  smoke          load + version + fractal_search convergence     ~5s
 #   03  schema_context introspection (PK / NOT NULL / FK)              ~3s
-#                      (re-aim: no COMMENT analog — SQLite tables have
+#                      (re-aim: no COMMENT analog; SQLite tables have
 #                       no comments; PK/FK/NOT NULL assertions kept)
 #   04  text_to_sql    allowlist fuzz matrix + never-executes proof    ~8s
 #                      (uses tests/mock_reasoning_plugin.c)
 #   05  evil_overread  guard-page non-terminated response survives,    ~3s
 #                      at GENERATE, REVIEW, and bare fractal_reason()
 #                      (uses tests/evil_nonterminating_plugin.c;
-#                      re-aim: a crash kills the sqlite3 PROCESS —
+#                      re-aim: a crash kills the sqlite3 PROCESS;
 #                      detected by abnormal exit without a clean SQL
-#                      error — instead of dropping a PG connection)
+#                      error, instead of dropping a PG connection)
 #   06  crash_recovery deliberately-segfaulting plugin: the sqlite3     ~10s
 #                      process dies; the DB is reopened and the prior
 #                      canary row must be intact (WAL recovery)
@@ -42,7 +42,7 @@
 #   09  guc_superuser  relative/traversal reasoning_plugin paths       ~1s
 #                      rejected at fractalsql_set time (re-aim: PG's
 #                      GUC_SUPERUSER_ONLY check becomes strict set-time
-#                      path validation — stock SQLite cannot gate
+#                      path validation; stock SQLite cannot gate
 #                      per-role, so the same boundary is enforced on
 #                      the value instead of the setter)
 #   10  dos_and_injection  512-table cap fires at 513; an SQL-         ~1s
@@ -85,7 +85,7 @@
 #                      once (re-aim: the vectorizer's registry/queue
 #                      are TEMP = connection-private, so the PG
 #                      cross-backend SKIP LOCKED claim race has no
-#                      analog here — the BEGIN IMMEDIATE claim's
+#                      analog here; the BEGIN IMMEDIATE claim's
 #                      correctness shows as zero double-processing
 #                      within the draining loop)
 #   18  embed_crash    deliberately-segfaulting plugin mid-            ~10s
@@ -115,13 +115,13 @@
 #                      hand-rolled parsers in src/fsql_parse.c
 #                      (factored out of the PG source specifically so
 #                      they can link standalone): fsql_parse_
-#                      embedding_array (highest priority — parses
+#                      embedding_array (highest priority; parses
 #                      fractal_embed()'s raw response from whatever
 #                      endpoint http_embed_url points at, genuinely
 #                      externally-adversarial input),
 #                      fsql_extract_best_point and
 #                      fsql_extract_population (parse the vendored
-#                      core's own result JSON — lower risk, included
+#                      core's own result JSON, lower risk, included
 #                      as defense-in-depth). No fixture DB needed.
 #                      Requires a libFuzzer-capable clang (set
 #                      FSQL_FUZZ_CC to override auto-detection); skips
@@ -132,7 +132,7 @@
 #                      morphological), search_telemetry, hybrid/cross-
 #                      modal guards, explain_result/detect_collapse/
 #                      diversify (feature-store functions are a
-#                      documented N/A — they belong to reasoning/
+#                      documented N/A; they belong to reasoning/
 #                      feature-store TUs that are not ported), the
 #                      v2.0.25-core analytics surface (change_point_
 #                      detect/periodogram/tda_persistence_diagram/state_
@@ -193,7 +193,7 @@
 #                      shape on first touch, kind=1/kind=2 chains stay
 #                      independent, and fractal_audit_log now carries
 #                      the same enterprise gate as the rest of the
-#                      ledger surface (PG parity)
+#                      ledger surface
 #   33  tsan_ledger_concurrent  --tsan only, Linux/Darwin only. Real
 #                      cross-connection ledger concurrency (fractal_
 #                      ledger_flush's BEGIN IMMEDIATE serialization,
@@ -204,7 +204,7 @@
 #                      which dlopens (via sqlite3_load_extension) the
 #                      identically-sanitized fractalsql.so. Not the
 #                      LD_PRELOAD/DYLD_INSERT_LIBRARIES approach the
-#                      other gates use — see the --tsan note below for
+#                      other gates use; see the --tsan note below for
 #                      why that approach doesn't reach Darwin at all.
 #   34  oom_inject     Linux only. LD_PRELOAD fault injection (tests/
 #                      oom_inject.c) makes one specific allocation size
@@ -258,7 +258,7 @@
 # Environment:
 #   FSQL_TEST_TIMEOUT_MULT  scales gate 06/18's recovery-poll budget
 #                           (default 1; auto-defaults to 4 under
-#                           --asan/--ubsan, 6 under --tsan — set this
+#                           --asan/--ubsan, 6 under --tsan; set this
 #                           explicitly to override that auto-bump
 #                           either direction).
 #   FSQL_SQLITE3            sqlite3 CLI override (default: auto-detect
@@ -324,7 +324,7 @@
 # instrumented fractalsql.so, then captures the .gcda the gate
 # processes leave behind with lcov and renders coverage_html/ plus a
 # text summary on stdout. No server redirects gcov's writes anywhere
-# (PG's GCOV_PREFIX dance exists because postgres backends run from a
+# (The GCOV_PREFIX dance exists because postgres backends run from a
 # system bindir -- here every host process is a sqlite3 CLI or a
 # python driver started from this script, and they all write .gcda
 # straight back next to the .gcno in src/, inside the checkout, which
@@ -353,7 +353,7 @@ ORIG_ARGV=("$@")
 
 # Canonical (symlink-resolved) tmp root. fractalsql-core's
 # fsql_load_reasoning() deliberately rejects any plugin path where
-# realpath(path) != path — a defense against symlink pivots (see its
+# realpath(path) != path; a defense against symlink pivots (see its
 # own header comment). On Linux /tmp is a real directory; on macOS /tmp
 # is a symlink to /private/tmp, so resolving once here and building
 # every path from $TMPROOT fixes that at the source instead of
@@ -370,7 +370,7 @@ esac
 # BTROOT is the directory the fixture plugins' hardcoded "/tmp/..."
 # contracts actually resolve to. The plugins run inside the host
 # process (sqlite3.exe here), whose CRT resolves a literal "/tmp/x"
-# against the process's CURRENT DRIVE — so on Windows the harness pins
+# against the process's CURRENT DRIVE, so on Windows the harness pins
 # C:/tmp (created if needed) and does all of its own fixture-file I/O
 # through the same place. On POSIX this is just /tmp.
 #
@@ -393,7 +393,7 @@ if [[ "$IS_MSYS" -eq 1 ]]; then
   PLUGSUF=".dll"
   mkdir -p "$BTROOT" 2>/dev/null || true
   if [[ ! -d "$BTROOT" ]]; then
-    echo "ERROR: cannot create $BTROOT — the fixture plugins hardcode" >&2
+    echo "ERROR: cannot create $BTROOT: the fixture plugins hardcode" >&2
     echo "       /tmp/... paths that resolve to ${BTROOTW} on Windows." >&2
     exit 1
   fi
@@ -405,11 +405,11 @@ fi
 # through to the actual load attempt, rather than rejecting it a step
 # earlier with a different error. $BTROOTW is already native-form
 # (C:/tmp on MSYS, /tmp on POSIX) and MSYS-argument-conversion-safe,
-# so it's the right base — a bare POSIX "/..." literal or a hardcoded
+# so it's the right base; a bare POSIX "/..." literal or a hardcoded
 # "C:/..." literal each work on only one of the two platforms.
 BADPLUGIN="$BTROOTW/fractalsql_bt_nonexistent_plugin"
 
-# wpath <posix-path> — Windows-mixed form (C:/...) when running under
+# wpath <posix-path>: Windows-mixed form (C:/...) when running under
 # MSYS against native binaries; identity elsewhere.
 wpath() {
   if [[ "$IS_MSYS" -eq 1 ]] && command -v cygpath >/dev/null 2>&1; then
@@ -419,7 +419,7 @@ wpath() {
   fi
 }
 
-DEFAULT_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 31 32 34 35 36)
+DEFAULT_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 31 32 34 35 36 37 38)
 QUICK_GATES=(01 02)
 FUZZ_GATES=(21)
 
@@ -551,7 +551,7 @@ FAILED=0
 # Fixed file contracts the fixture plugins hardcode (see each plugin's
 # header comment). The plugins run inside the host process and do their
 # own fopen()s, so the harness must write these through BTROOT (whose
-# CRT-resolved location is $BTROOTW on Windows) — NOT through a path
+# CRT-resolved location is $BTROOTW on Windows); NOT through a path
 # only bash understands.
 SQLTXT="$BTROOT/fractalsql_bt_sql.txt";           SQLTXTW="$BTROOTW/fractalsql_bt_sql.txt"
 EVILTRIG="$BTROOT/fractalsql_bt_evil_trigger_call.txt"
@@ -574,7 +574,7 @@ find_toolchain() {
   else
     SQLITE3="$(command -v sqlite3 2>/dev/null || true)"
     # macOS: Apple's own /usr/bin/sqlite3 is built WITHOUT extension
-    # loading (SQLITE_OMIT_LOAD_EXTENSION) — ".load" is not even a
+    # loading (SQLITE_OMIT_LOAD_EXTENSION): ".load" is not even a
     # command there, and every CLI-driven gate dies with 'unknown
     # command or invalid arguments: "load"'. Homebrew's sqlite is
     # keg-only and never reaches PATH, so probe the auto-detected
@@ -614,7 +614,7 @@ find_toolchain() {
   fi
 }
 
-# resolve_ext — locate the built extension when gate 01 did not run
+# resolve_ext: locate the built extension when gate 01 did not run
 # (single --gate invocations, fuzz-only runs). Sets EXT/EXTW or fails.
 resolve_ext() {
   [[ -n "$EXT" ]] && return 0
@@ -632,7 +632,7 @@ resolve_ext() {
 # Run SQL through a FRESH connection with the extension loaded.
 # Each argument is one statement; a script can also be piped on stdin.
 # Config is per-connection, so every gate invocation carries its own
-# fractalsql_set() preamble — the SQLite analog of pg_set_guc().
+# fractalsql_set() preamble: the connection's own config surface.
 sqlq() { "$SQLITE3" -batch -bail -cmd ".load $EXTW" "$DBW" "$@" 2>&1; }
 
 # Expect a clean SQL error containing $1 from a fresh connection;
@@ -672,7 +672,7 @@ bt_setup() {
     fail "runtime setup: no sqlite3 CLI on PATH (set FSQL_SQLITE3)"; return 1
   fi
   if ! resolve_ext; then
-    fail "runtime setup: no extension found — run gate 01 or set FSQL_EXT"; return 1
+    fail "runtime setup: no extension found, run gate 01 or set FSQL_EXT"; return 1
   fi
   EXTW="$(wpath "$EXT")"
   DBW="$(wpath "$DB")"
@@ -764,10 +764,10 @@ compile_plugins() {
 
 # Skip a gate whose fixture plugin did not compile (platform-limited
 # plugin, e.g. evil_nonterminating's mmap/mprotect on a host without
-# them) — the same probe-compile posture the PG runner takes.
+# them): the same probe-compile posture the PG runner takes.
 have_plugin() { [[ -f "$(wpath "$1")" ]]; }
 
-# py_run <name> [args...] — run an embedded python driver; each driver
+# py_run <name> [args...]: run an embedded python driver; each driver
 # is written to $PDIR and receives the DB/extension paths via env.
 py_run() {
   local name="$1"; shift
@@ -791,7 +791,7 @@ run_coverage_report() {
   fi
   lcov --capture --directory src --output-file "$TMPROOT/fractalsql_bt_coverage_raw.info" \
        --rc branch_coverage=1 >"$TMPROOT/fractalsql_bt_lcov.log" 2>&1 \
-    || { fail "coverage: lcov capture failed — see $TMPROOT/fractalsql_bt_lcov.log"; return; }
+    || { fail "coverage: lcov capture failed; see $TMPROOT/fractalsql_bt_lcov.log"; return; }
 
   # Extract just our TUs: the capture also picks up the handful of
   # lines pulled in from sqlite3ext.h etc. -- those aren't our code and
@@ -830,7 +830,59 @@ run_coverage_report() {
     genhtml "$TMPROOT/fractalsql_bt_coverage.info" --output-directory coverage_html \
             --rc branch_coverage=1 >"$TMPROOT/fractalsql_bt_genhtml.log" 2>&1 \
       && pass "coverage: report at coverage_html/index.html" \
-      || fail "coverage: genhtml failed — see $TMPROOT/fractalsql_bt_genhtml.log"
+      || fail "coverage: genhtml failed; see $TMPROOT/fractalsql_bt_genhtml.log"
+  fi
+
+  # MCP server (mcp/src/*.cpp, mcp/src/adapters/*.cpp); only produced
+  # when gate 37 actually rebuilt the instrumented binary (POSIX, a
+  # working make/g++, and on Darwin a resolvable Homebrew openssl@3;
+  # see gate_37_mcp_smoke's own skip conditions). Absence here just
+  # means gate 37 itself already reported why; nothing new to fail on.
+  if ! find mcp/src -name '*.gcda' 2>/dev/null | grep -q .; then
+    skip "coverage: no mcp/src/*.gcda produced (gate 37 didn't rebuild the MCP server under --coverage; see its own skip/fail reason above)"
+    return
+  fi
+  # --ignore-errors mismatch: nlohmann::json.hpp (header-only, heavy
+  # template + exception use) gets independently instantiated per
+  # adapter .cpp TU; geninfo's gcda merge step chokes reconciling their
+  # exception-handling tags across TUs ("mismatched exception tag for
+  # id N") even though every individual TU's own counts are correct.
+  # Documented, known gcov/geninfo limitation with this exact kind of
+  # header, not a sign the data itself is wrong.
+  lcov --capture --directory mcp/src --output-file "$TMPROOT/fractalsql_bt_mcp_coverage_raw.info" \
+       --rc branch_coverage=1 --ignore-errors mismatch >>"$TMPROOT/fractalsql_bt_lcov.log" 2>&1 \
+    || { fail "coverage: mcp lcov capture failed; see $TMPROOT/fractalsql_bt_lcov.log"; return; }
+
+  # Extract just mcp/src/mcp/src/adapters; the capture also picks up
+  # mcp/vendor/json.hpp (nlohmann, not ours) and the vendored sqlite3.c
+  # amalgamation compiled in as sqlite3.o; neither is our code.
+  lcov --extract "$TMPROOT/fractalsql_bt_mcp_coverage_raw.info" '*/mcp/src/*' \
+       --output-file "$TMPROOT/fractalsql_bt_mcp_coverage.info" \
+       --rc branch_coverage=1 >>"$TMPROOT/fractalsql_bt_lcov.log" 2>&1
+
+  echo ""
+  echo "=== coverage (mcp/src/*.cpp) ==="
+  awk -F: '
+    /^LF:/ { lf += $2 } /^LH:/ { lh += $2 }
+    /^FNF:/ { fnf += $2 } /^FNH:/ { fnh += $2 }
+    /^BRF:/ { brf += $2 } /^BRH:/ { brh += $2 }
+    END {
+      printf "  lines:     %d/%d", lh, lf
+      if (lf > 0) printf " (%.1f%%)", 100*lh/lf
+      print ""
+      printf "  functions: %d/%d", fnh, fnf
+      if (fnf > 0) printf " (%.1f%%)", 100*fnh/fnf
+      print ""
+      printf "  branches:  %d/%d", brh, brf
+      if (brf > 0) printf " (%.1f%%)", 100*brh/brf
+      print ""
+    }' "$TMPROOT/fractalsql_bt_mcp_coverage.info"
+
+  if command -v genhtml >/dev/null 2>&1; then
+    genhtml "$TMPROOT/fractalsql_bt_mcp_coverage.info" --output-directory coverage_html_mcp \
+            --rc branch_coverage=1 >>"$TMPROOT/fractalsql_bt_genhtml.log" 2>&1 \
+      && pass "coverage: mcp report at coverage_html_mcp/index.html" \
+      || fail "coverage: mcp genhtml failed; see $TMPROOT/fractalsql_bt_genhtml.log"
   fi
 }
 
@@ -846,7 +898,7 @@ gate_01_build() {
   fi
   if [[ "$IS_MSYS" -eq 1 ]]; then
     # The Windows build arbiter is scripts/windows/build.bat (MSVC),
-    # driven by build_test.ps1 — this POSIX runner mirrors the gates on
+    # driven by build_test.ps1; this POSIX runner mirrors the gates on
     # a toolchain (Git Bash) that has no make + sqlite3ext.h pair.
     # FSQL_EXT exists for an MSYS-side manual build.
     if [[ -f "dist/windows/fractalsql.dll" ]]; then
@@ -883,11 +935,11 @@ gate_01_build() {
     EXT="$HERE/fractalsql.so"
     pass "01 build (make)"
   else
-    fail "01 build — see $TMPROOT/fractalsql_bt_build.log"
+    fail "01 build: see $TMPROOT/fractalsql_bt_build.log"
     # Surface the real diagnostics: linker errors often carry no
-    # "error:" string — ld64 prints "ld: unknown option: ...",
+    # "error:" string; ld64 prints "ld: unknown option: ...",
     # "Undefined symbols for architecture arm64:", "ld: library not
-    # found for ...", and MSVC prints "error LNK2001:" — so matching
+    # found for ...", and MSVC prints "error LNK2001:", so matching
     # only "error:" hid the actual cause behind clang's one-line
     # summary (observed twice on the macOS gates). Fall back to the
     # log tail when nothing matches.
@@ -906,9 +958,9 @@ gate_01_build() {
 
 gate_02_smoke() {
   local ver; ver=$(sqlq "SELECT fractalsql_version();")
-  [[ "$ver" = "2.0.5" ]] \
+  [[ "$ver" = "2.0.6" ]] \
     && pass "02 smoke: version=$ver" \
-    || fail "02 smoke: version='$ver' (want 2.0.5)"
+    || fail "02 smoke: version='$ver' (want 2.0.6)"
   # fractal_search convergence: self-distance ~0
   local d; d=$(sqlq "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');")
   if [[ "$d" = "0.0" ]] || python_abs_lt_1e6 "$d"; then
@@ -928,17 +980,17 @@ gate_02_smoke() {
     && pass "02 smoke: edition=$ed" \
     || fail "02 smoke: edition='$ed'"
   # fractal_search_debug returns the FULL fsql_search_ptr result JSON
-  # (not just the best_point extraction fractal_search uses) — assert
+  # (not just the best_point extraction fractal_search uses); assert
   # the best_point key survives. Signature here is
   # fractal_search_debug(query [, iterations, population_size,
-  # diffusion_factor]) — a single query vector, run fresh.
+  # diffusion_factor]): a single query vector, run fresh.
   local dbg; dbg=$(sqlq "SELECT fractal_search_debug('0.6,0.8,0.0,0.0');")
   grep <<< "$dbg" -q "best_point" \
     && pass "02 smoke: fractal_search_debug has best_point" \
     || fail "02 smoke: fractal_search_debug='$dbg'"
 }
 
-# bash has no float compare — a one-shot python float check (skipped
+# bash has no float compare; a one-shot python float check (skipped
 # cleanly where python is absent, with the integer-equality case still
 # covered by the caller).
 python_abs_lt_1e6() {
@@ -965,7 +1017,7 @@ gate_03_schema_context() {
     fail "03 schema_context: auto-discovery='$ctx'"
   fi
   # COMMENT ON TABLE has no SQLite analog (structural N/A, documented
-  # in sql/fractalsql--1.0.sql) — no comment assertion here.
+  # in sql/fractalsql--1.0.sql); no comment assertion here.
 }
 
 # helper: expect a text_to_sql rejection containing $2 (or PASS if $2
@@ -1013,7 +1065,7 @@ gate_04_text_to_sql() {
     || fail "04 never-executes: row count=$n"
   # auto-discovery: the full GENERATE -> ALLOWLIST -> prepare pipeline
   # works off the auto-built schema context (0-arg registration), not
-  # just an explicit table list (the PG version's table_names arg —
+  # just an explicit table list (the PG version's table_names arg, since
   # there is no explicit-names form here; discovery is the only path).
   printf 'SELECT count(*) FROM bt_orders' > "$SQLTXT"
   local auto; auto=$(sqlq \
@@ -1028,7 +1080,7 @@ gate_04_text_to_sql() {
 # sits flush against an unmapped page, so any over-read SIGSEGVs
 # instantly. Proves the pnstrdup(summary, summary_len) fix holds at all
 # three call sites. Re-aim: the crash kills the whole sqlite3 process,
-# so "survived" means the process exited (rc==0 or a clean SQL error) —
+# so "survived" means the process exited (rc==0 or a clean SQL error);
 # the PG runner watched for a dropped connection instead.
 gate_05_evil_overread() {
   if [[ ! -f "$(wpath "$EVILNT")" ]]; then
@@ -1045,7 +1097,7 @@ gate_05_evil_overread() {
   echo "1" > "$EVILTRIG"
   printf 'SELECT 1' > "$SQLTXT"
   # The plugin reads its canned SQL from this env (inherited by the
-  # in-process plugin — one env-visibility advantage over PG's forked
+  # in-process plugin; one env-visibility advantage over PG's forked
   # backends, which needed the fixed-file convention).
   export FSQL_EVIL_SQL_FILE="$SQLTXTW"
   if survived \
@@ -1127,11 +1179,11 @@ gate_07_evil_lying_length() {
     local r rc
     r=$(sqlq "$@"); rc=$?
     if crashed "$r" "$rc"; then
-      fail "07 $label — process crashed — $r"
+      fail "07 $label: process crashed ($r)"
     elif grep <<< "$r" -q "implausible response length"; then
       pass "07 $label rejected cleanly"
     else
-      fail "07 $label — expected rejection, got: $r"
+      fail "07 $label: expected rejection, got: $r"
     fi
   }
   echo "1" > "$EVILTRIG"
@@ -1150,7 +1202,7 @@ gate_07_evil_lying_length() {
 }
 
 # Python driver: the authorizer hook (sqlite3_set_authorizer) must be
-# honored INSIDE the extension's own introspection — a denied read on a
+# honored INSIDE the extension's own introspection; a denied read on a
 # table must surface as a clean error that leaks none of that table's
 # column detail. This is the SQLite form of PG gate 08's low-privilege
 # role boundary (stock SQLite has no roles; the authorizer is the hook
@@ -1175,7 +1227,7 @@ except Exception as e:
     print("FAIL control: %s" % e)
     sys.exit(1)
 
-# Boundary: deny the introspection of bt_customers — both the PRAGMA
+# Boundary: deny the introspection of bt_customers: both the PRAGMA
 # table_info form (what schema_context actually issues per table; on
 # builds without the bound-pragma form the argument arrives as arg2)
 # and any direct READ of the table. The introspection must fail, and
@@ -1218,8 +1270,7 @@ gate_08_authz() {
 }
 
 gate_09_guc_superuser() {
-  # Re-aim of PG's non-superuser GUC rejection: the same boundary is
-  # enforced at fractalsql_set time — a path key must be absolute with
+  # Enforced at fractalsql_set time: a path key must be absolute with
   # no traversal segments, whatever the caller's privileges.
   if expect_err "must be an absolute path with no '..' segments" \
       "SELECT fractalsql_set('reasoning_plugin','plugins/mock.so');"; then
@@ -1234,7 +1285,7 @@ gate_09_guc_superuser() {
     fail "09 guc_superuser: traversal path accepted"
   fi
   # Control: the canonical absolute form is accepted (no load happens
-  # at set time — set-time validation only).
+  # at set time; set-time validation only).
   local r; r=$(sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');")
   [[ "$r" == "ok" ]] \
     && pass "09 guc_superuser: canonical absolute path accepted" \
@@ -1243,7 +1294,7 @@ gate_09_guc_superuser() {
 
 gate_10_dos_and_injection() {
   # 512-cap fires via DISCOVERY (513 tables in the DB), not an array
-  # argument — fractal_schema_context() is 0-arg here.
+  # argument: fractal_schema_context() is 0-arg here.
   {
     for i in $(seq 0 512); do
       printf 'CREATE TABLE bt_dos_%s(id INTEGER);\n' "$i"
@@ -1255,7 +1306,7 @@ gate_10_dos_and_injection() {
   else
     fail "10 dos_and_injection: cap did not fire at 513 tables"
   fi
-  # Drop the flood before the injection case — the cap fires at
+  # Drop the flood before the injection case; the cap fires at
   # discovery time and would mask it otherwise.
   {
     for i in $(seq 0 512); do
@@ -1263,7 +1314,7 @@ gate_10_dos_and_injection() {
     done
   } | "$SQLITE3" "$DBW" >/dev/null 2>&1
   # An injection-shaped table name can be created literally (quoted);
-  # schema_context must NOT carry it into SQL text — introspection is
+  # schema_context must NOT carry it into SQL text; introspection is
   # SKIPPED for names that cannot be safely embedded (the bound
   # PRAGMA-argument form is unavailable in stock SQLite builds, so the
   # formatted fallback + ident_is_safe gate is the only posture), and
@@ -1285,7 +1336,7 @@ gate_10_dos_and_injection() {
   n=$("$SQLITE3" "$DBW" "SELECT count(*) FROM sqlite_master WHERE name='bt_customers';")
   [[ "$n" = "1" ]] \
     && pass "10 dos_and_injection: bt_customers survived (nothing executed)" \
-    || fail "10 dos_and_injection: bt_customers missing — injection executed"
+    || fail "10 dos_and_injection: bt_customers missing: injection executed"
 }
 
 gate_11_scout() {
@@ -1455,7 +1506,7 @@ gate_14_retry() {
 }
 
 gate_15_embed() {
-  # fractal_embed() itself — real dispatch through the EMBED tier.
+  # fractal_embed() itself: real dispatch through the EMBED tier.
   local d
   d=$(sqlq \
     "SELECT fractalsql_set('reasoning_plugin','$MOCKEMB');" \
@@ -1521,7 +1572,7 @@ gate_15_embed() {
     "SELECT fractal_vectorizer_create('bt_vembed','body','emb');")
   # (-bail stops the invocation on the trailing double-create; the
   # assertions above still see everything printed before it. The
-  # double-create MUST ride the same connection — the registry+queue
+  # double-create MUST ride the same connection: the registry+queue
   # are TEMP, so a fresh connection would see an empty registry.)
   grep <<< "$r" -q "PROCESSED=3" \
     && grep <<< "$r" -q "DONE=3" \
@@ -1649,11 +1700,11 @@ PYEOF
 
 gate_16_embed_authz() {
   # create-time validation (PG's create-time source_table ownership
-  # maps to these guards — role grants have no SQLite analog).
+  # maps to these guards; role grants have no SQLite analog).
   # A nonexistent table is indistinguishable from a PK-less one here:
   # PRAGMA table_info on a missing table returns no rows, so the create
   # answers the same "no single-column primary key" error (the probe
-  # PRAGMA doesn't fail on a missing table — SQLite's shape).
+  # PRAGMA doesn't fail on a missing table: SQLite's shape).
   if expect_err "has no single-column primary key" \
       "SELECT fractal_vectorizer_create('bt_nonexistent_xyz',
         'body','emb');"; then
@@ -1743,7 +1794,7 @@ gate_18_embed_crash() {
   pass "18 embed_crash: sqlite3 process died mid-process_queue (rc=$rc)"
   # A fresh connection must find the DB intact and the persisted
   # embeddings (gate 15's write-back) preserved. The TEMP queue state
-  # died with the connection — no stuck-'processing' rows are even
+  # died with the connection; no stuck-'processing' rows are even
   # possible, which is the structural difference from PG's queue.
   local deadline=$(( SECONDS + 30 * TIMEOUT_MULT )) out
   while :; do
@@ -1797,7 +1848,7 @@ PYEOF
 gate_19_sfs_bounds() {
   # Over-arena vector (ARENA_MAX_DIM=4096): the parse rejects it. The
   # TEXT path clamps at the cap (lenient surface), so the over-budget
-  # rejection is exercised through the float32 BLOB path — a
+  # rejection is exercised through the float32 BLOB path: a
   # 4097-float BLOB answers "invalid vector (expect CSV/JSON text or
   # float32 BLOB)" without ever reaching the solver.
   if [[ -n "$PY" ]]; then
@@ -1850,7 +1901,7 @@ gate_19_sfs_bounds() {
 
 gate_20_api_func() {
   # fractal_reason happy-path correctness through the chat tier (the
-  # bare call gets the fenced form — RESPONSE_MODE is t2s-internal).
+  # bare call gets the fenced form; RESPONSE_MODE is t2s-internal).
   printf 'canary-reason-response' > "$SQLTXT"
   local r
   r=$(sqlq \
@@ -1871,7 +1922,7 @@ gate_20_api_func() {
   else
     fail "20 api_func: fractal_text_to_sql(NULL) not rejected"
   fi
-  # Options-JSON: the params surface is LENIENT here — a truncated JSON
+  # Options-JSON: the params surface is LENIENT here; a truncated JSON
   # prefix parses as far as it can and the rest clamps to defaults (the
   # same rc=0 shape gate 11's options variant accepts), so the
   # errorable boundary is only exercised via vector parse errors in
@@ -1929,10 +1980,10 @@ gate_20_api_func() {
   fi
 }
 
-# find_fuzz_clang — locate a clang that can actually LINK a
+# find_fuzz_clang: locate a clang that can actually LINK a
 # -fsanitize=fuzzer binary, probed by compiling a real minimal
 # libFuzzer target (defines LLVMFuzzerTestOneInput, no main of its
-# own — libFuzzer's runtime supplies main) rather than trusting
+# own; libFuzzer's runtime supplies main) rather than trusting
 # `command -v clang` blindly. Two real, confirmed failure modes that
 # existence-only detection misses:
 #   1. A version manager (rbenv/nvm-style; confirmed here with a
@@ -1972,7 +2023,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n){(void)d;(void)n;return 0;
 gate_21_fuzz_smoke() {
   local fuzzcc
   if ! fuzzcc="$(find_fuzz_clang)"; then
-    skip "21 fuzz_smoke (no clang on PATH with a working -fsanitize=fuzzer — checked \$FSQL_FUZZ_CC, clang, clang-15..19, and common LLVM install paths)"; return
+    skip "21 fuzz_smoke (no clang on PATH with a working -fsanitize=fuzzer; checked \$FSQL_FUZZ_CC, clang, clang-15..19, and common LLVM install paths)"; return
   fi
   local t src rc
   for t in fuzz_parse_embedding_array fuzz_extract_best_point \
@@ -1981,7 +2032,7 @@ gate_21_fuzz_smoke() {
     if ! "$fuzzcc" -O1 -g -fsanitize=fuzzer -Iinclude -Isrc \
           "$src" src/fsql_parse.c -o "$PDIRW/$t" \
           >"$PDIR/$t.log" 2>&1; then
-      fail "21 fuzz_smoke: $t failed to build — see $PDIR/$t.log"
+      fail "21 fuzz_smoke: $t failed to build; see $PDIR/$t.log"
       continue
     fi
     rc=0
@@ -1996,7 +2047,7 @@ gate_21_fuzz_smoke() {
     if [[ $rc -eq 0 ]]; then
       pass "21 fuzz_smoke: $t (${FSQL_FUZZ_TIME:-30}s, corpus-seeded)"
     else
-      fail "21 fuzz_smoke: $t exited rc=$rc — see $PDIR/$t.run.log"
+      fail "21 fuzz_smoke: $t exited rc=$rc; see $PDIR/$t.run.log"
       tail -5 "$PDIR/$t.run.log" 2>/dev/null | sed 's/^/         /'
     fi
   done
@@ -2024,7 +2075,7 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
   else
     fail "22 v2_functions: DFA happy path: $r"
   fi
-  # Drift: 200-point series, window 64 — the core's box needs window+16
+  # Drift: 200-point series, window 64; the core's box needs window+16
   # points of recent history AND a deep-enough baseline (window 16/n 32
   # is exactly on the printed boundary and the core still declines).
   local s200
@@ -2043,7 +2094,7 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
     fail "22 v2_functions: drift window<=0 accepted"
   fi
   # Box-counting fixtures: bottom out in box-counting, which needs
-  # >= 3 valid epsilon buckets — enough points AND enough scale dynamic
+  # >= 3 valid epsilon buckets: enough points AND enough scale dynamic
   # range; an exactly-regular 9-point lattice silently fails the
   # filter (PG's gate-22 fixture note). 40 jittered points dim 2.
   local boxpts
@@ -2512,7 +2563,7 @@ gate_23_agents() {
     local r; r=$(sqlq "${PRE[@]}" "$@")
     local rc=$?
     if crashed "$r" "$rc"; then
-      fail "23 $label — process crashed"
+      fail "23 $label: process crashed"
     elif [[ $rc -ne 0 ]]; then
       fail "23 $label: $r"
     else
@@ -2539,11 +2590,48 @@ gate_23_agents() {
     || fail "23 search_agent JSON: $LAST_AGENT_OUT"
   agent "rag_agent single-turn RAG" \
     "SELECT fractal_rag_agent('embedding tiers','bt_agent_docs','emb');"
+  # The partial-result mode is NOT covered for search_agent/rag_agent
+  # here, unlike the domain agents below: agents_rag_pipeline composes
+  # TWO reasoning calls (embed, then chat), and a single unloadable
+  # "bogus_plugin" fails the embed step first (before any data half
+  # exists to hand back), never reaching the chat-only failure the
+  # partial branch targets. Reaching it needs a mock plugin that
+  # succeeds at embed and fails only at chat -- none of the existing
+  # tests/*_plugin.c fixtures are shaped that way, and building one
+  # solely for this is deferred (same call made for data_analyst's
+  # identical two-stage shape in gate 29).
+  agent_err "search_agent bad identifier" \
+    "must be plain identifiers" \
+    "SELECT fractal_search_agent('q','bt_agent_docs; drop table bt_agent_docs','emb');"
+  agent_err "rag_agent bad identifier" \
+    "must be plain identifiers" \
+    "SELECT fractal_rag_agent('q','bt_agent_docs','emb; drop table bt_agent_docs');"
+  agent_err "search_agent missing required args" \
+    "query, table_name, and vector_col are required" \
+    "SELECT fractal_search_agent(NULL,'bt_agent_docs','emb');"
+  agent_err "rag_agent missing required args" \
+    "query, table_name, and vector_col are required" \
+    "SELECT fractal_rag_agent(NULL,'bt_agent_docs','emb');"
   agent "sql_agent T2S composition" \
     "SELECT fractal_sql_agent('count the orders');"
   grep <<< "$LAST_AGENT_OUT" -q '"generated_sql"' \
     && pass "23 sql_agent returns the composite JSON" \
     || fail "23 sql_agent JSON: $LAST_AGENT_OUT"
+  if expect_err "expects 1 to 4 args" \
+      "SELECT fractal_sql_agent('q','[]',1,0,'extra');"; then
+    pass "23 sql_agent rejects too many args"
+  else
+    fail "23 sql_agent accepted too many args"
+  fi
+  if expect_err "question must not be NULL" \
+      "SELECT fractal_sql_agent(NULL);"; then
+    pass "23 sql_agent rejects a NULL question"
+  else
+    fail "23 sql_agent accepted a NULL question"
+  fi
+  agent_err "sql_agent rejects a malformed table_names" \
+    "table_names must be a JSON array" \
+    "SELECT fractal_sql_agent('q','not-a-json-array');"
 
   # sql_agent auto_execute, real SELECT: the PRE preamble above uses
   # $MOCKEMB, whose canned chat reply is a fixed embedding-shaped
@@ -2575,8 +2663,58 @@ gate_23_agents() {
   grep <<< "$LAST_AGENT_OUT" -q '"branch_id"' \
     && pass "23 plan_explore returns branch plans" \
     || fail "23 plan_explore JSON: $LAST_AGENT_OUT"
+  local r_pen; r_pen=$(sqlq \
+    "SELECT fractal_agent_plan_explore(NULL,'bt_agent_docs','emb',2);")
+  [[ -z "$r_pen" ]] \
+    && pass "23 plan_explore STRICT: NULL initial_state yields NULL, not an error" \
+    || fail "23 plan_explore expected NULL (STRICT), got: $r_pen"
+  if expect_err "must be plain identifiers" \
+      "SELECT fractal_agent_plan_explore('1.0,0.0,0.0','bt_agent_docs; drop table bt_agent_docs','emb',2);"; then
+    pass "23 plan_explore rejects a non-identifier table name"
+  else
+    fail "23 plan_explore accepted a non-identifier table name"
+  fi
+  if expect_err "max_branches must be > 0" \
+      "SELECT fractal_agent_plan_explore('1.0,0.0,0.0','bt_agent_docs','emb',0);"; then
+    pass "23 plan_explore rejects a non-positive max_branches"
+  else
+    fail "23 plan_explore accepted a non-positive max_branches"
+  fi
+  if expect_err "max_branches out of range" \
+      "SELECT fractal_agent_plan_explore('1.0,0.0,0.0','bt_agent_docs','emb',100001);"; then
+    pass "23 plan_explore rejects an out-of-range max_branches"
+  else
+    fail "23 plan_explore accepted an out-of-range max_branches"
+  fi
   agent "trajectory_predict over telemetry" \
     "SELECT fractal_agent_trajectory_predict('bt_traj','vec',3,2);"
+  grep <<< "$LAST_AGENT_OUT" -q '"predicted_state_vector"' \
+    && grep <<< "$LAST_AGENT_OUT" -q '"projected_drift_delta"' \
+    && grep <<< "$LAST_AGENT_OUT" -q '"risk_threshold_exceeded"' \
+    && pass "23 trajectory_predict returns the real predicted-state JSON" \
+    || fail "23 trajectory_predict JSON: $LAST_AGENT_OUT"
+  local r_tp; r_tp=$(sqlq \
+    "SELECT fractal_agent_trajectory_predict(NULL,'vec',3,2);")
+  [[ -z "$r_tp" ]] \
+    && pass "23 trajectory_predict STRICT: NULL table_name yields NULL, not an error" \
+    || fail "23 trajectory_predict expected NULL (STRICT), got: $r_tp"
+  agent_err "trajectory_predict bad identifier" \
+    "must be plain identifiers" \
+    "SELECT fractal_agent_trajectory_predict('bt_traj; drop table bt_traj','vec',3,2);"
+  agent_err "trajectory_predict no such table" \
+    "no usable rowid key" \
+    "SELECT fractal_agent_trajectory_predict('bt_traj_no_such','vec',3,2);"
+  agent_err "trajectory_predict baseline_id not found" \
+    "no row in bt_traj with rowid" \
+    "SELECT fractal_agent_trajectory_predict('bt_traj','vec',999999,2);"
+  sqlq "
+    CREATE TABLE bt_traj_bad(id INTEGER PRIMARY KEY, vec TEXT);
+    INSERT INTO bt_traj_bad(vec) VALUES ('0.0,0.0'),('0.1,0.0,0.0,0.0');
+  " >/dev/null 2>&1
+  agent_err "trajectory_predict baseline/current dim mismatch" \
+    "!= current dim" \
+    "SELECT fractal_agent_trajectory_predict('bt_traj_bad','vec',1,2);"
+  sqlq "DROP TABLE IF EXISTS bt_traj_bad;" >/dev/null 2>&1
   # detect_loop: the v2.0.25-core signature (agent_id, state_log, dim
   # [, n_bits, seed, hamming_threshold]) -- SimHash state fingerprints
   # streamed through Brent's cycle detector, plus a DFA drift check over
@@ -2604,7 +2742,7 @@ gate_23_agents() {
   # A 2-state log clears the ">= 2 states" floor but is far short of
   # DFA's own >= 24-point requirement; DFA is best-effort (matching the
   # pg wrapper), so this returns cleanly with dfa_exponent 0 rather than
-  # erroring — the cycle check still runs and correctly finds no cycle
+  # erroring; the cycle check still runs and correctly finds no cycle
   # in a 2-state stream.
   agent "detect_loop short log is best-effort (DFA declines, no cycle)" \
     "SELECT fractal_agent_detect_loop('agent-t3', '1.0,0.0,0.0,1.0', 2);"
@@ -2613,14 +2751,54 @@ gate_23_agents() {
     && grep <<< "$LAST_AGENT_OUT" -q '"is_loop_detected":false' \
     && pass "23 detect_loop short-log JSON shape" \
     || fail "23 detect_loop short-log JSON: $LAST_AGENT_OUT"
+  agent_err "detect_loop missing required args" \
+    "agent_id, state_log, and dim are required" \
+    "SELECT fractal_agent_detect_loop('agent-t4', NULL, 2);"
+  agent_err "detect_loop dim must be positive" \
+    "dim must be > 0" \
+    "SELECT fractal_agent_detect_loop('agent-t4', '1.0,0.0,0.0,1.0', 0);"
+  agent_err "detect_loop n_bits must be positive" \
+    "n_bits must be > 0" \
+    "SELECT fractal_agent_detect_loop('agent-t4', '1.0,0.0,0.0,1.0', 2, 0);"
+  agent_err "detect_loop hamming_threshold must be non-negative" \
+    "hamming_threshold must be >= 0" \
+    "SELECT fractal_agent_detect_loop('agent-t4', '1.0,0.0,0.0,1.0', 2, 64, 42.0, -1);"
+  agent_err "detect_loop rejects a malformed state_log" \
+    "must be a flattened JSON/CSV array" \
+    "SELECT fractal_agent_detect_loop('agent-t4', 'bad!vec', 2);"
+  agent_err "detect_loop rejects a state_log length not a multiple of dim" \
+    "is not a multiple of dim" \
+    "SELECT fractal_agent_detect_loop('agent-t4', '1.0,0.0,0.0', 2);"
+  agent_err "detect_loop rejects fewer than 2 states" \
+    "must contain at least 2 states" \
+    "SELECT fractal_agent_detect_loop('agent-t4', '1.0,0.0', 2);"
   agent "telemetry + trajectory + hybrid + cross_modal + explain" \
     "SELECT fractal_search_telemetry('bt_agent_docs','emb',
        '1.0,0.0,0.0', 2);" \
+    "SELECT fractal_search_trajectory('bt_agent_docs','emb',
+       '1.0,0.0,0.0', '0.0,1.0,0.0', 2);" \
     "SELECT fractal_hybrid_clinical_search('bt_agent_docs','emb',
        '1.0,0.0,0.0', '1,2,3', 2);" \
     "SELECT fractal_cross_modal_search('bt_agent_docs_xmodal','emb',
        '1.0,0.0,0.0', '0.0,1.0,0.0', 0.5, 2);" \
     "SELECT fractal_explain_result();"
+  agent_err "search_trajectory k guard" \
+    "k must be > 0" \
+    "SELECT fractal_search_trajectory('bt_agent_docs','emb',
+       '1.0,0.0,0.0', '0.0,1.0,0.0', 0);"
+  agent_err "search_trajectory malformed vector" \
+    "malformed vector" \
+    "SELECT fractal_search_trajectory('bt_agent_docs','emb',
+       'bad!vec', '0.0,1.0,0.0', 2);"
+  agent_err "search_trajectory dim mismatch" \
+    "must match" \
+    "SELECT fractal_search_trajectory('bt_agent_docs','emb',
+       '1.0,0.0,0.0', '0.0,1.0', 2);"
+  local r_stn; r_stn=$(sqlq \
+    "SELECT fractal_search_trajectory(NULL,'emb','1.0,0.0,0.0','0.0,1.0,0.0',2);")
+  [[ -z "$r_stn" ]] \
+    && pass "23 search_trajectory STRICT: NULL table_name yields NULL, not an error" \
+    || fail "23 search_trajectory expected NULL (STRICT), got: $r_stn"
   # Expected-error invocations: -bail stops at the first error, so the
   # two guards run as separate agent_err checks (a combined invocation
   # would never surface the second message).
@@ -2632,6 +2810,40 @@ gate_23_agents() {
     "k must be > 0" \
     "SELECT fractal_hybrid_clinical_search('bt_agent_docs','emb',
        'q', '1,2,3', 0);"
+  agent_err "hybrid bad identifier" \
+    "must be plain identifiers" \
+    "SELECT fractal_hybrid_clinical_search('bt_agent_docs; drop table bt_agent_docs','emb',
+       '1.0,0.0,0.0', '1,2,3', 2);"
+  agent_err "hybrid rejects a malformed doc_ids" \
+    "doc_ids must be a non-empty JSON/CSV array" \
+    "SELECT fractal_hybrid_clinical_search('bt_agent_docs','emb',
+       '1.0,0.0,0.0', 'bad!ids', 2);"
+  agent_err "hybrid rejects a malformed query vector" \
+    "invalid query vector" \
+    "SELECT fractal_hybrid_clinical_search('bt_agent_docs','emb',
+       'bad!vec', '1,2,3', 2);"
+  local r_hn; r_hn=$(sqlq \
+    "SELECT fractal_hybrid_clinical_search(NULL,'emb','1.0,0.0,0.0','1,2,3',2);")
+  [[ -z "$r_hn" ]] \
+    && pass "23 hybrid_clinical_search STRICT: NULL table_name yields NULL, not an error" \
+    || fail "23 hybrid_clinical_search expected NULL (STRICT), got: $r_hn"
+  agent_err "cross_modal bad identifier" \
+    "must be plain identifiers" \
+    "SELECT fractal_cross_modal_search('bt_agent_docs_xmodal; drop table bt_agent_docs_xmodal','emb',
+       '1.0,0.0,0.0', '0.0,1.0,0.0', 0.5, 2);"
+  agent_err "cross_modal rejects a malformed modality vector" \
+    "malformed modality vector" \
+    "SELECT fractal_cross_modal_search('bt_agent_docs_xmodal','emb',
+       'bad!vec', '0.0,1.0,0.0', 0.5, 2);"
+  agent_err "cross_modal k guard" \
+    "k must be > 0" \
+    "SELECT fractal_cross_modal_search('bt_agent_docs_xmodal','emb',
+       '1.0,0.0,0.0', '0.0,1.0,0.0', 0.5, 0);"
+  local r_cmn; r_cmn=$(sqlq \
+    "SELECT fractal_cross_modal_search(NULL,'emb','1.0,0.0,0.0','0.0,1.0,0.0',0.5,2);")
+  [[ -z "$r_cmn" ]] \
+    && pass "23 cross_modal_search STRICT: NULL table_name yields NULL, not an error" \
+    || fail "23 cross_modal_search expected NULL (STRICT), got: $r_cmn"
   agent_err "no-rows guard" \
     "no rows found in bt_agent_empty.emb" \
     "SELECT fractal_search_agent('q','bt_agent_empty','emb');"
@@ -2648,9 +2860,8 @@ gate_24_enterprise() {
     fail "24 enterprise: ledger path did not surface the dormant error"
   fi
   # audit_log now carries the same enterprise gate as the rest of the
-  # ledger surface (PG parity fix — see gate 31 ledger_chain, which owns
-  # this behavior in detail; previously this wrote unconditionally, a
-  # real parity gap against PG's own ensure_enterprise_lib() check).
+  # ledger surface (see gate 31 ledger_chain, which owns this behavior
+  # in detail; previously this wrote unconditionally).
   if expect_err "enterprise tier not loaded" \
       "SELECT fractal_audit_log('entry', '{}');"; then
     pass "24 enterprise: audit_log rejects cleanly (dormant tier)"
@@ -2658,7 +2869,7 @@ gate_24_enterprise() {
     fail "24 enterprise: audit_log did not surface the dormant-tier error"
   fi
   # A bogus enterprise_lib must be an absolute path (the same set-time
-  # path validation as the plugin keys — $BADPLUGIN is already native-
+  # path validation as the plugin keys; $BADPLUGIN is already native-
   # form and MSYS-argument-conversion-safe), and the ledger call then
   # surfaces the load failure. With signature verification mandatory by
   # default the detached-signature check runs BEFORE the dlopen, so a
@@ -3091,7 +3302,7 @@ gate_27_think() {
     done
     [[ $ok -eq 1 ]] \
       && pass "27 think: $label" \
-      || fail "27 think: $label — dump: $(cat "$(wpath "$THINKDUMP")" 2>/dev/null)"
+      || fail "27 think: $label; dump: $(cat "$(wpath "$THINKDUMP")" 2>/dev/null)"
   }
   # 1) fractal_reason's chat tier forwards all four keys.
   rm -f "$THINKDUMP"
@@ -3146,7 +3357,7 @@ gate_28_review_isolation() {
     local label="$1" pat="$2"
     grep -q "$pat" "$(wpath "$REVIEWDUMP")" 2>/dev/null \
       && pass "28 review_isolation: $label" \
-      || fail "28 review_isolation: $label — dump: $(cat "$(wpath "$REVIEWDUMP")" 2>/dev/null)"
+      || fail "28 review_isolation: $label; dump: $(cat "$(wpath "$REVIEWDUMP")" 2>/dev/null)"
   }
   # 1) Regression guard: GENERATE alone (review off) still runs under
   # T2S's forced RESPONSE_MODE=code -- the split must not have
@@ -3195,6 +3406,16 @@ gate_29_domain_agents() {
 
   printf 'domain-agent-canary' > "$SQLTXT"
 
+  # Partial-result honesty (opt-in agent_partial_reasoning_fail,
+  # see section 17 below for the full on/off contrast): a path that
+  # cannot load, used throughout this gate to prove each data->reason
+  # agent returns its computed data half plus "reasoning_step_failed"
+  # instead of discarding the computation when the reasoning endpoint
+  # fails partway. Hoisted here (not just section 17) so every agent's
+  # own fixture -- still live at that point in the gate -- can reuse it
+  # inline, right after that agent's own happy-path assertions.
+  local bogus_plugin="$PWD/no_such_reasoning_plugin$PLUGSUF"
+
   # --- 1: fractal_agent_anomaly_triage (table + drift + reason) ------
   local r1; r1=$(sqlq \
     "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
@@ -3216,6 +3437,18 @@ gate_29_domain_agents() {
     && pass "29 domain_agents: anomaly_triage raises a clean ERROR when the filter matches no rows" \
     || fail "29 domain_agents: expected a no-rows ERROR, got: $r2"
 
+  # Partial-result mode: data half (threat_score) survives a broken reasoning
+  # endpoint instead of being discarded.
+  local r2pf; r2pf=$(sqlq \
+    "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
+    "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+    "SELECT fractal_agent_anomaly_triage('bt_da_logs','metric','ts','host','host-1',32);")
+  [[ "$r2pf" == *'"reasoning_step_failed"'* && "$r2pf" == *'"threat_score"'* ]] \
+    && pass "29 domain_agents: anomaly_triage partial document on a broken reasoning endpoint" \
+    || fail "29 domain_agents: anomaly_triage expected the partial document, got: $r2pf"
+  sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+       "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
+
   # --- 2: fractal_agent_recall_hybrid (pure retrieval, cohort filter,
   # no LLM) -- the exact case a prior cohort-building bug broke (row_
   # number computed after WHERE-filtering instead of over the full
@@ -3225,6 +3458,41 @@ gate_29_domain_agents() {
   [[ "$r3" == *'"mem_id":1'* && "$r3" == *'"mem_id":3'* && "$r3" != *'"mem_id":2'* ]] \
     && pass "29 domain_agents: recall_hybrid cohort filter includes only kind='a' rows" \
     || fail "29 domain_agents: expected mem_id 1 and 3 only (not 2), got: $r3"
+  if expect_err "expects 3 to 8 args" \
+      "SELECT fractal_agent_recall_hybrid('bt_da_mem','emb');"; then
+    pass "29 domain_agents: recall_hybrid rejects too few args"
+  else
+    fail "29 domain_agents: recall_hybrid accepted too few args"
+  fi
+  if expect_err "mem_table, vec_col, query_vec are required" \
+      "SELECT fractal_agent_recall_hybrid(NULL,'emb','1.0,0.0,0.0');"; then
+    pass "29 domain_agents: recall_hybrid rejects a NULL required arg"
+  else
+    fail "29 domain_agents: recall_hybrid accepted a NULL required arg"
+  fi
+  if expect_err "plain identifiers" \
+      "SELECT fractal_agent_recall_hybrid('bt_da_mem; drop table bt_da_mem','emb','1.0,0.0,0.0');"; then
+    pass "29 domain_agents: recall_hybrid rejects a non-identifier table name"
+  else
+    fail "29 domain_agents: recall_hybrid accepted a non-identifier table name"
+  fi
+  if expect_err "query_vec must be a CSV/JSON vector" \
+      "SELECT fractal_agent_recall_hybrid('bt_da_mem','emb','bad!vec');"; then
+    pass "29 domain_agents: recall_hybrid rejects a malformed query_vec"
+  else
+    fail "29 domain_agents: recall_hybrid accepted a malformed query_vec"
+  fi
+  # Cohort filter matches zero rows (NOT a SQL error) -- the exact
+  # shape of the uninitialized-err-buffer bug this session fixed in
+  # da_build_cohort/da_table_has_rows: a legitimate zero-row match
+  # must raise the clean "filter matched no rows" message, never an
+  # engine error built from leftover stack bytes.
+  if expect_err "filter matched no rows in bt_da_mem" \
+      "SELECT fractal_agent_recall_hybrid('bt_da_mem','emb','1.0,0.0,0.0','kind','no-such-kind');"; then
+    pass "29 domain_agents: recall_hybrid raises a clean ERROR when the cohort filter matches no rows"
+  else
+    fail "29 domain_agents: recall_hybrid expected a clean no-match ERROR"
+  fi
 
   # --- 3: fractal_agent_regime_triage (array-in + dfa/drift + reason) -
   local series; series=$(awk 'BEGIN{srand(7); out="";
@@ -3285,6 +3553,19 @@ gate_29_domain_agents() {
   else
     fail "29 domain_agents: unknown metric accepted"
   fi
+
+  # Partial-result mode: data half (intercepted/nearest_distance) survives a
+  # broken reasoning endpoint instead of being discarded.
+  local r5pf; r5pf=$(sqlq \
+    "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
+    "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+    "SELECT fractal_agent_outlier_intercept('0.95,0.05,0.0',
+       'bt_da_badstates', 'state_vec', 0.5);")
+  [[ "$r5pf" == *'"reasoning_step_failed"'* && "$r5pf" == *'"intercepted"'* ]] \
+    && pass "29 domain_agents: outlier_intercept partial document on a broken reasoning endpoint" \
+    || fail "29 domain_agents: outlier_intercept expected the partial document, got: $r5pf"
+  sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+       "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
 
   # --- 5: fractal_agent_recommend_diverse (real catalog id + score) ----
   sqlq "
@@ -3364,6 +3645,35 @@ gate_29_domain_agents() {
   grep <<< "$r8b" -q 'domain-agent-canary' \
     && pass "29 domain_agents: patient_deterioration_triage composes hybrid+trajectory -> reason (canary)" \
     || fail "29 domain_agents: expected the canary in rationale, got: $r8b"
+
+  # Partial-result mode: data half (nearest_cohort_id/cohort_distance) survives a
+  # broken reasoning endpoint instead of being discarded.
+  local r8pf; r8pf=$(sqlq \
+    "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
+    "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+    "SELECT fractal_agent_patient_deterioration_triage(
+       'bt_da_patients','vitals','0.9,-0.8,0.7,0.6',
+       '0.1,0.1,0.1,0.1','0.95,-0.85,0.75,0.65',NULL,5,'id');")
+  [[ "$r8pf" == *'"reasoning_step_failed"'* && "$r8pf" == *'"nearest_cohort_id"'* ]] \
+    && pass "29 domain_agents: patient_deterioration_triage partial document on a broken reasoning endpoint" \
+    || fail "29 domain_agents: patient_deterioration_triage expected the partial document, got: $r8pf"
+  sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+       "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
+
+  if expect_err "expects 5 to 8 args" \
+      "SELECT fractal_agent_patient_deterioration_triage('bt_da_patients','vitals');"; then
+    pass "29 domain_agents: patient_deterioration_triage rejects too few args"
+  else
+    fail "29 domain_agents: patient_deterioration_triage accepted too few args"
+  fi
+  if expect_err "must be CSV/JSON vectors" \
+      "SELECT fractal_agent_patient_deterioration_triage(
+        'bt_da_patients','vitals','0.9,-0.8,0.7,0.6','bad!vec','bad!vec',NULL,5,'id');"; then
+    pass "29 domain_agents: patient_deterioration_triage rejects a malformed baseline_vec/current_vec"
+  else
+    fail "29 domain_agents: patient_deterioration_triage accepted a malformed baseline_vec/current_vec"
+  fi
+
   sqlq "DELETE FROM bt_da_patients;" >/dev/null 2>&1
   if expect_err "no patient rows in bt_da_patients" \
       "SELECT fractal_agent_patient_deterioration_triage(
@@ -3429,6 +3739,20 @@ gate_29_domain_agents() {
   grep <<< "$r10b" -q 'domain-agent-canary' \
     && pass "29 domain_agents: schedule_workload composes search+telemetry -> reason (canary)" \
     || fail "29 domain_agents: expected the canary in rationale, got: $r10b"
+
+  # Partial-result mode: data half (assigned_node/confidence) survives a broken
+  # reasoning endpoint instead of being discarded.
+  local r10pf; r10pf=$(sqlq \
+    "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
+    "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+    "SELECT fractal_agent_schedule_workload(
+       '0.8,0.1,0.0,0.0,0.1','bt_da_nodes','capability','id',30,50,5);")
+  [[ "$r10pf" == *'"reasoning_step_failed"'* && "$r10pf" == *'"assigned_node"'* ]] \
+    && pass "29 domain_agents: schedule_workload partial document on a broken reasoning endpoint" \
+    || fail "29 domain_agents: schedule_workload expected the partial document, got: $r10pf"
+  sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+       "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
+
   sqlq "DELETE FROM bt_da_nodes;" >/dev/null 2>&1
   if expect_err "no node rows in bt_da_nodes" \
       "SELECT fractal_agent_schedule_workload(
@@ -3463,6 +3787,22 @@ gate_29_domain_agents() {
   grep <<< "$r11b" -Eq '^[0-9]+$' \
     && pass "29 domain_agents: rebalance_sibling nearest_alloc_id is the real trajectory nearest" \
     || fail "29 domain_agents: expected a numeric nearest_alloc_id, got: $r11b"
+
+  # Partial-result mode: data half (sharpe/weights/nearest_alloc_id) survives a
+  # broken reasoning endpoint instead of being discarded.
+  local r11pf; r11pf=$(sqlq \
+    "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
+    "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+    "SELECT fractal_agent_rebalance_sibling(
+       '0.05,0.10,0.15,0.20',
+       '0.04,0.0,0.0,0.0,0.0,0.09,0.0,0.0,0.0,0.0,0.16,0.0,0.0,0.0,0.0,0.25',
+       4,'bt_da_alloc','alloc','0.25,0.25,0.25,0.25',NULL,5,'id');")
+  [[ "$r11pf" == *'"reasoning_step_failed"'* && "$r11pf" == *'"sharpe"'* ]] \
+    && pass "29 domain_agents: rebalance_sibling partial document on a broken reasoning endpoint" \
+    || fail "29 domain_agents: rebalance_sibling expected the partial document, got: $r11pf"
+  sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+       "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
+
   sqlq "DELETE FROM bt_da_alloc;" >/dev/null 2>&1
   if expect_err "no allocation rows in bt_da_alloc" \
       "SELECT fractal_agent_rebalance_sibling(
@@ -3504,6 +3844,22 @@ gate_29_domain_agents() {
   grep <<< "$r12b" -q 'domain-agent-canary' \
     && pass "29 domain_agents: detour_classify composes trajectory+boxcount -> reason (canary)" \
     || fail "29 domain_agents: expected the canary in rationale, got: $r12b"
+
+  # Partial-result mode: data half (nearest_fleet_id/trajectory_distance/
+  # trace_complexity) survives a broken reasoning endpoint instead of
+  # being discarded.
+  local r12pf; r12pf=$(sqlq \
+    "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
+    "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+    "SELECT fractal_agent_detour_classify(
+       'bt_da_vehicles','current','0.1,0.1,0.1,0.1','0.8,0.7,0.6,0.5',
+       '$trace',5,'id',2);")
+  [[ "$r12pf" == *'"reasoning_step_failed"'* && "$r12pf" == *'"nearest_fleet_id"'* ]] \
+    && pass "29 domain_agents: detour_classify partial document on a broken reasoning endpoint" \
+    || fail "29 domain_agents: detour_classify expected the partial document, got: $r12pf"
+  sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+       "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
+
   sqlq "DELETE FROM bt_da_vehicles;" >/dev/null 2>&1
   if expect_err "no vehicle rows in bt_da_vehicles" \
       "SELECT fractal_agent_detour_classify(
@@ -3540,6 +3896,22 @@ gate_29_domain_agents() {
   grep <<< "$r13b" -q 'domain-agent-canary' \
     && pass "29 domain_agents: track_anomaly composes trajectory+dfa -> reason (canary)" \
     || fail "29 domain_agents: expected the canary in rationale, got: $r13b"
+
+  # Partial-result mode: data half (nearest_fleet_id/trajectory_distance/
+  # dfa_exponent) survives a broken reasoning endpoint instead of
+  # being discarded.
+  local r13pf; r13pf=$(sqlq \
+    "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
+    "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+    "SELECT fractal_agent_track_anomaly(
+       'bt_da_tracks','current','0.1,0.1,0.1,0.1','0.7,-0.4,-0.8,0.9',
+       '$heading',5,'id');")
+  [[ "$r13pf" == *'"reasoning_step_failed"'* && "$r13pf" == *'"nearest_fleet_id"'* ]] \
+    && pass "29 domain_agents: track_anomaly partial document on a broken reasoning endpoint" \
+    || fail "29 domain_agents: track_anomaly expected the partial document, got: $r13pf"
+  sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+       "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
+
   sqlq "DELETE FROM bt_da_tracks;" >/dev/null 2>&1
   if expect_err "no track rows in bt_da_tracks" \
       "SELECT fractal_agent_track_anomaly(
@@ -3589,6 +3961,18 @@ gate_29_domain_agents() {
     fail "29 domain_agents: network_coverage_alert accepted a malformed point_cloud"
   fi
 
+  # Partial-result mode: data half (morph_dimension/lacunarity) survives a broken
+  # reasoning endpoint instead of being discarded.
+  local r14pf; r14pf=$(sqlq \
+    "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
+    "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+    "SELECT fractal_agent_network_coverage_alert('$cloud','$drift',2,48,0.5);")
+  [[ "$r14pf" == *'"reasoning_step_failed"'* && "$r14pf" == *'"morph_dimension"'* ]] \
+    && pass "29 domain_agents: network_coverage_alert partial document on a broken reasoning endpoint" \
+    || fail "29 domain_agents: network_coverage_alert expected the partial document, got: $r14pf"
+  sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+       "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
+
   # --- 14: fractal_agent_allocate (optimize_portfolio -> reason) +
   # cov-length rejection ------------------------------------------------
   local r15; r15=$(sqlq \
@@ -3617,6 +4001,18 @@ gate_29_domain_agents() {
     fail "29 domain_agents: allocate accepted a malformed mu/cov"
   fi
 
+  # Partial-result mode: data half (sharpe/allocation) survives a broken
+  # reasoning endpoint instead of being discarded.
+  local r15pf; r15pf=$(sqlq \
+    "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
+    "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+    "SELECT fractal_agent_allocate('0.05,0.1','1.0,0.0,0.0,1.0',1,'{}');")
+  [[ "$r15pf" == *'"reasoning_step_failed"'* && "$r15pf" == *'"sharpe"'* ]] \
+    && pass "29 domain_agents: allocate partial document on a broken reasoning endpoint" \
+    || fail "29 domain_agents: allocate expected the partial document, got: $r15pf"
+  sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+       "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
+
   # --- 15: fractal_agent_route_task (telemetry -> reason) + empty-
   # capability-table guard ----------------------------------------------
   sqlq "
@@ -3637,6 +4033,20 @@ gate_29_domain_agents() {
   grep <<< "$r16b" -q 'domain-agent-canary' \
     && pass "29 domain_agents: route_task composes telemetry -> reason (reason step ran)" \
     || fail "29 domain_agents: expected the canary in rationale, got: $r16b"
+
+  # Partial-result mode: data half (routed_to/confidence) survives a broken
+  # reasoning endpoint instead of being discarded.
+  local r16pf; r16pf=$(sqlq \
+    "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
+    "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+    "SELECT fractal_agent_route_task(
+       '0.1,0.2,0.3','bt_da_caps','emb','capability_name',1000);")
+  [[ "$r16pf" == *'"reasoning_step_failed"'* && "$r16pf" == *'"routed_to"'* ]] \
+    && pass "29 domain_agents: route_task partial document on a broken reasoning endpoint" \
+    || fail "29 domain_agents: route_task expected the partial document, got: $r16pf"
+  sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+       "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
+
   sqlq "DELETE FROM bt_da_caps;" >/dev/null 2>&1
   if expect_err "no capability rows in bt_da_caps" \
       "SELECT fractal_agent_route_task(
@@ -3672,9 +4082,52 @@ gate_29_domain_agents() {
     else
       fail "29 domain_agents: diverse_portfolios accepted a malformed mu/cov"
     fi
+
+    # Partial-result mode: data half (candidates/n_found) survives a broken
+    # reasoning endpoint instead of being discarded.
+    local r17pf; r17pf=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+      "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+      "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
+      "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+      "SELECT fractal_agent_diverse_portfolios('0.05,0.1','1.0,0.0,0.0,1.0',1);")
+    [[ "$r17pf" == *'"reasoning_step_failed"'* && "$r17pf" == *'"candidates"'* ]] \
+      && pass "29 domain_agents: diverse_portfolios partial document on a broken reasoning endpoint" \
+      || fail "29 domain_agents: diverse_portfolios expected the partial document, got: $r17pf"
   else
     skip "29 domain_agents: diverse_portfolios (mock core did not build)"
   fi
+
+  # --- 17: partial-result honesty (opt-in
+  # agent_partial_reasoning_fail). With the flag ON, a configured-but-
+  # failing reasoning endpoint (a path that cannot load) inside an
+  # agent whose data half already computed returns that data half plus
+  # "reasoning_step_failed" with the plugin's detail, instead of
+  # discarding the computation. With the flag OFF (the documented
+  # default) the same call still raises cleanly. The reasoning surface
+  # itself (fractal_reason etc.) is NOT covered: it IS the reasoning
+  # step, so its failure is the whole result and keeps raising either
+  # way. (bogus_plugin is hoisted to this gate's top, reused above too.)
+  if expect_err "failed to load reasoning plugin" \
+      "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" \
+      "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+      "SELECT fractal_agent_regime_triage('$series',32);"; then
+    pass "29 domain_agents: flag off (default) keeps the reasoning-endpoint raise"
+  else
+    fail "29 domain_agents: expected the default raise with agent_partial_reasoning_fail off"
+  fi
+  local r18; r18=$(sqlq \
+    "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
+    "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+    "SELECT fractal_agent_regime_triage('$series',32);")
+  grep <<< "$r18" -q '"reasoning_step_failed"' \
+    && pass "29 domain_agents: flag on returns the data half plus reasoning_step_failed" \
+    || fail "29 domain_agents: expected the partial document, got: $r18"
+  grep <<< "$r18" -q '"dfa_exponent"' \
+    && pass "29 domain_agents: partial document carries the computed dfa_exponent" \
+    || fail "29 domain_agents: partial document lost the data half, got: $r18"
+
+  # Restore the live mock for any later cases in this gate.
+  sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" >/dev/null 2>&1
 
   sqlq "
     DROP TABLE IF EXISTS bt_da_caps;
@@ -3726,6 +4179,11 @@ gate_30_feature_store() {
     && pass "30 feature_store: negative doc_id rejected" \
     || fail "30 feature_store: negative doc_id should have raised a clean error"
 
+  expect_err "invalid feature_array" \
+    "SELECT fractal_store_morphology(5, 'bad!vec');" \
+    && pass "30 feature_store: malformed feature_array rejected" \
+    || fail "30 feature_store: malformed feature_array should have raised a clean error"
+
   expect_err "k must be > 0" \
     "SELECT fractal_mine_topology_negatives('0.0,0.0,0.0', 0);" \
     && pass "30 feature_store: non-positive k rejected" \
@@ -3757,7 +4215,7 @@ gate_30_feature_store() {
 # environment. The driver below instead builds/mutates rows directly at
 # the storage layer (the exact rows ledger_chain_insert would produce)
 # and exercises fractal_ledger_verify(), which is deliberately NOT
-# enterprise-gated (PG parity) and shares the same entry_hash/prev_hash
+# enterprise-gated and shares the same entry_hash/prev_hash
 # recompute logic ledger_verify_tip uses for the O(1) load-time check --
 # so this is real coverage of the chain algorithm itself, just entered
 # from a different call site than fractal_ledger_flush/load. A checkout
@@ -3908,7 +4366,7 @@ gate_31_ledger_chain() {
   fi
 
   # fractal_ledger_verify() is the one function in this surface that is
-  # NOT enterprise-gated (PG parity: a pure read-only forensic query) --
+  # NOT enterprise-gated (it is a pure read-only forensic query) --
   # it must work standalone, creating an empty chain table on first touch.
   local vz; vz=$(sqlq "SELECT fractal_ledger_verify();")
   [[ "$vz" == '{"ok":true,"rows_verified":0}' ]] \
@@ -4095,7 +4553,7 @@ gate_33_tsan_ledger_concurrent() {
 
   if ! env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$MAKE" tsan-ledger-runner \
        >"$TMPROOT/fractalsql_bt_tsan_runner_build.log" 2>&1; then
-    fail "33 tsan_ledger_concurrent: harness build failed — see $TMPROOT/fractalsql_bt_tsan_runner_build.log"
+    fail "33 tsan_ledger_concurrent: harness build failed; see $TMPROOT/fractalsql_bt_tsan_runner_build.log"
     return
   fi
 
@@ -4110,13 +4568,13 @@ gate_33_tsan_ledger_concurrent() {
   if [[ $rc -eq 0 ]] && ! grep -qE "WARNING: ThreadSanitizer|==ERROR" <<< "$out"; then
     pass "33 tsan_ledger_concurrent: 8 concurrent connections, real BEGIN IMMEDIATE serialization ($out)"
   else
-    fail "33 tsan_ledger_concurrent: rc=$rc — $out"
+    fail "33 tsan_ledger_concurrent: rc=$rc: $out"
   fi
 }
 
 gate_34_oom_inject() {
   if [[ "$sysname" != "Linux" ]]; then
-    skip "34 oom_inject (Linux only — dladdr()-based LD_PRELOAD interception)"
+    skip "34 oom_inject (Linux only; dladdr()-based LD_PRELOAD interception)"
     return
   fi
   # A sanitizer runtime is already LD_PRELOADed (main(), below) and
@@ -4221,6 +4679,301 @@ gate_35_ed25519() {
   fi
 }
 
+gate_37_mcp_smoke() {
+  # 8.3's MCP gate: builds on the already-built extension (bt_setup
+  # resolved $EXT / compiled the mock reasoning fixtures), starts the
+  # stdio MCP server subprocess against it, and drives a real client
+  # session through initialize / tools-list / per-tier tools/call round
+  # trips -- happy paths and clean error paths side by side, mirroring
+  # the SQL-level gates' own pairing style. The client driver lives at
+  # mcp/tests/mcp_smoke_client.py so the .ps1 gate drives the same file.
+
+  # Self-skip until the MCP server code exists (the posture is kept
+  # even though it now does). The server itself is the native C++17
+  # binary -- the only python3 dependency here is this
+  # gate's own JSON-RPC client driver, the same driver constraint the
+  # python-driven gates already carry.
+  if [[ ! -f "$HERE/mcp/tests/mcp_smoke_client.py" \
+        || ! -f "$HERE/mcp/src/main.cpp" ]]; then
+    skip "37 mcp_smoke (mcp/ server code not present)"
+    return
+  fi
+  local mcp_py
+  mcp_py="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
+  [[ -n "$PY" ]] && mcp_py="$PY"
+  if [[ -z "$mcp_py" ]]; then
+    skip "37 mcp_smoke (no python3 on PATH -- the smoke client driver needs it)"
+    return
+  fi
+  if [[ "$(uname -s)" = "Darwin" && "$ASAN$UBSAN$TSAN" != "000" ]]; then
+    skip "37 mcp_smoke (Darwin + --asan/--ubsan/--tsan: skipping like the other runtime gates)"
+    return
+  fi
+
+  # The server binary: POSIX builds it from mcp/Makefile (incremental;
+  # only when missing or stale against mcp/src). On Windows the .sh
+  # harness uses the checked-in mcp/dist/windows-mcp build (built by
+  # mcp/scripts/windows/build.bat -- this harness's gcc OOMs on the
+  # amalgamation, per the Makefile's own note) as-is.
+  local mcp_exe
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      mcp_exe="$HERE/mcp/dist/windows-mcp/fractalsql-sqlite-mcp.exe"
+      if [[ ! -f "$mcp_exe" ]]; then
+        skip "37 mcp_smoke (no mcp/dist/windows-mcp build -- run mcp\\scripts\\windows\\build.bat)"
+        return
+      fi
+      ;;
+    *)
+      mcp_exe="$HERE/mcp/fractalsql-sqlite-mcp"
+      local needs_build=0
+      if [[ ! -x "$mcp_exe" ]]; then
+        needs_build=1
+      elif [[ -n "$(find "$HERE/mcp/src" \( -name '*.cpp' -o -name '*.h' \) \
+                    -newer "$mcp_exe" -print 2>/dev/null | head -n1)" ]]; then
+        needs_build=1
+      fi
+      # --coverage always forces a full rebuild, mtime check or not: a
+      # mtime-fresh binary from an earlier PLAIN run would otherwise be
+      # reused as-is (no COVERAGE=1, no instrumentation), silently
+      # producing a zero/empty report instead of an error. `make clean`
+      # first for the same reason gate 01 does it for the core .so --
+      # plain `make` has no flag-change tracking, only mtimes, so
+      # stale non-instrumented .o files from a prior plain build would
+      # otherwise NOT get recompiled under COVERAGE=1 and would link
+      # straight into the "coverage" binary uninstrumented.
+      if [[ "$COVERAGE" -eq 1 ]]; then
+        needs_build=1
+        rm -f "$HERE/mcp"/*.gcda "$HERE/mcp/src"/*.gcda "$HERE/mcp/src/adapters"/*.gcda
+        env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES make -C "$HERE/mcp" clean >&2
+      fi
+      if [[ "$needs_build" = 1 ]]; then
+        if ! command -v make >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1; then
+          skip "37 mcp_smoke (no make/g++ toolchain to build the MCP server binary)"
+          return
+        fi
+        # Darwin: OpenSSL isn't in the macOS SDK at all, and Homebrew's
+        # openssl@3 is keg-only (never symlinked into the default -I/-L
+        # search path) -- mcp/Makefile's bare -lssl/-lcrypto only
+        # resolves when CXXFLAGS points at it explicitly (same fix
+        # scripts/package-darwin.sh carries for the release build).
+        local mcp_cxxflags=""
+        if [[ "$(uname -s)" = "Darwin" ]]; then
+          local openssl_prefix
+          openssl_prefix="$(brew --prefix openssl@3 2>/dev/null || true)"
+          if [[ -z "$openssl_prefix" || ! -f "$openssl_prefix/include/openssl/evp.h" ]]; then
+            skip "37 mcp_smoke (Homebrew openssl@3 not found -- brew install openssl@3 to build the MCP server)"
+            return
+          fi
+          mcp_cxxflags="-std=c++17 -O2 -Wall -Wextra -I${openssl_prefix}/include -L${openssl_prefix}/lib"
+        fi
+        local mcp_env=(env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES)
+        [[ -n "$mcp_cxxflags" ]] && mcp_env+=(CXXFLAGS="$mcp_cxxflags")
+        local mcp_make_args=()
+        [[ "$COVERAGE" -eq 1 ]] && mcp_make_args+=(COVERAGE=1)
+        if ! "${mcp_env[@]}" make -C "$HERE/mcp" ${mcp_make_args[@]+"${mcp_make_args[@]}"} >&2; then
+          fail "37 mcp_smoke: MCP server build failed"
+          return
+        fi
+      fi
+      ;;
+  esac
+
+  # Windows: the mock reasoning fixture fopens a CWD-relative canary
+  # file, so the MCP server runs with its CWD at $BTROOT (where the
+  # harness keeps the fixed file contracts); POSIX fixtures read the
+  # absolute /tmp contract path, unaffected by CWD. The client driver
+  # gets everything through the environment, per the MCP server's own
+  # configuration convention.
+  local bootsql="SELECT fractalsql_set('reasoning_plugin','$MOCK');"
+
+  # $EXT is CWD-relative when resolve_ext() set it (single-gate runs),
+  # but gate 01 sets it to the already-absolute "$HERE/fractalsql.so"
+  # (a full run hits gate 01 first) -- prepending $HERE again in that
+  # case doubles the path. The MCP server runs with its CWD at
+  # $BTROOT, so it needs the ABSOLUTE form of the extension path
+  # either way.
+  local ext_for_abs="$EXT"
+  [[ "$ext_for_abs" = /* ]] || ext_for_abs="$HERE/$ext_for_abs"
+  local ext_abs="$EXTW"
+  if command -v cygpath >/dev/null 2>&1; then
+    ext_abs="$(cygpath -m "$ext_for_abs" 2>/dev/null)" || ext_abs="$EXTW"
+  else
+    ext_abs="$ext_for_abs"
+  fi
+
+  # Unlike the ed25519/oom-inject probes above, this process is NOT left
+  # unsanitized end to end: the MCP server (mcp_exe, itself built plain --
+  # mcp/Makefile has no ASAN_ARGS support) dlopens fractalsql.so at runtime
+  # via sqlite3_load_extension(), and under --asan/--ubsan/--tsan that .so
+  # IS sanitizer-built. That's the same "sanitized library dlopen'd into an
+  # unsanitized host" case main() already arranges LD_PRELOAD for (see its
+  # own comment) -- stripping LD_PRELOAD here (as the build step correctly
+  # does, to keep the compiler itself unsanitized) would instead reproduce
+  # gate 34/35's "ASan runtime does not come first" abort the moment the
+  # extension loads.
+  MCP_HERE="$(wpath "$HERE/mcp")" \
+  MCP_SERVER_EXE="$(wpath "$mcp_exe")" \
+  MCP_CANARY_FILE="$SQLTXT" \
+  MCP_SERVER_CWD="$(wpath "$BTROOT")" \
+  SQLITE_DB_PATH="$DBW" \
+  FRACTALSQL_EXTENSION_PATH="$ext_abs" \
+  FSQL_MCP_LOG_LEVEL=debug \
+  FRACTALSQL_BOOTSTRAP_SQL="$bootsql" \
+    "$mcp_py" -u "$HERE/mcp/tests/mcp_smoke_client.py"
+  local rc=$?
+  if [[ $rc -ne 0 ]]; then
+    fail "37 mcp_smoke: client driver exited $rc"
+  else
+    pass "37 mcp_smoke: full MCP session (initialize, 81-tool catalog, discovery/cognition/agency round trips, enterprise clean-error path, \$ / cancel, resources+prompts)"
+  fi
+}
+
+gate_38_mcp_https() {
+  # The optional direct-TLS mode (--https): deliberately narrow (see
+  # mcp/tests/mcp_https_smoke_client.py's own docstring). Gate 37's HTTP
+  # phase already exhausts the plaintext transport's behavior; this one
+  # proves only what's specific to --https: fail-fast on a bad/missing
+  # cert, the port actually speaking TLS (not dual-stack plaintext+TLS),
+  # and the Bearer-token check still applying underneath TLS.
+  if [[ ! -f "$HERE/mcp/tests/mcp_https_smoke_client.py" \
+        || ! -f "$HERE/mcp/src/main.cpp" ]]; then
+    skip "38 mcp_https (mcp/ server code not present)"
+    return
+  fi
+  local mcp_py
+  mcp_py="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
+  [[ -n "$PY" ]] && mcp_py="$PY"
+  if [[ -z "$mcp_py" ]]; then
+    skip "38 mcp_https (no python3 on PATH -- the smoke client driver needs it)"
+    return
+  fi
+  if ! command -v openssl >/dev/null 2>&1; then
+    skip "38 mcp_https (no openssl CLI on PATH to generate the throwaway TLS cert/key)"
+    return
+  fi
+  if [[ "$(uname -s)" = "Darwin" && "$ASAN$UBSAN$TSAN" != "000" ]]; then
+    skip "38 mcp_https (Darwin + --asan/--ubsan/--tsan: skipping like the other runtime gates)"
+    return
+  fi
+
+  # Same binary gate 37 builds/reuses ($HERE/mcp/fractalsql-sqlite-mcp or
+  # the checked-in Windows build); duplicated here rather than factored
+  # out so this gate stays runnable standalone and never risks gate 37's
+  # own (much larger, extensively exercised) build path.
+  local mcp_exe
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      mcp_exe="$HERE/mcp/dist/windows-mcp/fractalsql-sqlite-mcp.exe"
+      if [[ ! -f "$mcp_exe" ]]; then
+        skip "38 mcp_https (no mcp/dist/windows-mcp build -- run mcp\\scripts\\windows\\build.bat)"
+        return
+      fi
+      ;;
+    *)
+      mcp_exe="$HERE/mcp/fractalsql-sqlite-mcp"
+      local needs_build=0
+      if [[ ! -x "$mcp_exe" ]]; then
+        needs_build=1
+      elif [[ -n "$(find "$HERE/mcp/src" \( -name '*.cpp' -o -name '*.h' \) \
+                    -newer "$mcp_exe" -print 2>/dev/null | head -n1)" ]]; then
+        needs_build=1
+      fi
+      # Unlike gate 37, this gate never forces a --coverage rebuild: the
+      # TLS handshake path it tests doesn't depend on instrumentation,
+      # and a second full mcp/ rebuild here would just double the
+      # runtime under --coverage for no new signal (the coverage numbers
+      # themselves come from gate 37's own rebuild).
+      if [[ "$needs_build" = 1 ]]; then
+        if ! command -v make >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1; then
+          skip "38 mcp_https (no make/g++ toolchain to build the MCP server binary)"
+          return
+        fi
+        local mcp_cxxflags=""
+        if [[ "$(uname -s)" = "Darwin" ]]; then
+          local openssl_prefix
+          openssl_prefix="$(brew --prefix openssl@3 2>/dev/null || true)"
+          if [[ -z "$openssl_prefix" || ! -f "$openssl_prefix/include/openssl/evp.h" ]]; then
+            skip "38 mcp_https (Homebrew openssl@3 not found -- brew install openssl@3 to build the MCP server)"
+            return
+          fi
+          mcp_cxxflags="-std=c++17 -O2 -Wall -Wextra -I${openssl_prefix}/include -L${openssl_prefix}/lib"
+        fi
+        local mcp_env=(env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES)
+        [[ -n "$mcp_cxxflags" ]] && mcp_env+=(CXXFLAGS="$mcp_cxxflags")
+        if ! "${mcp_env[@]}" make -C "$HERE/mcp" >&2; then
+          fail "38 mcp_https: MCP server build failed"
+          return
+        fi
+      fi
+      ;;
+  esac
+
+  # Throwaway self-signed cert/key, 1-day validity, CN=127.0.0.1 (the only
+  # host this gate ever connects to). Regenerated every run; never reused
+  # across invocations and never committed anywhere.
+  local tls_cert="$TMPROOT/fractalsql_bt_mcp_https_cert.pem"
+  local tls_key="$TMPROOT/fractalsql_bt_mcp_https_key.pem"
+  rm -f "$tls_cert" "$tls_key"
+  # MSYS_NO_PATHCONV: under MSYS/git-bash (the MINGW*/MSYS*/CYGWIN* leg
+  # above), an MSYS-built openssl otherwise rewrites the leading "/" in
+  # -subj as a Windows path (the well-known MSYS argv path-conversion
+  # gotcha).
+  # -config pointing at a minimal synthesized [req]/distinguished_name
+  # section, rather than OPENSSL_CONF=/dev/null (empty config): whichever
+  # openssl resolves on PATH may carry a baked-in default config path
+  # from an unrelated install (seen in practice on Windows: PostgreSQL's
+  # psqlODBC ships its own openssl.exe pointing at its own
+  # etc/openssl.cnf, which `openssl req` hard-fails loading if it doesn't
+  # exist) -- but macOS's /usr/bin/openssl is Apple's LibreSSL, not
+  # OpenSSL (Homebrew's real openssl@3 is keg-only and never reaches
+  # PATH), and LibreSSL's `req`, unlike OpenSSL >= 1.1.1, has no built-in
+  # fallback when the config has no distinguished_name section -- an
+  # empty/absent config (including /dev/null) hard-fails there even
+  # though -subj supplies every value a prompt would have asked for. An
+  # explicit minimal config satisfies both implementations.
+  local tls_cnf="$TMPROOT/fractalsql_bt_mcp_https_openssl.cnf"
+  printf '[req]\ndistinguished_name = dn\nprompt = no\n[dn]\n' >"$tls_cnf"
+  if ! MSYS_NO_PATHCONV=1 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=127.0.0.1" \
+        -config "$tls_cnf" -keyout "$tls_key" -out "$tls_cert" >"$PDIRW/mcp_https_cert_gen.log" 2>&1; then
+    fail "38 mcp_https: openssl req failed to generate the throwaway cert/key (see $PDIRW/mcp_https_cert_gen.log)"
+    return
+  fi
+
+  # $EXT is CWD-relative when resolve_ext() set it (single-gate runs), but
+  # gate 01 sets it to the already-absolute "$HERE/fractalsql.so" (a full
+  # run hits gate 01 first) -- same resolution gate 37 does, since this
+  # gate's one real tools/call also dlopens the extension.
+  local ext_for_abs="$EXT"
+  [[ "$ext_for_abs" = /* ]] || ext_for_abs="$HERE/$ext_for_abs"
+  local ext_abs="$EXTW"
+  if command -v cygpath >/dev/null 2>&1; then
+    ext_abs="$(cygpath -m "$ext_for_abs" 2>/dev/null)" || ext_abs="$EXTW"
+  else
+    ext_abs="$ext_for_abs"
+  fi
+
+  # LD_PRELOAD is NOT stripped here (unlike the build step above): under
+  # --asan/--ubsan/--tsan the extension this process dlopens IS
+  # sanitizer-built, so the sanitizer runtime must already be first in
+  # this process's own library list -- gate 37's own comment on its
+  # matching invocation explains the same requirement.
+  MCP_SERVER_EXE="$(wpath "$mcp_exe")" \
+  MCP_SERVER_CWD="$(wpath "$BTROOT")" \
+  MCP_HTTPS_PORT=18990 \
+  MCP_HTTPS_CERT="$(wpath "$tls_cert")" \
+  MCP_HTTPS_KEY="$(wpath "$tls_key")" \
+  SQLITE_DB_PATH="$DBW" \
+  FRACTALSQL_EXTENSION_PATH="$ext_abs" \
+    "$mcp_py" -u "$HERE/mcp/tests/mcp_https_smoke_client.py"
+  local rc=$?
+  if [[ $rc -ne 0 ]]; then
+    fail "38 mcp_https: client driver exited $rc"
+  else
+    pass "38 mcp_https: --https fail-fast misconfig, TLS-only listening, and a full authenticated JSON-RPC round trip"
+  fi
+}
+
 gate_36_extract_population() {
   if [[ -z "$CC" ]]; then
     skip "36 extract_population (no C compiler on PATH)"
@@ -4304,6 +5057,8 @@ gate_title() {
     34) echo "oom_inject" ;;
     35) echo "ed25519" ;;
     36) echo "extract_population" ;;
+    37) echo "mcp_smoke" ;;
+    38) echo "mcp_https" ;;
   esac
 }
 
@@ -4330,6 +5085,8 @@ run_gate() {
     34) gate_34_oom_inject ;;
     35) gate_35_ed25519 ;;
     36) gate_36_extract_population ;;
+    37) gate_37_mcp_smoke ;;
+    38) gate_38_mcp_https ;;
   esac
 }
 
@@ -4376,8 +5133,8 @@ main() {
         export LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$preload"
         # LeakSanitizer has no way to tell "the extension under test
         # leaked" from "the system libsqlite3.so (or, for the gate
-        # 08/16/19/25/29/31 python drivers, CPython itself) — neither
-        # ASan-instrumented — still holds normal long-lived allocations
+        # 08/16/19/25/29/31 python drivers, CPython itself): neither
+        # ASan-instrumented, and still holding normal long-lived allocations
         # at process exit." Both host processes are un-instrumented and
         # never freed by design, so leak-checking them is unreliable by
         # construction; only AddressSanitizer's actual corruption
@@ -4413,7 +5170,7 @@ main() {
   PDIR="$BTROOT/fractalsql_bt_$$"
   # fsql_load_reasoning requires the configured plugin path to be
   # canonical (realpath(path) == path); on MSYS realpath answers in
-  # Windows backslash form, so the configured paths must be too —
+  # Windows backslash form, so the configured paths must be too;
   # wpath's forward-slash mixed form is rejected as non-canonical.
   # PDIRSEP matches the join separator to PDIRW's form.
   if command -v cygpath >/dev/null 2>&1; then
@@ -4436,14 +5193,14 @@ main() {
     gates=("${DEFAULT_GATES[@]}")
   fi
 
-  # gate 33 is --tsan-only (see its own function) — not in DEFAULT_GATES
+  # gate 33 is --tsan-only (see its own function); not in DEFAULT_GATES
   # so a plain run never pays for it, appended here so a full --tsan
   # run exercises it without needing a separate --gate 33 invocation.
   if [[ "$TSAN" -eq 1 && "$MODE" == "default" && -z "$ONE_GATE" ]]; then
     gates+=("33")
   fi
 
-  printf "fractalsql-sqlite build_test — %s — gates: %s\n" \
+  printf "fractalsql-sqlite build_test: %s: gates: %s\n" \
     "$MODE" "${gates[*]}"
   printf "tmp root: %s (db under it) | timeout x%s\n" "$BTROOT" "$TIMEOUT_MULT"
 
@@ -4456,7 +5213,7 @@ main() {
       continue
     fi
     if [[ "$g" != "01" && "$g" != "21" && "$ran_setup" -eq 0 ]]; then
-      bt_setup || { echo "runtime setup failed — aborting"; exit 1; }
+      bt_setup || { echo "runtime setup failed: aborting"; exit 1; }
       ran_setup=1
     fi
     t0=$SECONDS
@@ -4470,10 +5227,10 @@ main() {
   fi
 
   if [[ "$FAILED" -eq 1 ]]; then
-    printf "\n${R}FAILED${Z} — see the [FAIL] lines above\n"
+    printf "\n${R}FAILED${Z}: see the [FAIL] lines above\n"
     exit 1
   fi
-  printf "\n${G}ALL GREEN${Z} — %s gate(s) passed\n" "${#gates[@]}"
+  printf "\n${G}ALL GREEN${Z}: %s gate(s) passed\n" "${#gates[@]}"
   exit 0
 }
 

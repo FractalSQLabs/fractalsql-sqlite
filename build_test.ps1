@@ -236,7 +236,8 @@ if (-not (Test-Path -LiteralPath $script:BTROOT)) {
 
 $script:DEFAULT_GATES = @('01', '02', '03', '04', '05', '06', '07', '08', '09', '10',
                           '11', '12', '13', '14', '15', '16', '17', '18', '19', '20',
-                          '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32')
+                          '22', '23', '24', '25', '26', '27', '28', '29', '30', '31',
+                          '32', '37', '38')
 $script:QUICK_GATES = @('01', '02')
 $script:FUZZ_GATES = @('21')
 
@@ -400,7 +401,7 @@ function Resolve-Ext {
 # Run SQL through a FRESH connection with the extension loaded.
 # Each argument is one statement; a script can also be piped on stdin.
 # Config is per-connection, so every gate invocation carries its own
-# fractalsql_set() preamble -- the SQLite analog of pg_set_guc().
+# fractalsql_set() preamble -- the connection's own config surface.
 function Sqlq {
     [CmdletBinding()]
     param(
@@ -839,10 +840,10 @@ function Gate-01-Build {
         Pass '01 build (MSVC via scripts\windows\build.bat)'
     }
     else {
-        Fail "01 build — see $buildLog"
+        Fail "01 build: see $buildLog"
         # MSVC diagnostics often lack the literal "error:" string
         # ("fatal error C1083", "error LNK2001:"), so match broadly and
-        # fall back to the log tail — otherwise the failure prints
+        # fall back to the log tail; otherwise the failure prints
         # nothing at all (observed on the windows-2022 gates).
         $hits = Get-Content -LiteralPath $buildLog -ErrorAction SilentlyContinue |
             Select-String -Pattern 'error|LNK|fatal|unresolved' | Select-Object -First 6
@@ -859,8 +860,8 @@ function Gate-01-Build {
 
 function Gate-02-Smoke {
     $ver = Sqlq 'SELECT fractalsql_version();'
-    if ($ver -eq '2.0.5') { Pass "02 smoke: version=$ver" }
-    else { Fail "02 smoke: version='$ver' (want 2.0.5)" }
+    if ($ver -eq '2.0.6') { Pass "02 smoke: version=$ver" }
+    else { Fail "02 smoke: version='$ver' (want 2.0.6)" }
     # fractal_search convergence: self-distance ~0
     $d = Sqlq "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');"
     if ($d -eq '0.0' -or (PyAbsLt1e6 $d)) { Pass "02 smoke: fractal_search self-distance=$d" }
@@ -1026,13 +1027,13 @@ function Gate-07-EvilLyingLength {
         $r = Sqlq @Stmts
         $rc = $script:SqlqRc
         if (Test-Crashed $r $rc) {
-            Fail "07 $Label — process crashed — $r"
+            Fail "07 ${Label}: process crashed ($r)"
         }
         elseif ($r.Contains('implausible response length')) {
             Pass "07 $Label rejected cleanly"
         }
         else {
-            Fail "07 $Label — expected rejection, got: $r"
+            Fail "07 ${Label}: expected rejection, got: $r"
         }
     }
     Set-EvilTrigger '1'
@@ -1067,7 +1068,7 @@ except Exception as e:
     print("FAIL control: %s" % e)
     sys.exit(1)
 
-# Boundary: deny the introspection of bt_customers — both the PRAGMA
+# Boundary: deny the introspection of bt_customers; both the PRAGMA
 # table_info form (what schema_context actually issues per table; on
 # builds without the bound-pragma form the argument arrives as arg2)
 # and any direct READ of the table. The introspection must fail, and
@@ -1113,8 +1114,7 @@ function Gate-08-Authz {
 }
 
 function Gate-09-GucSuperuser {
-    # Re-aim of PG's non-superuser GUC rejection: the same boundary is
-    # enforced at fractalsql_set time -- a path key must be absolute with
+    # Enforced at fractalsql_set time: a path key must be absolute with
     # no traversal segments, whatever the caller's privileges.
     if (ExpectErr 'must be an absolute path with no ''..'' segments' `
             "SELECT fractalsql_set('reasoning_plugin','plugins/mock.so');") {
@@ -1164,7 +1164,7 @@ function Gate-10-DosAndInjection {
     $n = (& $script:Sqlite3 $script:Db "SELECT count(*) FROM sqlite_master WHERE name='bt_customers';" 2>&1 |
         ForEach-Object { "$_" }) -join "`n"
     if ($n -eq '1') { Pass '10 dos_and_injection: bt_customers survived (nothing executed)' }
-    else { Fail '10 dos_and_injection: bt_customers missing — injection executed' }
+    else { Fail '10 dos_and_injection: bt_customers missing: injection executed' }
 }
 function Gate-11-Scout {
     $r = Sqlq "SELECT fractal_search_explore(embedding, '1.0,0.05,0.0,0.0') FROM bt_explore;"
@@ -1350,7 +1350,7 @@ function Gate-14-Retry {
 }
 
 function Gate-15-Embed {
-    # fractal_embed() itself — real dispatch through the EMBED tier.
+    # fractal_embed() itself: real dispatch through the EMBED tier.
     $d = Sqlq `
         "SELECT fractalsql_set('reasoning_plugin','$($script:MockEmb)');" `
         "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" `
@@ -1411,7 +1411,7 @@ function Gate-15-Embed {
         "SELECT fractal_vectorizer_create('bt_vembed','body','emb');"
     # (-bail stops the invocation on the trailing double-create; the
     # assertions above still see everything printed before it. The
-    # double-create MUST ride the same connection — the registry+queue
+    # double-create MUST ride the same connection: the registry+queue
     # are TEMP, so a fresh connection would see an empty registry.)
     if ($r.Contains('PROCESSED=3') -and $r.Contains('DONE=3') -and $r.Contains('D3=3')) {
         Pass '15 vectorizer: create/backfill/process/status/write-back'
@@ -1492,11 +1492,11 @@ except sqlite3.Error as e:
 
 function Gate-16-EmbedAuthz {
     # create-time validation (PG's create-time source_table ownership
-    # maps to these guards — role grants have no SQLite analog).
+    # maps to these guards; role grants have no SQLite analog).
     # A nonexistent table is indistinguishable from a PK-less one here:
     # PRAGMA table_info on a missing table returns no rows, so the create
     # answers the same "no single-column primary key" error (the probe
-    # PRAGMA doesn't fail on a missing table — SQLite's shape).
+    # PRAGMA doesn't fail on a missing table: SQLite's shape).
     if (ExpectErr 'has no single-column primary key' `
             "SELECT fractal_vectorizer_create('bt_nonexistent_xyz',
         'body','emb');") {
@@ -1586,7 +1586,7 @@ function Gate-18-EmbedCrash {
     Pass "18 embed_crash: sqlite3 process died mid-process_queue (rc=$rc)"
     # A fresh connection must find the DB intact and the persisted
     # embeddings (gate 15's write-back) preserved. The TEMP queue state
-    # died with the connection — no stuck-'processing' rows are even
+    # died with the connection; no stuck-'processing' rows are even
     # possible, which is the structural difference from PG's queue.
     $deadline = [DateTime]::UtcNow.AddSeconds(30.0 * $script:TimeoutMult)
     while ($true) {
@@ -1645,7 +1645,7 @@ sys.exit(1)
 function Gate-19-SfsBounds {
     # Over-arena vector (ARENA_MAX_DIM=4096): the parse rejects it. The
     # TEXT path clamps at the cap (lenient surface), so the over-budget
-    # rejection is exercised through the float32 BLOB path — a
+    # rejection is exercised through the float32 BLOB path: a
     # 4097-float BLOB answers "invalid vector (expect CSV/JSON text or
     # float32 BLOB)" without ever reaching the solver.
     if (-not $script:Py) {
@@ -1694,7 +1694,7 @@ function Gate-19-SfsBounds {
 
 function Gate-20-ApiFunc {
     # fractal_reason happy-path correctness through the chat tier (the
-    # bare call gets the fenced form — RESPONSE_MODE is t2s-internal).
+    # bare call gets the fenced form; RESPONSE_MODE is t2s-internal).
     [IO.File]::WriteAllText($script:SqlTxt, 'canary-reason-response')
     $r = Sqlq "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
         "SELECT fractal_reason('q');"
@@ -1710,7 +1710,7 @@ function Gate-20-ApiFunc {
         Pass '20 api_func: fractal_text_to_sql(NULL) rejected'
     }
     else { Fail '20 api_func: fractal_text_to_sql(NULL) not rejected' }
-    # Options-JSON: the params surface is LENIENT here — a truncated JSON
+    # Options-JSON: the params surface is LENIENT here; a truncated JSON
     # prefix parses as far as it can and the rest clamps to defaults (the
     # same rc=0 shape gate 11's options variant accepts), so the
     # errorable boundary is only exercised via vector parse errors in
@@ -1768,12 +1768,12 @@ function Gate-21-FuzzSmoke {
         if ($c) { $fuzzcc = $c.Source }
     }
     if (-not $fuzzcc) {
-        Skip '21 fuzz_smoke (no clang on PATH — libFuzzer drivers need it)'
+        Skip '21 fuzz_smoke (no clang on PATH; libFuzzer drivers need it)'
         return
     }
     # libFuzzer capability probe. On Windows, lld-link cannot take a user
     # main() alongside -fsanitize=fuzzer (duplicate main symbol), so the
-    # probe mirrors the real targets' shape instead — a bare
+    # probe mirrors the real targets' shape instead; a bare
     # LLVMFuzzerTestOneInput stub, exactly what gets linked in the real
     # drivers. (Divergence from build_test.sh's `int main(void)` probe,
     # forced by the Windows toolchain.)
@@ -1794,11 +1794,11 @@ function Gate-21-FuzzSmoke {
             -o (Join-Path $script:PlugDir "$t.exe") `
             1>(Join-Path $script:PlugDir "$t.log") 2>&1
         if ($LASTEXITCODE -ne 0) {
-            Fail "21 fuzz_smoke: $t failed to build — see $(Join-Path $script:PlugDir "$t.log")"
+            Fail "21 fuzz_smoke: $t failed to build; see $(Join-Path $script:PlugDir "$t.log")"
             continue
         }
         # libFuzzer on Windows will not create the output seed corpus dir
-        # itself (the POSIX side gets it implicitly) — pre-create it.
+        # itself (the POSIX side gets it implicitly); pre-create it.
         $seed = Join-Path $script:PlugDir "${t}_seed"
         New-Item -ItemType Directory -Force $seed | Out-Null
         & (Join-Path $script:PlugDir "$t.exe") tests/fuzz/corpus_extract_population $seed `
@@ -1809,7 +1809,7 @@ function Gate-21-FuzzSmoke {
             Pass "21 fuzz_smoke: $t ($fuzzTime s, corpus-seeded)"
         }
         else {
-            Fail "21 fuzz_smoke: $t exited rc=$rc — see $(Join-Path $script:PlugDir "$t.run.log")"
+            Fail "21 fuzz_smoke: $t exited rc=$rc; see $(Join-Path $script:PlugDir "$t.run.log")"
             Get-Content (Join-Path $script:PlugDir "$t.run.log") -Tail 5 `
                 -ErrorAction SilentlyContinue |
                 ForEach-Object { Write-Host "         $_" }
@@ -1872,7 +1872,7 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))"
         Pass '22 v2_functions: DFA returns a numeric exponent'
     }
     else { Fail "22 v2_functions: DFA happy path: $r" }
-    # Drift: 200-point series, window 64 — the core's box needs window+16
+    # Drift: 200-point series, window 64; the core's box needs window+16
     # points of recent history AND a deep-enough baseline (window 16/n 32
     # is exactly on the printed boundary and the core still declines).
     if ($awk) {
@@ -1894,7 +1894,7 @@ print(','.join('%.6f' % (math.sin(i/3.0)+i*0.001) for i in range(1,201)))"
     }
     else { Fail '22 v2_functions: drift window<=0 accepted' }
     # Box-counting fixtures: bottom out in box-counting, which needs
-    # >= 3 valid epsilon buckets — enough points AND enough scale dynamic
+    # >= 3 valid epsilon buckets: enough points AND enough scale dynamic
     # range; an exactly-regular 9-point lattice silently fails the
     # filter (PG's gate-22 fixture note). 40 jittered points dim 2.
     if ($awk) {
@@ -1907,7 +1907,7 @@ print(','.join('%.6f' % (math.sin(i/3.0)+i*0.001) for i in range(1,201)))"
     else {
         # No awk: replicate the fixture with python's seeded RNG (values
         # differ from awk's rand() sequence but the shape/amplitude are
-        # identical — 40 jittered points, jitter amplitude 0.01).
+        # identical: 40 jittered points, jitter amplitude 0.01).
         $boxpts = & $script:Py -c "import random
 random.seed(42)
 print(','.join('%s,%s' % (i+random.random()*0.01, i*0.5+random.random()*0.01) for i in range(1,41)))"
@@ -2209,7 +2209,7 @@ function Gate-23-Agents {
         param([string]$Label, [Parameter(ValueFromRemainingArguments = $true)][string[]]$Stmts)
         $r = Sqlq @pre @Stmts
         $rc = $script:SqlqRc
-        if (Test-Crashed $r $rc) { Fail "23 $Label — process crashed" }
+        if (Test-Crashed $r $rc) { Fail "23 ${Label}: process crashed" }
         elseif ($rc -ne 0) { Fail "23 ${Label}: $r" }
         else { Pass "23 $Label" }
         $script:LastAgentOut = $r
@@ -2324,15 +2324,14 @@ function Gate-24-Enterprise {
     }
     else { Fail '24 enterprise: ledger path did not surface the dormant error' }
     # audit_log now carries the same enterprise gate as the rest of the
-    # ledger surface (PG parity fix — see gate 31 ledger_chain, which owns
-    # this behavior in detail; previously this wrote unconditionally, a
-    # real parity gap against PG's own ensure_enterprise_lib() check).
+    # ledger surface (see gate 31 ledger_chain, which owns this behavior
+    # in detail; previously this wrote unconditionally).
     if (ExpectErr 'enterprise tier not loaded' "SELECT fractal_audit_log('entry', '{}');") {
         Pass '24 enterprise: audit_log rejects cleanly (dormant tier)'
     }
     else { Fail '24 enterprise: audit_log did not surface the dormant-tier error' }
     # A bogus enterprise_lib must be an absolute path (the same set-time
-    # path validation as the plugin keys — the native backslash form;
+    # path validation as the plugin keys: the native backslash form;
     # MSYS's argument conversion has no analog here), and the ledger call
     # then surfaces the load failure. With signature verification
     # mandatory by default the detached-signature check runs BEFORE the
@@ -2650,7 +2649,7 @@ function Gate-27-Think {
         }
         else { '' }
         if ($ok) { Pass "27 think: $Label" }
-        else { Fail "27 think: $Label — dump: $dump" }
+        else { Fail "27 think: $Label; dump: $dump" }
     }
     # 1) fractal_reason's chat tier forwards all four keys.
     if (Test-Path -LiteralPath $script:ThinkDump) { [IO.File]::Delete($script:ThinkDump) }
@@ -2712,7 +2711,7 @@ function Gate-28-ReviewIsolation {
         $pat = $Pat.TrimStart('^').TrimEnd('$')
         $lines = $dump -split "`r?`n"
         if ($lines -contains $pat) { Pass "28 review_isolation: $Label" }
-        else { Fail "28 review_isolation: $Label — dump: $dump" }
+        else { Fail "28 review_isolation: $Label; dump: $dump" }
     }
     # 1) Regression guard: GENERATE alone (review off) still runs under
     # T2S's forced RESPONSE_MODE=code -- the split must not have
@@ -2891,6 +2890,43 @@ function Gate-29-DomainAgents {
     } else {
         Fail "29 domain_agents: unknown metric accepted"
     }
+
+    # --- 17: partial-result honesty (opt-in
+    # agent_partial_reasoning_fail). With the flag ON, a configured-
+    # but-failing reasoning endpoint (a path that cannot load) inside
+    # an agent whose data half already computed returns that data half
+    # plus "reasoning_step_failed" with the plugin's detail, instead of
+    # discarding the computation. With the flag OFF (the documented
+    # default) the same call still raises cleanly. The reasoning
+    # surface itself (fractal_reason etc.) is NOT covered: it IS the
+    # reasoning step, so its failure is the whole result and keeps
+    # raising either way.
+    $bogusPlugin = Join-Path $script:Here 'no_such_reasoning_plugin.dll'
+    if (ExpectErr "failed to load reasoning plugin" `
+            "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" `
+            "SELECT fractalsql_set('reasoning_plugin','$bogusPlugin');" `
+            "SELECT fractal_agent_regime_triage('$series',32);") {
+        Pass '29 domain_agents: flag off (default) keeps the reasoning-endpoint raise'
+    } else {
+        Fail '29 domain_agents: expected the default raise with agent_partial_reasoning_fail off'
+    }
+    $r18 = Sqlq `
+        "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" `
+        "SELECT fractalsql_set('reasoning_plugin','$bogusPlugin');" `
+        "SELECT fractal_agent_regime_triage('$series',32);"
+    if ($r18.Contains('"reasoning_step_failed"')) {
+        Pass '29 domain_agents: flag on returns the data half plus reasoning_step_failed'
+    } else {
+        Fail "29 domain_agents: expected the partial document, got: $r18"
+    }
+    if ($r18.Contains('"dfa_exponent"')) {
+        Pass '29 domain_agents: partial document carries the computed dfa_exponent'
+    } else {
+        Fail "29 domain_agents: partial document lost the data half, got: $r18"
+    }
+
+    # Restore the live mock for safety (state is per-connection anyway).
+    $null = Sqlq "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');"
 
     [IO.File]::WriteAllText($script:SqlTxt, 'SELECT 1')
 }
@@ -3127,7 +3163,7 @@ function Gate-31-LedgerChain {
     }
 
     # fractal_ledger_verify() is the one function in this surface that is
-    # NOT enterprise-gated (PG parity: a pure read-only forensic query) --
+    # NOT enterprise-gated (it is a pure read-only forensic query) --
     # it must work standalone, creating an empty chain table on first touch.
     $vz = Sqlq 'SELECT fractal_ledger_verify();'
     if ($vz -eq '{"ok":true,"rows_verified":0}') {
@@ -3291,6 +3327,8 @@ function Gate-Title { param([string]$G)
         '29' { 'domain_agents' }     '30' { 'feature_store' }
         '31' { 'ledger_chain' }
         '32' { 'enterprise_signature_real' }
+        '37' { 'mcp_smoke' }
+        '38' { 'mcp_https' }
     }
 }
 
@@ -3313,6 +3351,210 @@ function Invoke-Gate { param([string]$G)
         '29' { Gate-29-DomainAgents }       '30' { Gate-30-FeatureStore }
         '31' { Gate-31-LedgerChain }
         '32' { Gate-32-EnterpriseSignatureReal }
+        '37' { Gate-37-McpSmoke }
+        '38' { Gate-38-McpHttps }
+    }
+}
+
+# 8.3's MCP gate: starts the stdio MCP server subprocess against the
+# already-built extension (resolve_ext / the compiled mock reasoning
+# fixtures), and drives a real client session through initialize /
+# tools-list / per-tier tools/call round trips -- happy and clean error
+# paths side by side, mirroring the SQL-level gates' own pairing style.
+# The client driver lives at mcp\tests\mcp_smoke_client.py so the
+# build_test.sh gate drives the SAME file (one contract, two harnesses).
+function Gate-37-McpSmoke {
+    # Self-skip until the MCP server code exists (the posture is kept
+    # even though it now does). The server itself is the native
+    # C++17 binary -- the only python3 dependency here
+    # is this gate's own JSON-RPC client driver, the same driver
+    # constraint the python-driven gates (08, 12, 16, 19, 25, 31)
+    # already carry.
+    if (-not (Test-Path -LiteralPath (Join-Path $script:Here 'mcp\tests\mcp_smoke_client.py')) -or
+            -not (Test-Path -LiteralPath (Join-Path $script:Here 'mcp\src\main.cpp'))) {
+        Skip '37 mcp_smoke (mcp/ server code not present)'
+        return
+    }
+    if (-not $script:Py) {
+        Skip '37 mcp_smoke (no python3 on PATH -- the smoke client driver needs it)'
+        return
+    }
+    if (-not (Resolve-Ext)) {
+        Fail '37 mcp_smoke: no extension found (run gate 01 first)'
+        return
+    }
+    if (-not (Test-Path -LiteralPath $script:Mock)) {
+        Skip '37 mcp_smoke (mock reasoning fixture did not compile -- see Compile-Plugins)'
+        return
+    }
+    if ($Asan -or $Ubsan) {
+        Skip '37 mcp_smoke (python load_extension() under -Asan/-Ubsan hits a known Windows harness issue)'
+        return
+    }
+
+    # Server binary: mcp\dist\windows-mcp (built by mcp\scripts\windows\
+    # build.bat). Rebuilt only when missing or stale against mcp\src --
+    # a full recompile of the vendored amalgamation on every gate run
+    # would dominate the harness runtime, so the timestamps decide.
+    $script:McpExe = Join-Path $script:Here 'mcp\dist\windows-mcp\fractalsql-sqlite-mcp.exe'
+    $needsBuild = -not (Test-Path -LiteralPath $script:McpExe)
+    if (-not $needsBuild) {
+        $exeTime = (Get-Item -LiteralPath $script:McpExe).LastWriteTimeUtc
+        $newer = Get-ChildItem -LiteralPath (Join-Path $script:Here 'mcp\src') -Recurse -File |
+            Where-Object { $_.LastWriteTimeUtc -gt $exeTime }
+        $needsBuild = [bool]($newer)
+    }
+    if ($needsBuild) {
+        # BTROOT is <drive>:\tmp -- never a spaced path -- so a boot script
+        # avoids cmd's PS-quote parsing problem (same pattern as gate 01).
+        $boot = Join-Path $script:BTROOT 'fractalsql_bt_mcp_build_cmd.bat'
+        [IO.File]::WriteAllLines($boot, @(
+            '@echo off',
+            "call `"$script:Here\mcp\scripts\windows\build.bat`"",
+            'exit /b %ERRORLEVEL%'
+        ))
+        $out = & cmd /c "call $boot" 2>&1
+        $out | ForEach-Object { Write-Host "    $_" }
+        if (-not (Test-Path -LiteralPath $script:McpExe)) {
+            if (($out -join "`n") -match 'no Visual Studio|OpenSSL for MSVC not found|amalgamation not found') {
+                Skip '37 mcp_smoke (no toolchain for the MCP server binary build -- install VS2022 C++ + vcpkg openssl:x64-windows-static)'
+            }
+            else {
+                Fail '37 mcp_smoke: MCP server build failed'
+            }
+            return
+        }
+    }
+
+    # Windows: the mock reasoning fixture fopens a CWD-relative canary
+    # file, so the server process runs with its CWD at $script:BTROOT
+    # (where the harness keeps the fixed file contracts). The bootstrap
+    # snippet follows the MCP bootstrap mechanism: FRACTALSQL_BOOTSTRAP_SQL
+    # carries the per-connection fractalsql_set() call pointing at the
+    # mock plugin, exactly as easy_install's load_fractalsql.sql does.
+    $bootstrap = "SELECT fractalsql_set('reasoning_plugin','" + $script:Mock.Replace("'", "''") + "');"
+    $env:MCP_HERE                  = Join-Path $script:Here 'mcp'
+    $env:MCP_SERVER_EXE            = $script:McpExe
+    $env:MCP_CANARY_FILE           = $script:SqlTxt
+    $env:MCP_SERVER_CWD            = $script:BTROOT
+    $env:SQLITE_DB_PATH            = $script:Db
+    $env:FRACTALSQL_EXTENSION_PATH = $script:ExtAbs
+    $env:FSQL_MCP_LOG_LEVEL        = 'debug'
+    $env:FRACTALSQL_BOOTSTRAP_SQL  = $bootstrap
+
+    & $script:Py -u (Join-Path $script:Here 'mcp\tests\mcp_smoke_client.py') 2>&1 |
+        ForEach-Object { Write-Host "    $_" }
+    if ($LASTEXITCODE -eq 0) {
+        Pass '37 mcp_smoke: full MCP session (initialize, 81-tool catalog, discovery/cognition/agency round trips, enterprise clean-error path, $/cancel, resources+prompts)'
+    }
+    else {
+        Fail "37 mcp_smoke: client driver exited $LASTEXITCODE"
+    }
+}
+
+# The optional direct-TLS mode (--https): deliberately narrow (see
+# mcp\tests\mcp_https_smoke_client.py's own docstring). Gate 37's HTTP
+# phase already exhausts the plaintext transport's behavior; this one
+# proves only what's specific to --https: fail-fast on a bad/missing
+# cert, the port actually speaking TLS (not dual-stack plaintext+TLS),
+# and the Bearer-token check still applying underneath TLS. Unlike gate
+# 37, this driver never calls Python's own load_extension() directly
+# (the extension loads inside the spawned server subprocess instead),
+# so it needs none of gate 37's -Asan/-Ubsan harness-issue skip.
+function Gate-38-McpHttps {
+    if (-not (Test-Path -LiteralPath (Join-Path $script:Here 'mcp\tests\mcp_https_smoke_client.py')) -or
+            -not (Test-Path -LiteralPath (Join-Path $script:Here 'mcp\src\main.cpp'))) {
+        Skip '38 mcp_https (mcp/ server code not present)'
+        return
+    }
+    if (-not $script:Py) {
+        Skip '38 mcp_https (no python3 on PATH -- the smoke client driver needs it)'
+        return
+    }
+    if (-not (Get-Command openssl -ErrorAction SilentlyContinue)) {
+        Skip '38 mcp_https (no openssl.exe on PATH to generate the throwaway TLS cert/key)'
+        return
+    }
+    if (-not (Resolve-Ext)) {
+        Fail '38 mcp_https: no extension found (run gate 01 first)'
+        return
+    }
+
+    # Same binary gate 37 builds/reuses (mcp\dist\windows-mcp, via
+    # mcp\scripts\windows\build.bat); duplicated here rather than
+    # factored out so this gate stays runnable standalone and never
+    # risks gate 37's own (much larger, extensively exercised) build path.
+    $script:McpExe = Join-Path $script:Here 'mcp\dist\windows-mcp\fractalsql-sqlite-mcp.exe'
+    $needsBuild = -not (Test-Path -LiteralPath $script:McpExe)
+    if (-not $needsBuild) {
+        $exeTime = (Get-Item -LiteralPath $script:McpExe).LastWriteTimeUtc
+        $newer = Get-ChildItem -LiteralPath (Join-Path $script:Here 'mcp\src') -Recurse -File |
+            Where-Object { $_.LastWriteTimeUtc -gt $exeTime }
+        $needsBuild = [bool]($newer)
+    }
+    if ($needsBuild) {
+        $boot = Join-Path $script:BTROOT 'fractalsql_bt_mcp_build_cmd.bat'
+        [IO.File]::WriteAllLines($boot, @(
+            '@echo off',
+            "call `"$script:Here\mcp\scripts\windows\build.bat`"",
+            'exit /b %ERRORLEVEL%'
+        ))
+        $out = & cmd /c "call $boot" 2>&1
+        $out | ForEach-Object { Write-Host "    $_" }
+        if (-not (Test-Path -LiteralPath $script:McpExe)) {
+            if (($out -join "`n") -match 'no Visual Studio|OpenSSL for MSVC not found|amalgamation not found') {
+                Skip '38 mcp_https (no toolchain for the MCP server binary build -- install VS2022 C++ + vcpkg openssl:x64-windows-static)'
+            }
+            else {
+                Fail '38 mcp_https: MCP server build failed'
+            }
+            return
+        }
+    }
+
+    # Throwaway self-signed cert/key, 1-day validity, CN=127.0.0.1 (the
+    # only host this gate ever connects to). Regenerated every run;
+    # never reused across invocations and never committed anywhere.
+    $tlsCert = Join-Path $script:BTROOT 'fractalsql_bt_mcp_https_cert.pem'
+    $tlsKey  = Join-Path $script:BTROOT 'fractalsql_bt_mcp_https_key.pem'
+    Remove-Item -Force -ErrorAction SilentlyContinue $tlsCert, $tlsKey
+    $certLog = Join-Path $script:BTROOT 'mcp_https_cert_gen.log'
+    # MSYS_NO_PATHCONV: an MSYS-built openssl.exe (e.g. Git for Windows'
+    # bundled one) otherwise rewrites the leading "/" in -subj as a
+    # Windows path (the well-known MSYS argv path-conversion gotcha),
+    # turning /CN=127.0.0.1 into garbage; harmless to set for any other
+    # (non-MSYS) openssl.exe on PATH.
+    $env:MSYS_NO_PATHCONV = '1'
+    # OPENSSL_CONF=NUL: whichever openssl.exe resolves on PATH may carry
+    # a baked-in default config path from an unrelated install (seen in
+    # practice: PostgreSQL's psqlODBC ships its own openssl.exe pointing
+    # at its own etc\openssl.cnf) -- if that file doesn't exist on this
+    # machine, `openssl req` hard-fails trying to load it before it even
+    # gets to -subj. NUL (the Windows null device) opens as empty, so
+    # openssl proceeds with built-in defaults instead.
+    $env:OPENSSL_CONF = 'NUL'
+    & openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=127.0.0.1' `
+        -keyout $tlsKey -out $tlsCert *> $certLog
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $tlsCert)) {
+        Fail "38 mcp_https: openssl req failed to generate the throwaway cert/key (see $certLog)"
+        return
+    }
+
+    $env:MCP_SERVER_EXE            = $script:McpExe
+    $env:MCP_SERVER_CWD            = $script:BTROOT
+    $env:MCP_HTTPS_PORT            = '18990'
+    $env:MCP_HTTPS_CERT            = $tlsCert
+    $env:MCP_HTTPS_KEY             = $tlsKey
+    $env:SQLITE_DB_PATH            = $script:Db
+    $env:FRACTALSQL_EXTENSION_PATH = $script:ExtAbs
+
+    & $script:Py -u (Join-Path $script:Here 'mcp\tests\mcp_https_smoke_client.py') 2>&1 |
+        ForEach-Object { Write-Host "    $_" }
+    if ($LASTEXITCODE -eq 0) {
+        Pass '38 mcp_https: --https fail-fast misconfig, TLS-only listening, and a full authenticated JSON-RPC round trip'
+    }
+    else {
+        Fail "38 mcp_https: client driver exited $LASTEXITCODE"
     }
 }
 
@@ -3343,7 +3585,7 @@ Find-Toolchain
 $script:PlugDir = Join-Path $script:BTROOT "fractalsql_bt_$PID"
 
 $sanSuffix = if ($Asan) { ' [ASan]' } elseif ($Ubsan) { ' [UBSan]' } else { '' }
-Write-Host "fractalsql-sqlite build_test — $mode$sanSuffix — gates: $($gates -join ' ')"
+Write-Host "fractalsql-sqlite build_test: $mode${sanSuffix}: gates: $($gates -join ' ')"
 Write-Host "tmp root: $($script:BTROOT) (db under it) | timeout x$($script:TimeoutMult)"
 
 $ranSetup = $false
@@ -3354,7 +3596,7 @@ try {
         Write-Host "== gate ${g}: $(Gate-Title $g) =="
         if ($g -ne '01' -and $g -ne '21' -and -not $ranSetup) {
             if (-not (BtSetup)) {
-                Write-Host 'runtime setup failed — aborting'
+                Write-Host 'runtime setup failed: aborting'
                 exit 1
             }
             $ranSetup = $true
@@ -3371,9 +3613,9 @@ finally {
 
 if ($script:Failed -eq 1) {
     Write-Host ""
-    Write-Host "$($script:R)FAILED$($script:Z) — see the [FAIL] lines above"
+    Write-Host "$($script:R)FAILED$($script:Z): see the [FAIL] lines above"
     exit 1
 }
 Write-Host ""
-Write-Host "$($script:G)ALL GREEN$($script:Z) — $($gates.Count) gate(s) passed"
+Write-Host "$($script:G)ALL GREEN$($script:Z): $($gates.Count) gate(s) passed"
 exit 0

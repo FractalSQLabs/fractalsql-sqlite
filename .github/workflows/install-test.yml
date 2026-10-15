@@ -26,7 +26,7 @@ concurrency:
 jobs:
   build-artifacts:
     name: Build .so + .deb + .rpm + .zip (amd64)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
@@ -70,7 +70,7 @@ jobs:
   debian-install:
     name: Debian — install + .load + UDF exec
     needs: build-artifacts
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
@@ -107,7 +107,7 @@ jobs:
   rpm-install:
     name: RHEL (Rocky 9) — install + .load + UDF exec
     needs: build-artifacts
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
@@ -173,7 +173,7 @@ jobs:
   rpm-install-rocky8:
     name: RHEL (Rocky 8) — install legacy .rpm + .load + UDF exec
     needs: build-artifacts
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
@@ -223,7 +223,7 @@ jobs:
   apk-install:
     name: Alpine 3.20 — install musl .apk + .load + UDF exec
     needs: build-artifacts
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
@@ -290,7 +290,7 @@ jobs:
           VERSION=$("${SQLITE3_BIN}" :memory: ".load /usr/local/lib/sqlite3/fractalsql" "SELECT fractalsql_version();")
           echo "edition=${EDITION} version=${VERSION}"
           test "${EDITION}" = "Community"
-          test "${VERSION}" = "2.0.5"
+          test "${VERSION}" = "2.0.6"
 
           # Search works with no further config.
           "${SQLITE3_BIN}" :memory: \
@@ -330,7 +330,7 @@ jobs:
   easy-install-linux:
     name: "easy_install.sh: Debian wizard, non-interactive"
     needs: build-artifacts
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
@@ -384,7 +384,7 @@ jobs:
           VERSION=$(sqlite3 :memory: ".read /usr/local/lib/sqlite3/load_fractalsql.sql" "SELECT fractalsql_version();" | tail -1)
           echo "edition=${EDITION} version=${VERSION}"
           test "${EDITION}" = "Community"
-          test "${VERSION}" = "2.0.5"
+          test "${VERSION}" = "2.0.6"
           echo "ok: easy_install.sh end-to-end (Debian)"
           SCRIPT
           chmod +x test-easy-install.sh
@@ -439,7 +439,7 @@ jobs:
 
   easy-install-windows:
     name: "easy_install.ps1: Windows wizard, non-interactive"
-    runs-on: windows-latest
+    runs-on: windows-2022
     env:
       # Same pin as release.yml — the amalgamation headers the DLL build
       # compiles against.

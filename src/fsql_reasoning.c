@@ -112,7 +112,7 @@ SQLITE_EXTENSION_INIT3
 /* ------------------------------------------------------------------ */
 
 /* err may be NULL (callers without an error buffer); truncation by
- * snprintf is fine — messages are diagnostics, not contracts. */
+ * snprintf is fine: messages are diagnostics, not contracts. */
 static void set_err(char *err, size_t err_cap, const char *fmt, ...) {
     if (!err || err_cap == 0) return;
     va_list ap;
@@ -380,7 +380,7 @@ int fsql_reasoning_ensure_attached(FsqlState *st, int tier,
         return -1;
     }
 
-    /* No plugin configured: a search-only operation. Not an error —
+    /* No plugin configured: a search-only operation. Not an error;
      * the callers turn this into their own "no reasoning plugin"
      * message only when the operation actually needs inference. */
     const char *path = st->cfg.reasoning_plugin;

@@ -35,7 +35,8 @@ and hands off to the next. You don't need to read everything; follow the path.
 2. **How do I get the extension running in 60 seconds?** → [Getting Started](docs/getting-started.md) (`.load` the extension, then your first Scout search).
 3. **How do I apply this to my industry?** → [Starter Kits](docs/starter-kits.md): runnable, industry-specific SQL scripts (SOC, FinTech, MedTech, Fleet, Smart-Cities, …).
 4. **How does a specific agent work and what are its inputs?** → [Agent Recipes](docs/api-agency.md): the built-in agents, each as a recipe.
-5. **How do I build a proprietary agent that isn't in the box?** → [Composition Guide](docs/composition-guide.md): the design patterns behind the recipes.
+5. **How do I use this from my AI client instead of SQL?** → [MCP Plugin](docs/mcp-plugin.md): the `fractalsql-sqlite-mcp` server exposes the whole function surface as MCP tools for Claude Desktop, Cursor, Windsurf, Claude Code, LangChain, LlamaIndex, CrewAI, or any MCP client.
+6. **How do I build a proprietary agent that isn't in the box?** → [Composition Guide](docs/composition-guide.md): the design patterns behind the recipes.
 
 > New here? Step 2 is a one-command demo. Step 3 drops you into a vertical that
 > looks like your problem. Step 4 is the reference you'll keep coming back to.
@@ -52,17 +53,22 @@ Depending on your role, you'll want to start in different places:
   → See the **[Safety & Governance guide](docs/text-to-sql-setup.md#secure-it-authorization-vs-correctness)**.
 - **Product Developer**: You want to build agentic features quickly.
   → Run the **[Docker Demo](docs/docker-demo.md)**, then pick a **[Starter Kit](docs/starter-kits.md)**.
+- **Tool Builder / Platform Engineer**: You want Claude Desktop, Cursor, Windsurf,
+  an agent framework (LangChain, LlamaIndex, CrewAI), or your own runtime
+  speaking to the database directly.
+  → Serve the **[MCP Plugin](docs/mcp-plugin.md)**; the server-side details live in
+  **[mcp/README.md](mcp/README.md)**.
 
 ---
 
 ## 🧩 What's in the box
 
 Four tiers of SQL-callable primitives, composable into agents with plain SQL
-and application code — no server-side language required.
+and application code: no server-side language required.
 
 - **Discovery**: diverse, mode-collapse-free retrieval: `fractal_search` (Sniper), `fractal_search_explore` (Scout).
 - **Cognition**: in-process LLM integration: `fractal_reason` (Bedrock, Azure OpenAI, Vertex, Ollama), `fractal_embed`, `fractal_text_to_sql`.
-- **Agency**: self-correcting routines: the search/sql agents, plan/trajectory/loop-detection helpers — see the [Agent Recipes](docs/api-agency.md).
+- **Agency**: self-correcting routines: the search/sql agents, plan/trajectory/loop-detection helpers; see the [Agent Recipes](docs/api-agency.md).
 - **Analytics**: fractal/dimension primitives: `fractal_dimension_dfa`, `fractal_dimension_boxcount`, `fractal_optimize_portfolio`, and more.
 
 Plus SQLite-native plumbing: `fractal_vector` as a canonical BLOB type,
@@ -70,6 +76,17 @@ Plus SQLite-native plumbing: `fractal_vector` as a canonical BLOB type,
 `fractal_vectorizer` embedding pipeline, and the tamper-evident
 `fractal_ledger_*` audit surface. The full function-surface reference with
 runnable examples lives in [sql/fractalsql--1.0.sql](sql/fractalsql--1.0.sql).
+
+Everything above ships as a ready-made tool surface too: the bundled
+`fractalsql-sqlite-mcp` MCP server turns the function catalog into 81 typed
+tools (the same engine-filtered surface every release verifies against committed
+integrity locks). It speaks standard MCP over stdio or HTTP, so it drops into
+any client or framework that does the same -- Claude Desktop, Cursor, Windsurf,
+Claude Code, LangChain, LlamaIndex, CrewAI, the Vercel AI SDK -- under any
+deployment topology from a single local file to enterprise cloud reasoning
+backends; see [Deployment topologies](docs/mcp-plugin.md#deployment-topologies).
+See [MCP Plugin](docs/mcp-plugin.md) for the client-facing quickstart and
+[mcp/README.md](mcp/README.md) for building and deploying the server binary.
 
 Reasoning is opt-in and provider-pluggable: the `fractalsql-reasoning-http`
 plugin speaks the OpenAI chat-completions wire format, so any OpenAI-compatible
@@ -101,7 +118,7 @@ for macOS (arm64/x86_64). `easy_install.sh` (Linux/macOS) and
 `easy_install.ps1` (Windows) wrap all of these behind one interactive
 wizard; no telemetry, everything stays local.
 
-Because configuration is per-connection (`fractalsql_set` — SQLite has no
+Because configuration is per-connection (`fractalsql_set`, since SQLite has no
 GUCs to persist), the wizard writes a `load_fractalsql.sql` bootstrap
 snippet you pass to every session: `sqlite3 -init load_fractalsql.sql mydb.sqlite`.
 
@@ -110,11 +127,11 @@ snippet you pass to every session: `sqlite3 -init load_fractalsql.sql mydb.sqlit
 ## 🏛️ Enterprise Tier
 
 Everything above is Community edition and fully functional on its own.
-Discovery, Cognition, and Agency don't depend on anything in this section. For regulated
-environments that need to **prove, not just
-tamper-evident, HMAC-sealed decision record: see
-**[Enterprise Tier](docs/enterprise.md)** for the full mechanism, including
-what the ledger can and can't prove.
+Discovery, Cognition, and Agency don't depend on anything in this section.
+For regulated environments that need to **prove, not just trust**, a
+decision: the Enterprise tier adds a tamper-evident, HMAC-sealed decision
+record; **[Enterprise Tier](docs/enterprise.md)** has the full mechanism,
+including what the ledger can and can't prove.
 
 ---
 
@@ -124,7 +141,7 @@ what the ledger can and can't prove.
 | --- | :---: | :---: | :---: |
 | 3.25+ | ✓ | ✓ | ✓ |
 
-Any SQLite host that permits `sqlite3_load_extension` — the `sqlite3` CLI,
+Any SQLite host that permits `sqlite3_load_extension`: the `sqlite3` CLI,
 Python's `sqlite3` module (`conn.enable_load_extension`), better-sqlite3,
 libSQL/Turso-compatible hosts, mobile SQLite bridges. Verified on AWS
 Graviton, Apple Silicon, Ampere Altra, and Raspberry Pi.

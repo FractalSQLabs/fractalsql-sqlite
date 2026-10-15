@@ -5,9 +5,9 @@
 # Docker Demo: The Learning Path
 
 Try FractalSQL without installing anything. `docker-compose.yml` at the repo
-root builds a turnkey demo container — a long-lived `sqlite3` CLI
+root builds a turnkey demo container (a long-lived `sqlite3` CLI
 environment with the extension staged, reasoning pre-configured, and every
-demo + benchmark inside it — alongside the `ollama` model service. There is
+demo + benchmark inside it) alongside the `ollama` model service. There is
 no database server to start (the extension is a file you `.load`, not a
 service), so "the demo environment" is the container's `sqlite3` shell plus
 the extension file it loads.
@@ -22,7 +22,7 @@ is required. (The `ollama` service is a real download, though: see step 2.)
 
 ## 🚀 Setup Guide
 
-### 1. The turnkey default — `docker compose up -d`
+### 1. The turnkey default: `docker compose up -d`
 
 One command, no flags, gives you the bare minimum:
 
@@ -30,7 +30,7 @@ One command, no flags, gives you the bare minimum:
   `/usr/local/lib/sqlite3/fractalsql.so`, with the bundled reasoning
   plugin beside it, a **demo database** at `/work/fractalsql_demo.sqlite`
   (WAL mode, persisted on the `demo_data` volume), and reasoning
-  **pre-configured per connection** — `docker/demo-entrypoint.sh` writes
+  **pre-configured per connection**: `docker/demo-entrypoint.sh` writes
   the bootstrap snippet (`demo_init.sql`, the same `.load` +
   `fractalsql_set()` lines the `easy_install.sh` wizard generates) from
   the compose `FRACTALSQL_*` env vars, pointing at the `ollama` service.
@@ -60,7 +60,7 @@ Confirm the extension is alive and which edition it is:
 ```bash
 docker compose exec demo sqlite3 fractalsql_demo.sqlite \
   -init demo_init.sql "SELECT fractalsql_edition(), fractalsql_version();"
-# expect: Community|2.0.5
+# expect: Community|2.0.6
 ```
 
 Run any demo (re-runnable; each recreates its own fixture tables):
@@ -74,7 +74,7 @@ Or open an interactive `sqlite3` shell with reasoning pre-configured:
 docker compose exec demo sqlite3 fractalsql_demo.sqlite -init demo_init.sql
 ```
 
-### 2. Cognition — pull a model (opt-in)
+### 2. Cognition: pull a model (opt-in)
 
 Reasoning (`fractal_reason`, `fractal_embed`, `fractal_text_to_sql`) needs a
 model. Ollama is already up from step 1; pull one with the `pull-model`
@@ -86,12 +86,29 @@ docker compose --profile pull-model run --rm pull-model
 
 …or, equivalently, `docker compose exec ollama ollama pull gpt-oss:20b` (and
 `nomic-embed-text`). This pulls ~13.8GB (gpt-oss:20b) + a few hundred MB
-(nomic-embed-text). Nothing pulls a model for you — until you do, cognition
+(nomic-embed-text). Nothing pulls a model for you; until you do, cognition
 calls get a clear model-not-found error from Ollama, not a broken install.
 CPU-only inference may take several minutes per query on modest hardware.
 See [docs/reasoning-setup.md](reasoning-setup.md)'s hardware section. (Or
 point the compose `FRACTALSQL_HTTP_*` env vars at a cloud endpoint instead
 and recreate the demo container; see [Reasoning Setup](reasoning-setup.md).)
+
+**Alternative: Docker Model Runner (Docker Desktop only).** Skip the
+`ollama` container and use Docker Desktop's built-in Model Runner instead:
+
+```bash
+docker model pull ai/gpt-oss:20b
+docker model pull ai/nomic-embed-text-v1.5
+docker compose -f docker-compose.yml -f docker-compose.dmr.yml up -d demo
+```
+
+`docker-compose.dmr.yml` repoints the demo container's
+`FRACTALSQL_HTTP_*` env vars at `model-runner.docker.internal` and drops
+the `ollama` dependency; everything else in this guide (the exec
+commands, `demo_init.sql`) works the same either way. Requires Docker
+Desktop with Model Runner enabled (Settings → Beta features, or
+`docker desktop enable model-runner`); see
+[reasoning-setup.md](reasoning-setup.md#docker-model-runner-dmr).
 
 **Quick test** (now that a model is present):
 ```bash
@@ -110,13 +127,63 @@ docker compose exec demo sqlite3 fractalsql_demo.sqlite \
 ### 3. Vectorizer automation
 
 No extra containers: reuse the model from step 2. Enables automatic embedding
-pipelines — see [vectorizer-setup.md](vectorizer-setup.md) for the
+pipelines; see [vectorizer-setup.md](vectorizer-setup.md) for the
 `fractal_vectorizer_create` / `fractal_vectorizer_process_queue` walkthrough.
 
 ```bash
 docker compose exec demo sqlite3 fractalsql_demo.sqlite \
   -init demo_init.sql ".read /demo/demo-vectorizer.sql"
 ```
+
+### 4. Try the MCP server
+
+The demo image stages the **production MCP server binary itself** (the
+same `fractalsql-sqlite-mcp` the repo's [`mcp/`](../mcp/) directory
+builds), launched through `demo/mcp/call-tool.sh` with its tool table
+narrowed (launch-time `--tool` filter) to exactly four tools
+(`fractal_search`, `fractal_reason`, `fractal_agent_data_analyst`,
+`fractal_agent_diverse_portfolios`), chosen to prove the MCP
+call shapes end to end on real demo data. There is no second demo-server
+implementation to keep in sync. It is stdio-only: SQLite has no
+server process for an MCP layer to front, so it is just another process
+`docker compose exec`'d inside the container that's already running: no
+new container, nothing new to install beyond what's already in the image.
+
+One-liner real tool call round-trip (search needs no model):
+
+```bash
+docker compose exec demo demo/mcp/call-tool.sh fractal_search \
+  '{"vector":[0.1,0.9],"query":[0.6,0.8]}'
+```
+
+…then a reasoned agent answer over the demo data (needs a model from
+step 2; run `.read /demo/demo.sql` first so its fixture tables exist):
+
+```bash
+docker compose exec demo demo/mcp/call-tool.sh fractal_agent_data_analyst \
+  '{"question":"how many rows are in demo_embeddings"}'
+```
+
+…and the enterprise clean-error path, proven on the demo's
+Community-only install (this is part of the demo, not a bug):
+
+```bash
+docker compose exec demo demo/mcp/call-tool.sh fractal_agent_diverse_portfolios \
+  '{"mu":[0.05,0.1],"cov":[1.0,0.0,0.0,1.0],"cardinality":1}'
+# TOOL ERROR: fractalsql: enterprise tier not loaded (...)
+```
+
+If you have Node available and want the richer, interactive Explorer,
+the MCP inspector talks to the same binary's stdio transport like any
+other MCP client (inside the container:
+`npx @modelcontextprotocol/inspector /usr/local/bin/fractalsql-sqlite-mcp --tool fractal_search`,
+or drop the `--tool` list to see the full catalog); optional, not
+required.
+
+The demo server reuses the demo compose project's own credentials and
+posture, *not* a production configuration. For the full 81-tool
+catalog, a real client config, and the production server, see
+**[docs/mcp-plugin.md](mcp-plugin.md)**.
 
 ---
 
@@ -156,7 +223,7 @@ Discovery demos do not.)
 
 ### Level 3: Autonomous Agency
 *Focus: Building self-correcting, safe, and predictive agentic workflows.*
-- **Goal**: Learn to use loop detection (SimHash fingerprints + cycle detection), trajectory prediction, self-correcting SQL agents, and the sixteen installable agents built on top of them — all register at `.load` time, no install step. See [api-agency.md](api-agency.md).
+- **Goal**: Learn to use loop detection (SimHash fingerprints + cycle detection), trajectory prediction, self-correcting SQL agents, and the sixteen installable agents built on top of them, all register at `.load` time, no install step. See [api-agency.md](api-agency.md).
 - **Demos**:
   ```bash
   # DevOps: Autonomous Incident Triage & Self-Healing
@@ -169,7 +236,7 @@ Discovery demos do not.)
   docker compose exec demo sqlite3 fractalsql_demo.sqlite -init demo_init.sql ".read /demo/demo-vertical-cybersecurity-threat-detection.sql"
   # Edge Swarm: quantized swarm memory, loop detection, task routing (no reasoning needed)
   docker compose exec demo sqlite3 fractalsql_demo.sqlite -init demo_init.sql ".read /demo/demo-vertical-agentic-edge-swarm.sql"
-  # The sixteen agents (already in the loaded extension — no install step)
+  # The sixteen agents (already in the loaded extension, no install step)
   docker compose exec demo sqlite3 fractalsql_demo.sqlite -init demo_init.sql ".read /demo/demo-agents.sql"
   ```
 
@@ -186,7 +253,7 @@ single-cell expression profiles, no reasoning needed),
 `benchmark.sql`, `benchmark-api-reference.sql`,
 and the enterprise-tier `enterprise-qtl-audit.sql` / `enterprise-stress.sql`.
 Run any the same way. `demo/demo-workload.sh` (the sustained concurrent-load
-tester) is also in the image at `/demo/` — it is a bash script, not SQL, so
+tester) is also in the image at `/demo/`; it is a bash script, not SQL, so
 run it with `docker compose exec demo /demo/demo-workload.sh --help`.
 
 ---
@@ -195,7 +262,7 @@ run it with `docker compose exec demo /demo/demo-workload.sh --help`.
 
 ### Scout Discovery vs. naive top-K (in-database demo)
 See how Scout Discovery captures more distinct clusters than standard top-K
-search — `demo/benchmark.sql` runs both directly against a synthetic
+search; `demo/benchmark.sql` runs both directly against a synthetic
 cluster corpus:
 
 ```bash
@@ -213,7 +280,7 @@ docker compose exec demo sqlite3 fractalsql_demo.sqlite \
 
 ### Head-to-head benchmark (in-container)
 `bench/` runs a real sqlite-vec-vs-Scout head-to-head at 100k-row scale
-(sqlite-vec does exact brute-force KNN, not HNSW — see `bench/README.md`
+(sqlite-vec does exact brute-force KNN, not HNSW; see `bench/README.md`
 for why). Its Python deps are pre-installed in `/bench/.venv`; the scripts
 take `--ext`/`--db`, so in-container runs point `--ext` at the staged
 extension and `--db` at a path on the persisted volume:

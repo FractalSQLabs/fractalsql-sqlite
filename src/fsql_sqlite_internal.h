@@ -11,7 +11,7 @@
  *   fractalsql_sqlite.c   entry point, state lifecycle, registration
  *                         table, smoke + search/scout surface
  *   fsql_vector.c/.h      fractal_vector BLOB convention + vector math
- *   fsql_config.c         fractalsql_set / fractalsql_get (GUC analog)
+ *   fsql_config.c         fractalsql_set / fractalsql_get (session config)
  *   fsql_reasoning.c      reasoning VFS attach + fractal_reason family
  *   fsql_t2s.c            fractal_schema_context + fractal_text_to_sql
  *   fsql_vectorizer.c     fractal_vectorizer_* + fractal_embed
@@ -26,7 +26,7 @@
  * Build mode: the Makefile compiles -DFSQL_SQLITE_SOVEREIGN when
  * CORE_VARIANT links a sovereign archive, and EXCLUDES the sovereign
  * -only TUs (reasoning, t2s, vectorizer, agents, domain agents,
- * ledger, sovereign math) from the minimal link — their core symbols
+ * ledger, sovereign math) from the minimal link: their core symbols
  * only exist in the sovereign archive. The entry TU's one ledger call
  * (fsql_ledger_teardown in fsql_state_destroy) is compiled under the
  * same define. On a minimal build the excluded names surface as
@@ -62,7 +62,7 @@
 
 /* Extension version. Single source of truth for fractalsql_version()
  * and the smoke gate; bumped in lockstep with packaging scripts. */
-#define FSQL_SQLITE_VERSION_STR   "2.0.5"
+#define FSQL_SQLITE_VERSION_STR   "2.0.6"
 #define FSQL_SQLITE_EDITION_STR   "Community"
 
 /* SFS tuning: same values the pre-2.x path used. */
@@ -209,6 +209,13 @@ typedef struct FsqlConfig {
     char *enterprise_lib;            /* enterprise core .so/.dll path  */
     char *enterprise_ledger_key;     /* HMAC key for ledger blobs      */
     int   enterprise_require_signature; /* bool                        */
+    int   agent_partial_reasoning_fail; /* bool: agent returns the
+                                         * computed data half plus
+                                         * reasoning_step_failed instead
+                                         * of raising on a reasoning
+                                         * endpoint failure (partial-
+                                         * result honesty; MCP sets it
+                                         * on at connect) */
     char *response_mode;             /* from FSQL_REASONING_HTTP_RESPONSE_MODE */
 } FsqlConfig;
 

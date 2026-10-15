@@ -11,8 +11,8 @@
  * `static` so it is #include'd directly into fractalsql.c with no translation
  * unit of its own.
  *
- * Used only when the GUC fractalsql.enterprise_ledger_key is non-empty. When
- * that GUC is empty none of this is called and the ledger is validated
+ * Used only when the enterprise_ledger_key config entry is non-empty.
+ * When that key is empty none of this is called and the ledger is validated
  * structurally only (the historical behavior).
  */
 #ifndef FRACTALSQL_HMAC_H

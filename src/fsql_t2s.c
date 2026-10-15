@@ -42,7 +42,7 @@
  *       CTE body must itself be a SELECT, so a data-modifying CTE
  *       (WITH d AS (DELETE ... RETURNING) SELECT ...) is rejected as
  *       a syntax error at prepare time, before any readonly analysis
- *       runs. EXPLAIN is rejected outright (stmt_isexplain below —
+ *       runs. EXPLAIN is rejected outright (stmt_isexplain below;
  *       a portable text-based stand-in for sqlite3_stmt_isexplain,
  *       which older SQLite headers neither declare nor route)
  *       rather than mechanically planned: preparing IS the mechanical
@@ -96,7 +96,7 @@ SQLITE_EXTENSION_INIT3
 /* ------------------------------------------------------------------ */
 
 /* err may be NULL (callers without an error buffer); truncation by
- * snprintf is fine — messages are diagnostics, not contracts. Same
+ * snprintf is fine: messages are diagnostics, not contracts. Same
  * shape as fsql_reasoning.c's set_err. */
 static void set_err(char *err, size_t err_cap, const char *fmt, ...) {
     if (!err || err_cap == 0) return;
@@ -177,7 +177,7 @@ typedef struct StrBuf {
     char  *buf;
     size_t cap;
     size_t len;
-    int    failed;   /* OOM — sticky; all later appends are no-ops */
+    int    failed;   /* OOM: sticky; all later appends are no-ops */
 } StrBuf;
 
 static void sb_init(StrBuf *b) {
@@ -237,7 +237,7 @@ static char *copy_trimmed(const char *start, const char *end) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Schema context — fractal_schema_context                             */
+/* Schema context: fractal_schema_context                             */
 /* ------------------------------------------------------------------ */
 
 /* PRAGMA argument handling. The parameterized form
@@ -276,7 +276,7 @@ static PragmaRc prepare_pragma(sqlite3 *db, const char *sql_param,
         sqlite3_finalize(stmt);
         return PRAGMA_ERR;
     }
-    /* Bound form unsupported on this SQLite version — formatted form. */
+    /* Bound form unsupported on this SQLite version: formatted form. */
     if (!ident_is_safe(arg)) return PRAGMA_SKIP;
 
     StrBuf sql;
@@ -553,7 +553,7 @@ static char *build_schema_context(FsqlState *st, char *err, size_t err_cap) {
         }
         n_tables++;
         /* Abort mid-build once the description can no longer serve as
-         * a prompt component — don't accumulate an unbounded buffer
+         * a prompt component: don't accumulate an unbounded buffer
          * just to fail the final size check. */
         if (out.failed || out.len > (size_t)FSQL_MAX_INPUT_BYTES) {
             set_err(err, err_cap,
@@ -585,7 +585,7 @@ static char *build_schema_context(FsqlState *st, char *err, size_t err_cap) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Candidate validation — allowlist, prepare-only                      */
+/* Candidate validation: allowlist, prepare-only                      */
 /* ------------------------------------------------------------------ */
 
 /* Skip leading whitespace and SQL comments ("--" to EOL, C-style
@@ -611,7 +611,7 @@ static const char *skip_ws_comments(const char *p) {
 /* First SQL keyword (identifier-shaped) at `p`. Returns 1 and copies
  * it into `word` (NUL-terminated) when present, 0 when the statement
  * does not start with a plain keyword (quoted/bracketed token, '(',
- * etc.) — such shapes are not in the allowlist anyway. */
+ * etc.); such shapes are not in the allowlist anyway. */
 static int first_word(const char *p, char *word, size_t cap) {
     size_t n = 0;
     if (!isalpha((unsigned char)*p) && *p != '_') return 0;
@@ -653,7 +653,7 @@ static int stmt_isexplain(sqlite3_stmt *stmt) {
  *   - first keyword must be in the policy set (checked BEFORE prepare,
  *     on the raw text, so DROP/CREATE/ATTACH/PRAGMA-style statements
  *     are rejected without touching the parser);
- *   - must parse (sqlite3_prepare_v2 — parse only, never executes);
+ *   - must parse (sqlite3_prepare_v2: parse only, never executes);
  *   - must be exactly one statement (no stacked-statement injection
  *     via the pzTail chain);
  *   - must not be EXPLAIN;
@@ -704,7 +704,7 @@ static int t2s_validate(sqlite3 *db, const char *sql, int allow_dml,
                     sqlite3_errmsg(db));
             return -1;
         }
-        if (!s) break;   /* trailing whitespace/comments — nothing left */
+        if (!s) break;   /* trailing whitespace/comments: nothing left */
         if (next == tail) {   /* paranoia: never loop without progress */
             sqlite3_finalize(s);
             sqlite3_finalize(first);
@@ -716,7 +716,7 @@ static int t2s_validate(sqlite3 *db, const char *sql, int allow_dml,
         if (n == 1) {
             first = s;
         } else {
-            /* More than one statement — count is all the caller needs;
+            /* More than one statement: count is all the caller needs;
              * stop walking, free the extra handle. */
             sqlite3_finalize(s);
             break;
@@ -807,7 +807,7 @@ static char *extract_sql_from_response(const char *resp) {
  * FSQL_REASONING_TIER_T2S: T2S hard-forces RESPONSE_MODE=code (for
  * GENERATE's fenced-SQL extraction), which would let the plugin try to
  * pull a fenced block out of this plain-text critique instead of
- * returning it verbatim — on the rare occasion the model quotes the
+ * returning it verbatim; on the rare occasion the model quotes the
  * candidate SQL back inside its explanation, that could return just
  * the quoted fragment instead of the leading "PASS"/"FAIL"
  * critique_pass() below expects. See apply_review_env() in
@@ -848,7 +848,7 @@ static int critique_pass(const char *critique) {
 }
 
 /* ------------------------------------------------------------------ */
-/* fractal_text_to_sql — the retry loop                                */
+/* fractal_text_to_sql: the retry loop                                */
 /* ------------------------------------------------------------------ */
 
 /* Truncation marker helper shared with the error excerpt below. */
@@ -1004,7 +1004,7 @@ static char *t2s_run(FsqlState *st, const char *question,
                                             allow_dml, feedback,
                                             err, err_cap);
         if (!candidate) {
-            /* Dispatch failure is not retried — the plugin error is
+            /* Dispatch failure is not retried: the plugin error is
              * already in `err`. */
             free(last_sql);
             free(feedback);
@@ -1015,7 +1015,7 @@ static char *t2s_run(FsqlState *st, const char *question,
         last_sql = candidate;
 
         if (!*candidate) {
-            /* last_sql aliases candidate here — clear it first. */
+            /* last_sql aliases candidate here; clear it first. */
             free(candidate);
             last_sql = NULL;
             free(feedback);
@@ -1198,8 +1198,8 @@ static void t2s_fn(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
 int fsql_t2s_register(sqlite3 *db, FsqlState *st) {
     if (!db || !st) return SQLITE_MISUSE;
 
-    /* Introspection is per-connection state reads, not a pure function
-     * — same flag set as the config functions. */
+    /* Introspection is per-connection state reads, not a pure function;
+     * same flag set as the config functions. */
     const int flags = SQLITE_UTF8 | SQLITE_INNOCUOUS;
 
     int rc = sqlite3_create_function_v2(

@@ -60,8 +60,8 @@
  *
  *   Storage layout: the fractalsql_ledger.mac BLOB column holds the
  *   bare 32-byte tag; the payload column stays the raw core blob. The
- *   in-RAM slot mirrors this: FsqlLedgerSlot.tag[32] + tag_valid — see
- *   the DDL below.
+ *   in-RAM slot mirrors this: FsqlLedgerSlot.tag[32] + tag_valid (see
+ *   the DDL below).
  *
  *   Verification: on read with a key configured, a tag-bearing slot is
  *   re-verified (HMAC recomputed over the payload) and a mismatch
@@ -77,10 +77,10 @@
  * row links to its predecessor (for the same `kind`) via
  * entry_hash = SHA256(prev_hash || payload || mac), so a rewritten row
  * breaks the chain and a deleted row leaves a visible gap in the `id`
- * sequence — see fractal_ledger_verify() below, the O(n) walk that proves
+ * sequence; see fractal_ledger_verify() below, the O(n) walk that proves
  * it. Created lazily on the first top-level ledger call via sqlite3_exec
  * on st->db (migrating the old last-writer-wins snapshot shape first, if
- * found — see ledger_ensure_table):
+ * found; see ledger_ensure_table):
  *
  *   CREATE TABLE IF NOT EXISTS fractalsql_ledger(
  *     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,7 +98,7 @@
  * into the buffer) followed by one APPEND INSERT per occupied slot,
  * each linked into its kind's chain, inside a single transaction (see
  * ledger_materialize). Top-level load = an O(1) tip verify of kind=1's
- * latest row (ledger_verify_tip — structural entry_hash check always,
+ * latest row (ledger_verify_tip: structural entry_hash check always,
  * MAC check when a key is configured, chain-link check against the row
  * before it), then clear the buffer and seed it from the LATEST row per
  * kind, then call core fsql_ledger_load(), which pulls the blobs back
@@ -126,7 +126,7 @@
  * Notes:
  *   - Concurrency: SQLite has no advisory locks; BEGIN IMMEDIATE (the
  *     database's one write lock, acquired up front) serializes the
- *     "read latest, link, insert" sequence — coarser than a per-kind
+ *     "read latest, link, insert" sequence, coarser than a per-kind
  *     lock (it serializes across ALL kinds, not just the one being
  *     written) but SQLite only ever has one writer at a time anyway,
  *     so the extra breadth is free.
@@ -159,7 +159,7 @@ SQLITE_EXTENSION_INIT3
  * fractal_audit_log additionally appends kind=2 rows directly to the
  * table, via the same append-only chain machinery: an independent
  * chain per kind (each filtered by WHERE kind=?), so a core write on
- * kind=2 and an audit_log write never collide — each gets its own row,
+ * kind=2 and an audit_log write never collide, each gets its own row,
  * linked into its own kind's chain. The cap is headroom, not a semantic
  * promise: a core that emits an unlisted tag gets FSQL_ESTORAGE rather
  * than silent corruption. */
@@ -181,7 +181,7 @@ typedef struct FsqlLedgerSlot {
 } FsqlLedgerSlot;
 
 typedef struct FsqlLedgerCtx {
-    uint32_t       magic;  /* FSQL_LEDGER_CTX_MAGIC — lifetime canary   */
+    uint32_t       magic;  /* FSQL_LEDGER_CTX_MAGIC (lifetime canary)  */
     FsqlState     *st;     /* owning state (reads cfg live); outlives us*/
     FsqlLedgerSlot slot[FSQL_LEDGER_MAX_KIND + 1];  /* indexed by kind  */
 } FsqlLedgerCtx;
@@ -259,7 +259,7 @@ static int ledger_seal_buffer(FsqlLedgerCtx *lc) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Storage VFS callbacks (host side — memory only, NO SQLite re-entry) */
+/* Storage VFS callbacks (host side: memory only, NO SQLite re-entry) */
 /* ------------------------------------------------------------------ */
 
 static int ledger_vfs_write_entry(fsql_storage_user_ctx user, int kind,
@@ -285,7 +285,7 @@ static int ledger_vfs_read_entry(fsql_storage_user_ctx user, int kind,
     /* Envelope verification (see the file-header definition): a sealed
      * slot is re-verified against the LIVE key on every read. An
      * unsealed in-RAM slot (written this session, not yet sealed) is
-     * trusted — nothing external can tamper with our own heap. */
+     * trusted: nothing external can tamper with our own heap. */
     const char *key = ledger_key(lc);
     if (key && s->tag_valid) {
         uint8_t tag[32];
@@ -302,7 +302,7 @@ static int ledger_vfs_seal_ledger(fsql_storage_user_ctx user) {
     FsqlLedgerCtx *lc = ledger_ctx_of(user);
     if (!lc) return FSQL_ESTORAGE;
     /* Tags are recomputed at materialization time as well, so a seal
-     * failure here (OOM) never fails teardown — the contract says seal
+     * failure here (OOM) never fails teardown: the contract says seal
      * commits pending state, and the durable copy is written by the
      * top-level flush, not by this callback. */
     (void)ledger_seal_buffer(lc);
@@ -310,7 +310,7 @@ static int ledger_vfs_seal_ledger(fsql_storage_user_ctx user) {
 }
 
 /* ------------------------------------------------------------------ */
-/* fsql_ledger_vfs_setup — called by fsql_state_create BEFORE           */
+/* fsql_ledger_vfs_setup: called by fsql_state_create BEFORE           */
 /* fsql_new_sovereign copies the VFS struct by value                   */
 /* ------------------------------------------------------------------ */
 
@@ -331,7 +331,7 @@ int fsql_ledger_vfs_setup(FsqlState *st) {
     return 0;
 }
 
-/* fsql_ledger_teardown — fsql_state_destroy calls this INSTEAD of a
+/* fsql_ledger_teardown: fsql_state_destroy calls this INSTEAD of a
  * plain free(st->ledger_ctx), AFTER fsql_free(st->ctx) (which may
  * re-enter seal_ledger), so every slot payload is released before the
  * context block itself goes away. */
@@ -348,7 +348,7 @@ void fsql_ledger_teardown(FsqlState *st) {
 /* Table IO (top-level SQL functions only)                             */
 /* ------------------------------------------------------------------ */
 
-/* Mandated DDL — the append-only hash chain (see the file header for
+/* Mandated DDL: the append-only hash chain (see the file header for
  * the full column-by-column rationale). */
 static const char FSQL_LEDGER_DDL[] =
     "CREATE TABLE IF NOT EXISTS fractalsql_ledger("
@@ -933,7 +933,7 @@ static void ledger_load_fn(sqlite3_context *sctx, int argc,
             break;
         }
         if (key) {
-            /* A configured key requires an authenticated blob — refuse
+            /* A configured key requires an authenticated blob; refuse
              * one persisted before the key was set. */
             if (mac_null) {
                 snprintf(err, sizeof err,
@@ -959,7 +959,7 @@ static void ledger_load_fn(sqlite3_context *sctx, int argc,
             }
         }
         /* No key configured: accept rows regardless of a stale (but
-         * well-formed, 32-byte) tag — verification is impossible
+         * well-formed, 32-byte) tag; verification is impossible
          * without the key (historical structural-only behavior). */
 
         if (ledger_slot_store(lc, kind, payload,
@@ -1016,7 +1016,7 @@ static void ledger_compact_fn(sqlite3_context *sctx, int argc,
     FsqlState *st = ledger_state_of(sctx);
     if (!st) return;
     if (ledger_ensure_ent(st, sctx) != 0) return;
-    /* Compact drops decayed/evicted shadow entries — no slot clearing
+    /* Compact drops decayed/evicted shadow entries, no slot clearing
      * (the surviving blob stays authoritative). */
     ledger_reset_common(sctx, st->ent.ledger_compact, "fsql_ledger_compact", -1);
 }
@@ -1080,7 +1080,7 @@ static void ledger_shadow_count_fn(sqlite3_context *sctx, int argc,
 /* ------------------------------------------------------------------ */
 
 /* Pattern A growing-buffer contract (fractalsql_sql.h): call once with a
- * stack buffer; on FSQL_ETRUNCATED *json_cap reports the required size —
+ * stack buffer; on FSQL_ETRUNCATED *json_cap reports the required size;
  * retry on the heap, growing until it fits (bounded). */
 static void ledger_audit_unpack_fn(sqlite3_context *sctx, int argc,
                                    sqlite3_value **argv) {
@@ -1153,7 +1153,7 @@ static void ledger_audit_unpack_fn(sqlite3_context *sctx, int argc,
 
 /* Escape a string as a JSON string literal (RFC 8259: the two mandatory
  * escapes plus the short control-character forms). Returns a malloc'd
- * literal WITHOUT the surrounding quotes included in the write below —
+ * literal WITHOUT the surrounding quotes included in the write below;
  * the caller wraps it. NULL on OOM. */
 static char *ledger_json_escape(const char *s) {
     size_t n = strlen(s);
@@ -1186,11 +1186,11 @@ static char *ledger_json_escape(const char *s) {
     return out;
 }
 
-/* fractal_audit_log(entry_type TEXT, payload TEXT) — append a
+/* fractal_audit_log(entry_type TEXT, payload TEXT): append a
  * provenance record to the general decision-audit chain (kind=2, an
  * independent chain alongside kind=1's QTL blobs, same table, same
- * append-only machinery — see ledger_chain_insert). The record is NOT
- * QTL-encoded — just JSON: {"type": entry_type, "entry": payload}.
+ * append-only machinery; see ledger_chain_insert). The record is NOT
+ * QTL-encoded, just JSON: {"type": entry_type, "entry": payload}.
  * Query back directly:
  *   SELECT id, payload, updated_at FROM fractalsql_ledger
  *    WHERE kind = 2 ORDER BY id;
@@ -1198,7 +1198,7 @@ static char *ledger_json_escape(const char *s) {
  *
  * Each kind is its own chain (WHERE kind=? throughout), so a core write
  * on kind=2 (Shadow) and an audit_log write never collide the way they
- * could under the old last-writer-wins snapshot — every write appends
+ * could under the old last-writer-wins snapshot; every write appends
  * its own row, linked into its own kind's chain.
  *
  * Enterprise-gated: unlike fractal_ledger_verify, this is a WRITE into
@@ -1243,7 +1243,7 @@ static void ledger_audit_log_fn(sqlite3_context *sctx, int argc,
         return;
     }
     size_t plen = strlen(payload);
-    /* {"type":"E","entry":P} — the literal carries empty E/P plus its
+    /* {"type":"E","entry":P}: the literal carries empty E/P plus its
      * NUL; grow by the actual E/P lengths. */
     size_t js_len = sizeof("{\"type\":\"\",\"entry\":}") + strlen(etype) + plen;
     char *js = (char *)malloc(js_len);
@@ -1291,7 +1291,7 @@ static void ledger_audit_log_fn(sqlite3_context *sctx, int argc,
  * predecessor's entry_hash, and the id sequence has no gaps (a gap
  * means a row was deleted). Stops and reports the FIRST failure only.
  *
- * A pure read-only forensic query directly over the SQLite table — does
+ * A pure read-only forensic query directly over the SQLite table; does
  * NOT call ledger_ensure_ent / touch the enterprise core at all, so it
  * works even when the enterprise library isn't currently loaded.
  * Returns a JSON report rather than raising on a tamper finding,
@@ -1301,7 +1301,7 @@ static void ledger_audit_log_fn(sqlite3_context *sctx, int argc,
  *
  * Registered at both 0 and 1 args: NULL/omitted kind defaults to 1 (the
  * QTL Truth/Shadow stream); kind=2 walks the fractal_audit_log stream
- * independently — each kind is a separate chain (WHERE kind=? below). */
+ * independently; each kind is a separate chain (WHERE kind=? below). */
 static void ledger_verify_fn(sqlite3_context *sctx, int argc,
                              sqlite3_value **argv) {
     FsqlState *st = ledger_state_of(sctx);

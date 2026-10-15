@@ -85,7 +85,7 @@ SQLITE_EXTENSION_INIT3
 
 /* Scratch buffer for dynamically-built DDL/DML. Worst case: four
  * quoted identifiers (~66 chars each after validation) plus fixed
- * text — 2048 is comfortable. snprintf return values are checked so a
+ * text: 2048 is comfortable. snprintf return values are checked so a
  * surprise truncation fails loudly instead of shipping truncated SQL. */
 #define FSQLV_SQL_MAX            2048
 
@@ -93,7 +93,7 @@ SQLITE_EXTENSION_INIT3
 /* Error helper                                                        */
 /* ------------------------------------------------------------------ */
 
-/* err may be NULL; truncation is fine — messages are diagnostics. */
+/* err may be NULL; truncation is fine, messages are diagnostics. */
 static void fsqlv_set_err(char *err, size_t err_cap,
                           const char *fmt, ...) {
     if (!err || err_cap == 0) return;
@@ -121,7 +121,7 @@ static int fsqlv_exec(sqlite3 *db, const char *sql,
 /* Identifier validation + quoting                                     */
 /* ------------------------------------------------------------------ */
 
-/* Accept [A-Za-z_][A-Za-z0-9_]* segments joined by '.' — schema-
+/* Accept [A-Za-z_][A-Za-z0-9_]* segments joined by '.': schema-
  * qualified table names allowed, everything else rejected. `dots`
  * permits the internal dot (table names); column identifiers pass 0.
  * This is the ONLY gate between caller text and string-built SQL:
@@ -263,7 +263,7 @@ static int fsqlv_ensure_schema(FsqlState *st, char *err, size_t err_cap) {
 /* One embedding call: validate the tier config, dispatch through the
  * reasoning plugin, parse the JSON float-array response, and encode it
  * as the canonical fractal_vector BLOB (u16 dim LE + u16 reserved +
- * float32 payload — see fsql_vector.h). On success returns 0 and sets
+ * float32 payload; see fsql_vector.h). On success returns 0 and sets
  * *out_blob to a sqlite3_malloc'd buffer the caller releases with
  * sqlite3_free(); on failure returns -1 with a message in `err` and
  * leaves *out_blob NULL. */
@@ -281,7 +281,7 @@ static int fsqlv_embed(FsqlState *st, const char *text,
                       "fractalsql_set('reasoning_plugin', '/absolute/path'))");
         return -1;
     }
-    /* No fallback to the chat http_url — a chat model is not a
+    /* No fallback to the chat http_url: a chat model is not a
      * substitute for a purpose-trained embedding model, and the two
      * live on different endpoint paths even on the same provider. */
     if (!st->cfg.http_embed_url || !*st->cfg.http_embed_url) {
@@ -295,8 +295,8 @@ static int fsqlv_embed(FsqlState *st, const char *text,
     /* Dispatch context is empty: embed configuration (endpoint, model,
      * embedding mode, token) reaches the plugin through the
      * FSQL_REASONING_TIER_EMBED tier's env block in fsql_reasoning.c
-     * — the plugin embeds per-call context into the prompt as data, so
-     * it must never carry config keys. */
+     * (the plugin embeds per-call context into the prompt as data, so
+     * it must never carry config keys). */
     char *resp = NULL;
     int rc = fsql_reasoning_generate(st, FSQL_REASONING_TIER_EMBED,
                                      text, "{}", &resp, err, err_cap);
@@ -386,7 +386,7 @@ static void fsqlv_embed_fn(sqlite3_context *ctx, int argc,
 /* The vectorizer is wired to its source table by TWO temp triggers
  * (AFTER INSERT + AFTER UPDATE OF text_col): SQLite's trigger grammar
  * has no combined insert-or-update event (trigger_event is DELETE |
- * INSERT | UPDATE [OF cols] — there is no OR slot). Both share the
+ * INSERT | UPDATE [OF cols]; there is no OR slot). Both share the
  * same enqueue body; the NOT EXISTS dedupe inside it makes the
  * doubled firings cheap no-ops. The 'u' suffix keeps the names
  * distinct. */
@@ -471,7 +471,7 @@ static int fsqlv_find_pk(FsqlState *st, const char *src_ident,
 
     const char *dot = strrchr(src_ident, '.');
     if (dot) {
-        /* Schema-qualified: qtbl is "schema"."table" — take the quoted
+        /* Schema-qualified: qtbl is "schema"."table"; take the quoted
          * table (last quoted segment) and prefix the quoted schema. */
         const char *last = strrchr(qtbl, '"');       /* closing quote  */
         const char *first = strrchr(qtbl, '.');      /* before "table" */
@@ -648,7 +648,7 @@ static void fsqlv_create_fn(sqlite3_context *ctx, int argc,
     sqlite3_finalize(stmt);
     sqlite3_int64 vid = sqlite3_last_insert_rowid(st->db);
 
-    /* Two AFTER triggers — INSERT plus UPDATE OF text_col (see
+    /* Two AFTER triggers: INSERT plus UPDATE OF text_col (see
      * fsqlv_drop_triggers above for why it isn't one combined trigger).
      * The enabled-check in the SELECT makes a paused (or deleted)
      * registry row a no-op rather than an error. */
@@ -664,7 +664,7 @@ static void fsqlv_create_fn(sqlite3_context *ctx, int argc,
     }
 
     /* Backfill: queue existing rows that don't have an embedding yet,
-     * not the whole table — a vectorizer retrofitted onto a table that
+     * not the whole table; a vectorizer retrofitted onto a table that
      * already has some embeddings shouldn't redo them (ON CONFLICT ...
      * DO NOTHING against the partial unique index). */
     char sql[FSQLV_SQL_MAX];
@@ -694,7 +694,7 @@ static void fsqlv_create_fn(sqlite3_context *ctx, int argc,
 /* pause / resume / drop                                               */
 /* ------------------------------------------------------------------ */
 
-/* fractal_vectorizer_pause(id) / fractal_vectorizer_resume(id) —
+/* fractal_vectorizer_pause(id) / fractal_vectorizer_resume(id):
  * shared body. `enabled` is the new registry value; fn_name appears in
  * the "no vectorizer with id" error. Idempotent (pausing an
  * already-paused id is a no-op); the only real failure
@@ -755,7 +755,7 @@ static void fsqlv_resume_fn(sqlite3_context *ctx, int argc,
     fsqlv_pause_resume_impl(ctx, argv[0], 1, "fractal_vectorizer_resume");
 }
 
-/* fractal_vectorizer_drop(id) — irreversible: drop the enqueue trigger
+/* fractal_vectorizer_drop(id) is irreversible: drop the enqueue trigger
  * (if still installed), delete the queue rows and the rate-window
  * counter, delete the registry row (ON DELETE CASCADE, applied by
  * hand). For a temporary stop that keeps config/history, use
@@ -799,7 +799,7 @@ static void fsqlv_drop_fn(sqlite3_context *ctx, int argc,
     }
 
     /* The triggers may already be gone (source table dropped since
-     * create; SQLite took the temp triggers with it) — IF EXISTS keeps
+     * create; SQLite took the temp triggers with it), IF EXISTS keeps
      * this a clean no-op. */
     char sql[FSQLV_SQL_MAX];
     if (fsqlv_drop_triggers(st, vid, err, sizeof err) != 0) {
@@ -865,7 +865,7 @@ static void fsqlv_read_rate_cap(FsqlState *st, const char *options,
 /* Apply (or defer under) a vectorizer's rolling-window rate cap.
  * vid is the registry id (the window counter's key); qid is the queue
  * row id (what gets put back on a cap hit). Returns 0 = row may
- * proceed (window call consumed), 1 = cap hit — the row goes back to
+ * proceed (window call consumed), 1 = cap hit; the row goes back to
  * 'pending' and is NOT counted as processed, -1 = window bookkeeping
  * broke (the row is failed, the batch continues). */
 static int fsqlv_rate_gate(FsqlState *st, sqlite3_int64 vid,
@@ -917,7 +917,7 @@ static int fsqlv_rate_gate(FsqlState *st, sqlite3_int64 vid,
         /* Cap hit for this vectorizer's current window: put the row
          * back to 'pending' (the claim transaction already moved it to
          * 'processing') and move on to the next queue row. Not counted
-         * in n_processed — it wasn't processed, just deferred. */
+         * in n_processed; it wasn't processed, just deferred. */
         if (sqlite3_prepare_v2(st->db,
                 "UPDATE fractal_vectorizer_queue "
                 "SET status='pending', processing_started_at=NULL "
@@ -942,7 +942,7 @@ static int fsqlv_rate_gate(FsqlState *st, sqlite3_int64 vid,
 }
 
 /* fractal_vectorizer_process_queue([batch_size [, stale_after_secs]])
- * -> number of rows actually processed (done + failed) — a row
+ * -> number of rows actually processed (done + failed); a row
  * deferred by the rate cap or belonging to a paused vectorizer isn't
  * counted. */
 static void fsqlv_process_fn(sqlite3_context *ctx, int argc,
@@ -979,7 +979,7 @@ static void fsqlv_process_fn(sqlite3_context *ctx, int argc,
     }
 
     /* Stale reclaim: rows stranded in 'processing' by a caller that
-     * crashed or was killed mid-batch — claiming a row only protects
+     * crashed or was killed mid-batch: claiming a row only protects
      * against concurrent callers racing each other, not against a
      * caller that claimed a row and never came back. Epoch
      * text/integer coercion is pinned with explicit CASTs so the
@@ -1043,7 +1043,7 @@ static void fsqlv_process_fn(sqlite3_context *ctx, int argc,
     /* The claim UPDATE renders each id as <= 20 characters plus a comma
      * into a fixed FSQLV_SQL_MAX scratch (prefix below is well under
      * 256 bytes). Keep the claimed batch within what renders without
-     * truncation — a larger batch would otherwise abort the whole run
+     * truncation; a larger batch would otherwise abort the whole run
      * with "internal error building claim SQL" after a wasted
      * BEGIN/ROLLBACK round-trip. The loop above caps n_claim at batch,
      * so this only ever reduces it; remaining rows are picked up by
@@ -1053,20 +1053,20 @@ static void fsqlv_process_fn(sqlite3_context *ctx, int argc,
         if (n_claim > max_claim) n_claim = max_claim;
     }
 
-    /* Claim: BEGIN IMMEDIATE + conditional UPDATE + COMMIT — the
+    /* Claim: BEGIN IMMEDIATE + conditional UPDATE + COMMIT, the
      * FOR UPDATE SKIP LOCKED analog. busy_timeout is per-connection,
      * so the 5 s claim window is set here and restored (to SQLite's
      * stock no-handler default) once the claim transaction closes; a
      * host-installed busy handler cannot be read back and reinstalled,
      * which is the one observable cost of the restore. TEMP tables are
-     * connection-private, so contention here is theoretical — the
+     * connection-private, so contention here is theoretical; the
      * transaction shape is kept anyway for defense in depth. */
     sqlite3_busy_timeout(st->db, FSQLV_CLAIM_BUSY_MS);
     int failed = 0;
     if (fsqlv_exec(st->db, "BEGIN IMMEDIATE", err, sizeof err) != 0) {
         failed = 1;
     } else {
-        /* Build "id IN (...)" from the selected ids — plain int64
+        /* Build "id IN (...)" from the selected ids: plain int64
          * text, nothing injectable. */
         char sql[FSQLV_SQL_MAX];
         int n = snprintf(sql, sizeof sql,
@@ -1194,7 +1194,7 @@ static void fsqlv_process_fn(sqlite3_context *ctx, int argc,
             int grc = fsqlv_rate_gate(st, reg_id, qid, max_calls,
                                       window_secs, rowerr, sizeof rowerr);
             if (grc < 0) {
-                /* Window bookkeeping broke — fail this row, not the
+                /* Window bookkeeping broke: fail this row, not the
                  * whole batch. */
                 sqlite3_reset(fail_u);
                 sqlite3_bind_text(fail_u, 1, rowerr, -1, SQLITE_TRANSIENT);
@@ -1208,8 +1208,8 @@ static void fsqlv_process_fn(sqlite3_context *ctx, int argc,
 
         /* Read the source row's text. The PK column is cast to text
          * for the comparison (never the reverse) so this works
-         * generically across int/real/text PKs without a type lookup —
-         * a correctness-over-index-use trade. */
+         * generically across int/real/text PKs without a type lookup
+         * (a correctness-over-index-use trade). */
         snprintf(sql, sizeof sql,
                  "SELECT %s FROM %s WHERE CAST(%s AS TEXT) = ?1",
                  qtcol, qtbl, qpk);
@@ -1246,7 +1246,7 @@ static void fsqlv_process_fn(sqlite3_context *ctx, int argc,
                          : NULL;
         if (src_rc == SQLITE_DONE || !text) {
             /* Source row deleted, or its text column went NULL, since
-             * this queue entry was created — nothing to embed, not a
+             * this queue entry was created; nothing to embed, not a
              * failure. */
             sqlite3_finalize(txt_q);
             txt_q = NULL;
@@ -1259,7 +1259,7 @@ static void fsqlv_process_fn(sqlite3_context *ctx, int argc,
         }
 
         /* Embed + write the canonical BLOB back to the source row.
-         * Same 4 MiB input bound as fractal_embed above — the
+         * Same 4 MiB input bound as fractal_embed above: the
          * reasoning layer caps the response, not the query. */
         unsigned char *blob = NULL;
         int nbytes = 0;
@@ -1345,7 +1345,7 @@ static void fsqlv_process_fn(sqlite3_context *ctx, int argc,
 
 int fsql_vectorizer_register(sqlite3 *db, FsqlState *st) {
     /* None of this surface is DETERMINISTIC (network I/O, queue
-     * mutation, clock reads), and none of it is INNOCUOUS — it sends
+     * mutation, clock reads), and none of it is INNOCUOUS: it sends
      * data to a configured endpoint and mutates the user's tables. */
     const int flags = SQLITE_UTF8;
     int rc;

@@ -77,9 +77,8 @@ FsqlState *fsql_state_create(sqlite3 *db, char **pzErrMsg) {
      * cfg->response_mode -- and re-asserts it after a T2S-tier load
      * that failed partway could otherwise leave that tier's forced
      * "code" value sitting in the process environment. Env-only by
-     * design (no fractalsql_set key), matching the pg GUC story:
-     * docs/reasoning-setup.md's "Not a GUC: set ... in the service
-     * environment". A new connection (new FsqlState) picks up a changed
+     * design (no fractalsql_set key), only ever set in the service
+     * environment, as docs/reasoning-setup.md documents. A new connection (new FsqlState) picks up a changed
      * value; a live one keeps the value it booted with. */
     {
         const char *rm = getenv("FSQL_REASONING_HTTP_RESPONSE_MODE");
@@ -144,7 +143,7 @@ void fsql_state_destroy(void *p) {
         if (st->reasoning_ctx[i]) fsql_free(st->reasoning_ctx[i]);
     }
     /* ledger_ctx: a single block whose slot payloads are separate
-     * allocations — fsql_ledger_teardown walks and frees both. It runs
+     * allocations: fsql_ledger_teardown walks and frees both. It runs
      * after fsql_free(st->ctx) above because that call may re-enter
      * seal_ledger with the ctx still alive. Sovereign builds only: a
      * minimal link compiles the ledger TU out, and with it the only
@@ -214,7 +213,7 @@ int fsql_parse_value_to_doubles(sqlite3_value *v, double *out, int cap) {
 }
 
 /* -------------------------------------------------------------------
- * SQL functions — smoke surface.
+ * SQL functions: smoke surface.
  * ------------------------------------------------------------------- */
 
 static void edition_fn(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
@@ -228,7 +227,7 @@ static void version_fn(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
 }
 
 /* -------------------------------------------------------------------
- * fractal_search — Sniper mode, memoized per distinct query.
+ * fractal_search: Sniper mode, memoized per distinct query.
  * ------------------------------------------------------------------- */
 
 static uint64_t fnv1a_64(const void *bytes, size_t n) {
@@ -333,13 +332,13 @@ static void fractal_search_fn(sqlite3_context *ctx, int argc,
 }
 
 /* -------------------------------------------------------------------
- * fractal_search_explore — Scout Mode aggregate.
+ * fractal_search_explore: Scout Mode aggregate.
  *
  * Sniper (fractal_search, scalar) collapses into one basin. Scout
  * scans the WHOLE `emb` column as the corpus and runs SFS with walk=0
  * + return_population so the final population disperses across
  * distinct basins. The corpus buffer is the one place this TU still
- * needs a growable array — a plain malloc/realloc block, no libstdc++.
+ * needs a growable array, a plain malloc/realloc block, no libstdc++.
  * ------------------------------------------------------------------- */
 
 static int json_get_int(const char *s, const char *key, int fallback) {
@@ -393,7 +392,7 @@ static void fractal_search_explore_step(sqlite3_context *ctx, int argc,
         return;
     }
     ScoutAgg *agg = (ScoutAgg *)sqlite3_aggregate_context(ctx, sizeof(ScoutAgg));
-    if (!agg) { return; }                 /* OOM — SQLite raises */
+    if (!agg) { return; }                 /* OOM; SQLite raises */
     if (agg->bad) return;
 
     /* Skip rows with a NULL/absent embedding rather than poisoning the
@@ -491,7 +490,7 @@ static void fractal_search_explore_final(sqlite3_context *ctx) {
  * and 9's stock sqlite3 package, and Debian 11's, ship without that
  * module compiled in ("no such function: sin"/"sqrt") even though
  * every other SQL surface this extension needs (JSON1, window
- * functions) works fine there — verified directly against each. Only
+ * functions) works fine there; verified directly against each. Only
  * sin(), sqrt(), and cos() are registered because grepping every shipped
  * demo SQL script found no other math function actually called
  * anywhere; add more here only if a demo starts using one. Registered
@@ -554,7 +553,7 @@ int sqlite3_fractalsql_init(sqlite3 *db, char **pzErrMsg,
     const int flags = SQLITE_UTF8 | SQLITE_DETERMINISTIC | SQLITE_INNOCUOUS;
     int rc;
 
-    /* Smoke surface. fractal_search owns the state (xDestroy) — every
+    /* Smoke surface. fractal_search owns the state (xDestroy); every
      * later registration passes NULL to avoid a double-free. */
     rc = sqlite3_create_function_v2(
         db, "fractalsql_edition", 0, flags, NULL,
@@ -584,15 +583,15 @@ int sqlite3_fractalsql_init(sqlite3 *db, char **pzErrMsg,
     sqlite3_create_function_v2(
         db, "cos", 1, flags, NULL, math_cos_fn, NULL, NULL, NULL);
 
-    /* fractal_search_explore — Scout Mode aggregate (xStep + xFinal). Shares
+    /* fractal_search_explore: Scout Mode aggregate (xStep + xFinal). Shares
      * the same per-connection state as fractal_search. NOT marked
-     * DETERMINISTIC — SFS is stochastic. Variadic narg (-1) accepts
+     * DETERMINISTIC: SFS is stochastic. Variadic narg (-1) accepts
      * the 2-arg (emb, query) and 3-arg (emb, query, params) forms. */
     rc = sqlite3_create_function_v2(
         db, "fractal_search_explore", -1, SQLITE_UTF8 | SQLITE_INNOCUOUS, st,
         NULL /*xFunc*/,
         fractal_search_explore_step, fractal_search_explore_final,
-        NULL /*xDestroy — owned by fractal_search's registration*/);
+        NULL /*xDestroy: owned by fractal_search's registration*/);
     if (rc != SQLITE_OK) return rc;
 
     /* Feature modules. Sovereign-only modules are compiled out on a
