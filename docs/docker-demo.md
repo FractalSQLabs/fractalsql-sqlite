@@ -60,7 +60,7 @@ Confirm the extension is alive and which edition it is:
 ```bash
 docker compose exec demo sqlite3 fractalsql_demo.sqlite \
   -init demo_init.sql "SELECT fractalsql_edition(), fractalsql_version();"
-# expect: Community|2.0.6
+# expect: Community|2.0.7
 ```
 
 Run any demo (re-runnable; each recreates its own fixture tables):

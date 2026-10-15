@@ -71,7 +71,7 @@ rem /MT (static CRT) matches the vcpkg x64-windows-static triplet and yields a
 rem self-contained binary, mirroring the release-posture of the rest of this
 rem repo's Windows artifacts.
 cl.exe /nologo /std:c++17 /utf-8 /EHsc /MT /O2 /W3 ^
-  /DFSQL_MCP_VERSION="\"2.0.6\"" ^
+  /DFSQL_MCP_VERSION="\"2.0.7\"" ^
   /I "%MCP_DIR%\vendor" /I "%MCP_DIR%\src" /I "%SQLITE_DIR%" ^
   /I "%OPENSSL_DIR%\include" ^
   "%SQLITE_DIR%\sqlite3.c" ^

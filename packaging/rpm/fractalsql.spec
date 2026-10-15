@@ -3,7 +3,7 @@
 %global mcpdocdir %{docdir}/mcp
 
 Name:           fractalsql-sqlite
-Version:        2.0.6
+Version:        2.0.7
 Release:        1%{?dist}
 Summary:        Stochastic Fractal Search SQLite loadable extension (Community)
 
@@ -25,7 +25,7 @@ fractalsql-sqlite is a SQLite loadable extension exposing the full
 FractalSQL 2.0 surface:
 
     fractalsql_edition()          -> 'Community'
-    fractalsql_version()          -> '2.0.6'
+    fractalsql_version()          -> '2.0.7'
     fractal_search(vector, query) -> REAL (cosine distance to
                                           SFS-refined projection
                                           of the query vector)
@@ -119,13 +119,15 @@ Load inside any SQLite session:
 
     SELECT load_extension('/usr/local/lib/sqlite3/fractalsql');
     SELECT fractalsql_edition();   -- 'Community'
-    SELECT fractalsql_version();   -- '2.0.6'
+    SELECT fractalsql_version();   -- '2.0.7'
 
 See /usr/share/doc/fractalsql-sqlite/load_extension.sql for examples.
 
 EOF
 
 %changelog
+* Wed Oct 15 2026 FractalSQLabs - 2.0.7-1
+- Fixed broken .deb install and incorrect Linux package version labels.
 * Tue Oct 14 2026 FractalSQLabs - 2.0.6-1
 - MCP demo verified end to end: the four pinned demo tools round-trip
   against a live OpenAI-compatible endpoint; bootstrap snippet parsing
