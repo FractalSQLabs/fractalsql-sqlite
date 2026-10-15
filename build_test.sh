@@ -958,9 +958,9 @@ gate_01_build() {
 
 gate_02_smoke() {
   local ver; ver=$(sqlq "SELECT fractalsql_version();")
-  [[ "$ver" = "2.0.6" ]] \
+  [[ "$ver" = "2.0.7" ]] \
     && pass "02 smoke: version=$ver" \
-    || fail "02 smoke: version='$ver' (want 2.0.6)"
+    || fail "02 smoke: version='$ver' (want 2.0.7)"
   # fractal_search convergence: self-distance ~0
   local d; d=$(sqlq "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');")
   if [[ "$d" = "0.0" ]] || python_abs_lt_1e6 "$d"; then

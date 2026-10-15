@@ -29,7 +29,7 @@ CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra
 # one plain-C translation unit (sqlite3.o) matches the C++ objects'
 # -arch instead of silently compiling for the host architecture.
 CFLAGS   ?=
-DEFS     := -DFSQL_MCP_VERSION="\"2.0.6\""
+DEFS     := -DFSQL_MCP_VERSION="\"2.0.7\""
 
 # Coverage builds (build_test.sh --coverage): same posture as the
 # top-level Makefile's own COVERAGE block: gcov instrumentation on
