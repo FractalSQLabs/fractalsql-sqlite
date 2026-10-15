@@ -54,6 +54,16 @@ static int mock_should_fail(void) {
     return path != NULL && path[0] != '\0' && access(path, F_OK) == 0;
 }
 
+/* Same sentinel-file convention as mock_should_fail: when present, the
+ * portfolio_multimodal family returns FSQL_OK with *out_n_found = 0
+ * (a legitimate "search ran, found nothing" result) instead of the
+ * canned single candidate -- otherwise unreachable through this mock,
+ * since it always finds exactly one. */
+static int mock_should_find_zero(void) {
+    const char *path = getenv("FSQL_MOCK_ENT_ZERO_FOUND");
+    return path != NULL && path[0] != '\0' && access(path, F_OK) == 0;
+}
+
 /* ---- the 8 required symbols (ensure_enterprise_lib's own check) ---- */
 
 FSQL_API int fsql_ledger_flush(fsql_ctx *ctx) {
@@ -137,6 +147,7 @@ fsql_optimize_portfolio_multimodal(const double *mu, const double *cov,
     (void) mu; (void) cov; (void) n_restarts;
     (void) overlap_threshold; (void) quality_frac; (void) seed;
     if (mock_should_fail()) return FSQL_ESTORAGE;
+    if (mock_should_find_zero()) { *out_n_found = 0; return FSQL_OK; }
     mock_uniform_weights(out_weights, n_assets, k);
     out_sharpes[0] = 0.5;
     *out_n_found = 1;
@@ -158,6 +169,7 @@ fsql_optimize_portfolio_multimodal_ex(const double *mu, const double *cov,
     (void) overlap_threshold; (void) quality_frac; (void) seed;
     (void) use_obl; (void) diffusion_mode;
     if (mock_should_fail()) return FSQL_ESTORAGE;
+    if (mock_should_find_zero()) { *out_n_found = 0; return FSQL_OK; }
     mock_uniform_weights(out_weights, n_assets, k);
     out_sharpes[0] = 0.5;
     *out_n_found = 1;
@@ -177,6 +189,7 @@ fsql_optimize_portfolio_multimodal_pareto(const double *mu, const double *cov,
     (void) mu; (void) cov; (void) n_restarts; (void) max_front;
     (void) seed; (void) use_obl; (void) diffusion_mode;
     if (mock_should_fail()) return FSQL_ESTORAGE;
+    if (mock_should_find_zero()) { *out_n_found = 0; return FSQL_OK; }
     mock_uniform_weights(out_weights, n_assets, k);
     out_returns[0] = 0.1;
     out_risks[0]   = 0.05;

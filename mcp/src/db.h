@@ -22,9 +22,9 @@ namespace fsqlmcp
 {
     // The plugin's own version, and the engine surface version it was
     // built and tested against (version numbers track the engine).
-    static const char* kMcpPluginName       = "fractalsql-sqlite-mcp";
-    static const char* kMcpPluginVersion    = "2.0.7";
-    static const char* kEngineVersionExpect = "2.0.7";
+    static const char* const kMcpPluginName       = "fractalsql-sqlite-mcp";
+    static const char* const kMcpPluginVersion    = "2.0.8";
+    static const char* const kEngineVersionExpect = "2.0.8";
 
     using SqlValue = std::variant<std::nullptr_t, std::int64_t, double, std::string,
                                   std::vector<std::uint8_t>>;
@@ -93,80 +93,15 @@ namespace fsqlmcp
                       const std::string& bootstrapSql, const std::string& engineVersionExpected,
                       bool agentPartialReasoningFail = true )
         {
-            if( sqlite3_open( dbPath.c_str(), &db_ ) != SQLITE_OK )
-            {
-                const std::string msg = db_ ? sqlite3_errmsg( db_ ) : "cannot open database file";
-                close();
-                throw ToolError( ErrorClass::Connectivity, sanitizeSecrets( msg ) );
-            }
+            openDatabase( dbPath );
             // Every engine call binds parameters. The only statements
             // executed unbound are the fixed PRAGMA and the bootstrap snippet
             // (an operator-supplied file/env, not caller input).
             exec( "PRAGMA busy_timeout=30000;" );
-
-            // Load-then-lock-down: enable ON only for the one
-            // expected .load call, then immediately OFF again. This prevents
-            // a later fractal_text_to_sql-reachable path from loading a
-            // second extension.
-            sqlite3_enable_load_extension( db_, 1 );
-            char* err = nullptr;
-            if( sqlite3_load_extension( db_, extensionPath.c_str(), nullptr, &err ) != SQLITE_OK )
-            {
-                const std::string msg = err ? err : "failed to load extension";
-                sqlite3_free( err );
-                sqlite3_enable_load_extension( db_, 0 );
-                close();
-                throw ToolError( ErrorClass::Connectivity,
-                                 sanitizeSecrets( "failed to load extension '" + extensionPath + "': " + msg ) );
-            }
-            sqlite3_enable_load_extension( db_, 0 );
-
-            for( const std::string& stmt : splitSqlStatements( bootstrapSql ) )
-                exec( stmt );
-
-            // Partial-result honesty: opt the connection into the
-            // engine's agent_partial_reasoning_fail mode so a reasoning-
-            // endpoint failure inside an agent's one scalar call comes back
-            // as the computed data half plus "reasoning_step_failed" instead
-            // of raising. Off by default in the engine's own SQL surface; the
-            // plugin turns it on for every session (FSQL_MCP_AGENT_PARTIAL=off
-            // keeps the engine's raise behavior). Never fatal: an engine
-            // build without the key just keeps raising, recorded as a
-            // startup warning (same posture as the version-skew guard).
-            if( agentPartialReasoningFail )
-            {
-                try
-                {
-                    exec( "SELECT fractalsql_set('agent_partial_reasoning_fail','on')" );
-                }
-                catch( const std::exception& e )
-                {
-                    warnings_.push_back( std::string(
-                        "agent_partial_reasoning_fail not applied: " ) + e.what() );
-                    logging::event( "startup_warning", Json{ { "note", warnings_.back() } } );
-                }
-                catch( ... )
-                {
-                    /* non-fatal, same as the version-skew guard */
-                }
-            }
-
-            // Version-skew guard: warn, never hard-fail (the strict flag
-            // governs the tool-surface hash, not this).
-            try
-            {
-                const SqlValue v = callScalar( "SELECT fractalsql_version()", {} );
-                const auto t = asText( v );
-                if( t && *t != engineVersionExpected )
-                {
-                    warnings_.push_back( "version skew: engine reports " + *t +
-                                         ", plugin built against " + engineVersionExpected );
-                    logging::event( "startup_warning", Json{
-                        { "note", warnings_.back() },
-                        { "action", "warn-not-fail: the SQL surface is stable across the compat matrix" } } );
-                }
-            }
-            catch( ... ) { /* non-fatal: never thrown from connect() */ }
+            loadExtensionLockedDown( extensionPath );
+            runBootstrap( bootstrapSql );
+            if( agentPartialReasoningFail ) applyAgentPartialReasoningFail();
+            checkVersionSkew( engineVersionExpected );
         }
 
         void close() noexcept
@@ -282,6 +217,90 @@ namespace fsqlmcp
                                  "database connection is not open (closed or never connected)" );
         }
 
+        // connect()'s phases, broken out 1:1 (same order, same behavior,
+        // same exceptions) so each stays small on its own.
+        void openDatabase( const std::string& dbPath )
+        {
+            if( sqlite3_open( dbPath.c_str(), &db_ ) != SQLITE_OK )
+            {
+                const std::string msg = db_ ? sqlite3_errmsg( db_ ) : "cannot open database file";
+                close();
+                throw ToolError( ErrorClass::Connectivity, sanitizeSecrets( msg ) );
+            }
+        }
+
+        // Load-then-lock-down: enable ON only for the one expected .load
+        // call, then immediately OFF again. This prevents a later
+        // fractal_text_to_sql-reachable path from loading a second extension.
+        void loadExtensionLockedDown( const std::string& extensionPath )
+        {
+            sqlite3_enable_load_extension( db_, 1 );
+            char* err = nullptr;
+            if( sqlite3_load_extension( db_, extensionPath.c_str(), nullptr, &err ) != SQLITE_OK )
+            {
+                const std::string msg = err ? err : "failed to load extension";
+                sqlite3_free( err );
+                sqlite3_enable_load_extension( db_, 0 );
+                close();
+                throw ToolError( ErrorClass::Connectivity,
+                                 sanitizeSecrets( "failed to load extension '" + extensionPath + "': " + msg ) );
+            }
+            sqlite3_enable_load_extension( db_, 0 );
+        }
+
+        void runBootstrap( const std::string& bootstrapSql )
+        {
+            for( const std::string& stmt : splitSqlStatements( bootstrapSql ) )
+                exec( stmt );
+        }
+
+        // Partial-result honesty: opt the connection into the engine's
+        // agent_partial_reasoning_fail mode so a reasoning-endpoint failure
+        // inside an agent's one scalar call comes back as the computed data
+        // half plus "reasoning_step_failed" instead of raising. Off by
+        // default in the engine's own SQL surface; the plugin turns it on
+        // for every session (FSQL_MCP_AGENT_PARTIAL=off keeps the engine's
+        // raise behavior). Never fatal: an engine build without the key
+        // just keeps raising, recorded as a startup warning (same posture
+        // as the version-skew guard).
+        void applyAgentPartialReasoningFail()
+        {
+            try
+            {
+                exec( "SELECT fractalsql_set('agent_partial_reasoning_fail','on')" );
+            }
+            catch( const std::exception& e )
+            {
+                warnings_.push_back( std::string(
+                    "agent_partial_reasoning_fail not applied: " ) + e.what() );
+                logging::event( "startup_warning", Json{ { "note", warnings_.back() } } );
+            }
+            catch( ... )
+            {
+                /* non-fatal, same as the version-skew guard */
+            }
+        }
+
+        // Version-skew guard: warn, never hard-fail (the strict flag
+        // governs the tool-surface hash, not this).
+        void checkVersionSkew( const std::string& engineVersionExpected )
+        {
+            try
+            {
+                const SqlValue v = callScalar( "SELECT fractalsql_version()", {} );
+                const auto t = asText( v );
+                if( t && *t != engineVersionExpected )
+                {
+                    warnings_.push_back( "version skew: engine reports " + *t +
+                                         ", plugin built against " + engineVersionExpected );
+                    logging::event( "startup_warning", Json{
+                        { "note", warnings_.back() },
+                        { "action", "warn-not-fail: the SQL surface is stable across the compat matrix" } } );
+                }
+            }
+            catch( ... ) { /* non-fatal: never thrown from connect() */ }
+        }
+
         void exec( const std::string& stmt )
         {
             char* err = nullptr;
@@ -353,7 +372,9 @@ namespace fsqlmcp
         static std::vector<std::string> splitSqlStatements( const std::string& sql )
         {
             std::vector<std::string> out;
-            std::string cur; bool inSingle = false, inDouble = false;
+            std::string cur;
+            bool inSingle = false;
+            bool inDouble = false;
             for( std::size_t i = 0; i < sql.size(); ++i )
             {
                 const char c = sql[ i ];

@@ -64,7 +64,7 @@ namespace fsqlmcp
                           "instead)" } } );
     }
 
-    static const char* kScope =
+    static const char* const kScope =
         "per-connection (THIS MCP session's dedicated SQLite connection only: "
         "fractalsql_set state does not survive connections, and another MCP "
         "client on the same database file inherits nothing)";
@@ -80,7 +80,7 @@ namespace fsqlmcp
             } } );
         t.back().description = "Confirms the FractalSQL install is alive and which edition (Community/Enterprise) "
             "is active: calls fractalsql_version() and fractalsql_edition(). The one-line sanity check after "
-            "installing; expect a real edition/version back (e.g. Community|2.0.7), plus a startup warning if "
+            "installing; expect a real edition/version back (e.g. Community|2.0.8), plus a startup warning if "
             "the engine version differs from what this plugin was built against (the version-skew guard warns, "
             "never hard-fails).";
 

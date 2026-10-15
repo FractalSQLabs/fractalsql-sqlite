@@ -73,6 +73,7 @@ esac
 case "${PKG_ARCH}" in
     amd64) RPM_ARCH="x86_64" ;;
     arm64) RPM_ARCH="aarch64" ;;
+    *) echo "internal error: unhandled arch '${PKG_ARCH}' (validated above)" >&2; exit 2 ;;
 esac
 
 SO="dist/${PKG_ARCH}/fractalsql${BIN_SUFFIX}.so"

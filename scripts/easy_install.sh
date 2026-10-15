@@ -76,7 +76,14 @@ log()  { printf "${B}==>${Z} %s\n" "$1"; }
 ok()   { printf "  ${G}✓${Z} %s\n" "$1"; }
 warn() { printf "  ${Y}!${Z} %s\n" "$1" >&2; }
 err()  { printf "  ${R}✗${Z} %s\n" "$1" >&2; }
-die()  { err "$1"; exit 1; }
+die()  { local msg="$1"; err "${msg}"; exit 1; }
+
+# Every package download below is a release asset fetched over the
+# network, so all of them go through this wrapper, which pins curl to
+# https via --proto (same pin the release workflow's own downloads use).
+fetch() {
+    curl -fsSL --proto '=https' "$@"
+}
 
 # --- /dev/tty-aware prompting --------------------------------------------
 # `curl ... | bash` makes stdin the pipe, not the terminal. Reading a
@@ -234,14 +241,14 @@ phase_b_install() {
         debian)
             local asset="sqlite3-fractalsql-${ARCH_DEB}.deb"
             log "Downloading ${asset}..."
-            curl -fsSL --proto '=https' "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
+            fetch "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
             log "sudo apt-get install -y ${TMP_DIR}/${asset}"
             [[ "${DRY_RUN}" -eq 1 ]] || sudo apt-get install -y "${TMP_DIR}/${asset}"
             ;;
         rhel)
             local asset="fractalsql-sqlite-${ARCH_DEB}.rpm"
             log "Downloading ${asset}..."
-            curl -fsSL --proto '=https' "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
+            fetch "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
             if [[ "${PKG_MGR}" == "zypper" ]]; then
                 # zypper enforces signature checks by default, even for a
                 # locally-supplied file; dnf/yum don't.
@@ -255,7 +262,7 @@ phase_b_install() {
         alpine)
             local asset="fractalsql-sqlite-musl-${ARCH_DEB}.apk"
             log "Downloading ${asset}..."
-            curl -fsSL --proto '=https' "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
+            fetch "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
             # apk enforces signature checks for locally-supplied files
             # (like zypper), and the community packages are unsigned --
             # hence --allow-untrusted.
@@ -265,7 +272,7 @@ phase_b_install() {
         darwin)
             local asset="fractalsql-sqlite-${INSTALL_VERSION}-darwin-${ARCH_DARWIN}.tar.gz"
             log "Downloading ${asset}..."
-            curl -fsSL --proto '=https' "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
+            fetch "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
             tar xzf "${TMP_DIR}/${asset}" -C "${TMP_DIR}"
             log "Installing into ${INSTALL_DIR} (sudo)..."
             [[ "${DRY_RUN}" -eq 1 ]] || sudo mkdir -p "${INSTALL_DIR}"

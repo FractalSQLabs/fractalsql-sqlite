@@ -141,7 +141,6 @@
  * ---------------------------------------------------------------------- */
 
 #include <sqlite3ext.h>
-SQLITE_EXTENSION_INIT3
 
 #include <stdint.h>
 #include <stdio.h>
@@ -150,6 +149,8 @@ SQLITE_EXTENSION_INIT3
 
 #include "fsql_hmac.h"
 #include "fsql_sqlite_internal.h"
+
+SQLITE_EXTENSION_INIT3
 
 /* ------------------------------------------------------------------ */
 /* Ledger context (the storage VFS user_ctx)                           */
@@ -371,12 +372,13 @@ static const char FSQL_LEDGER_INDEX_DDL[] =
  * doesn't exist (no error), so this one query covers both "fresh
  * install, nothing to migrate" (has_any=0) and "exists, old shape"
  * (has_any=1, has_id=0) in one query. */
-static int ledger_table_is_old_shape(FsqlLedgerCtx *lc) {
+static int ledger_table_is_old_shape(const FsqlLedgerCtx *lc) {
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(lc->st->db, "PRAGMA table_info(fractalsql_ledger)",
                            -1, &stmt, NULL) != SQLITE_OK)
         return 0;   /* can't tell -- CREATE TABLE IF NOT EXISTS below is safe either way */
-    int has_any = 0, has_id = 0;
+    int has_any = 0;
+    int has_id = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         has_any = 1;
         const unsigned char *name = sqlite3_column_text(stmt, 1);  /* PRAGMA table_info: col 1 = name */
@@ -404,7 +406,7 @@ static int ledger_table_is_old_shape(FsqlLedgerCtx *lc) {
  * one PRAGMA table_info plus two idempotent IF NOT EXISTS statements,
  * which is negligible next to the HMAC/chain-hash work flush/load/
  * verify already do around every call site below. */
-static int ledger_ensure_table(FsqlLedgerCtx *lc, char *err, size_t err_cap) {
+static int ledger_ensure_table(const FsqlLedgerCtx *lc, char *err, size_t err_cap) {
     char *emsg = NULL;
     int rc;
 
@@ -439,7 +441,7 @@ static int ledger_ensure_table(FsqlLedgerCtx *lc, char *err, size_t err_cap) {
     return 0;
 }
 
-static int ledger_tx_exec(FsqlLedgerCtx *lc, const char *sql,
+static int ledger_tx_exec(const FsqlLedgerCtx *lc, const char *sql,
                           char *err, size_t err_cap) {
     char *emsg = NULL;
     int rc = sqlite3_exec(lc->st->db, sql, NULL, NULL, &emsg);
@@ -456,7 +458,7 @@ static int ledger_tx_exec(FsqlLedgerCtx *lc, const char *sql,
 /* Read entry_hash of the latest row for `kind` into prev_hash[32]; the
  * all-zero genesis sentinel when this kind has no rows yet. Caller must
  * already hold the write transaction (see ledger_chain_insert). */
-static int ledger_chain_read_prev(FsqlLedgerCtx *lc, int kind,
+static int ledger_chain_read_prev(const FsqlLedgerCtx *lc, int kind,
                                   uint8_t prev_hash[32],
                                   char *err, size_t err_cap) {
     memset(prev_hash, 0, 32);
@@ -499,12 +501,27 @@ static int ledger_chain_read_prev(FsqlLedgerCtx *lc, int kind,
  * must already hold the write transaction (BEGIN IMMEDIATE, taken by
  * ledger_materialize / the audit_log write path -- see the file header
  * for why that lock is needed here). */
-static int ledger_chain_insert(FsqlLedgerCtx *lc, int kind,
+static int ledger_chain_insert(const FsqlLedgerCtx *lc, int kind,
                                const void *payload, size_t len,
                                char *err, size_t err_cap) {
     uint8_t prev_hash[32];
     if (ledger_chain_read_prev(lc, kind, prev_hash, err, err_cap) != 0)
         return -1;
+
+    /* Bound len before any arithmetic on it. sqlite3_bind_blob further
+     * down takes an int length -- a size_t >= 2^31 would truncate to a
+     * negative n there, which SQLite reads as a NUL-terminated string
+     * (strlen over binary bytes) -- but checking the same bound here,
+     * before buflen's addition, is what actually matters: an unbounded
+     * len left unchecked until the bind call could instead wrap buflen
+     * (32 + len + 32) around size_t's range first, undersizing the
+     * malloc below relative to the memcpys that follow. */
+    if (len > 0x7fffffffu) {
+        snprintf(err, err_cap,
+                 "fractalsql: ledger payload too large to persist (%zu bytes)",
+                 len);
+        return -1;
+    }
 
     const char *key = ledger_key(lc);
     uint8_t mac[32];
@@ -541,17 +558,8 @@ static int ledger_chain_insert(FsqlLedgerCtx *lc, int kind,
         return -1;
     }
     /* Every bound value outlives the step (slot memory / stack buffers),
-     * so SQLITE_STATIC is safe. */
-    if (len > 0x7fffffffu) {
-        /* sqlite3_bind_blob takes an int length; a size_t >= 2^31 would
-         * truncate to a negative n, which SQLite reads as a
-         * NUL-terminated string (strlen over binary bytes). Fail the
-         * write instead. */
-        snprintf(err, err_cap,
-                 "fractalsql: ledger payload too large to persist (%zu bytes)",
-                 len);
-        return -1;
-    }
+     * so SQLITE_STATIC is safe. len's upper bound was already checked
+     * above, before it fed the entry_hash buffer's size arithmetic. */
     sqlite3_bind_int(stmt, 1, kind);
     sqlite3_bind_blob(stmt, 2, payload, (int)len, SQLITE_STATIC);
     if (have_mac) sqlite3_bind_blob(stmt, 3, mac, 32, SQLITE_STATIC);
@@ -629,7 +637,7 @@ static const char *ledger_rc_message(int rc) {
 }
 
 /* Uniform failure for the core-call wrappers. */
-static void ledger_core_error(sqlite3_context *sctx, FsqlState *st,
+static void ledger_core_error(sqlite3_context *sctx, const FsqlState *st,
                               const char *api, int rc) {
     const char *detail = fsql_last_error(st->ctx);
     char msg[320];
@@ -677,7 +685,141 @@ static int ledger_ensure_ent(FsqlState *st, sqlite3_context *sctx) {
  * No rows yet => nothing to verify, empty start (returns 0). On failure,
  * writes a message into err and returns -1; caller surfaces it as the SQL
  * error from fractal_ledger_load. */
-static int ledger_verify_tip(FsqlLedgerCtx *lc, int kind,
+
+/* One tip-verify SELECT row's raw columns (pointers into SQLite's
+ * row buffers, valid until the statement's next step). */
+typedef struct LedgerTipRow {
+    const void *payload;   size_t payload_len;
+    const void *mac;       int mac_len;   int mac_null;
+    const void *prev;      int prev_len;
+    const void *hash;      int hash_len;
+} LedgerTipRow;
+
+static void ledger_tip_row_load(LedgerTipRow *r, sqlite3_stmt *stmt) {
+    int plen = sqlite3_column_bytes(stmt, 0);
+    r->payload = sqlite3_column_blob(stmt, 0);
+    r->payload_len = (size_t)(plen > 0 ? plen : 0);
+    r->mac = sqlite3_column_blob(stmt, 1);
+    r->mac_len = sqlite3_column_bytes(stmt, 1);
+    r->mac_null = (sqlite3_column_type(stmt, 1) == SQLITE_NULL);
+    r->prev = sqlite3_column_blob(stmt, 2);
+    r->prev_len = sqlite3_column_bytes(stmt, 2);
+    r->hash = sqlite3_column_blob(stmt, 3);
+    r->hash_len = sqlite3_column_bytes(stmt, 3);
+}
+
+/* MAC-envelope check for the tip row: a shape check on the stored MAC
+ * and (when a key is configured) a recompute over the exact payload.
+ * A configured key + a NULL mac is the "written before the key was
+ * set" refusal. Returns 0, or -1 with `err` filled (the caller
+ * finalizes its statement); mac_bytes receives the stored MAC for the
+ * structural recompute below. */
+static int ledger_tip_check_mac(const LedgerTipRow *r, const char *key,
+                                uint8_t mac_bytes[32],
+                                char *err, size_t err_cap) {
+    if (key && r->mac_null) {
+        snprintf(err, err_cap,
+            "fractalsql: fractal_ledger_load: ledger MAC verification "
+            "failed -- the persisted blob has no MAC (written before "
+            "enterprise_ledger_key was set); re-flush with the key "
+            "configured, or unset the key for structural-only validation");
+        return -1;
+    }
+    if (r->mac_null) return 0;
+
+    if (r->mac_len != 32) {
+        snprintf(err, err_cap,
+            "fractalsql: fractal_ledger_load: ledger MAC verification "
+            "failed -- stored MAC is %d bytes, expected 32", r->mac_len);
+        return -1;
+    }
+    memcpy(mac_bytes, r->mac, 32);
+    if (key) {
+        uint8_t tag[32];
+        fsql_hmac_sha256((const uint8_t *)key, strlen(key),
+                         r->payload, r->payload_len, tag);
+        if (fsql_ct_memcmp(tag, mac_bytes, 32) != 0) {
+            snprintf(err, err_cap,
+                "fractalsql: fractal_ledger_load: ledger MAC verification "
+                "failed -- the persisted QTL blob is tampered (HMAC "
+                "mismatch); set enterprise_ledger_key to the key used at "
+                "flush, or re-flush to re-tag it");
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* Structural check: the tip row's stored entry_hash must recompute
+ * from its own (prev_hash, payload, mac). Returns 0, or -1 with `err`
+ * filled (the caller finalizes its statement). */
+static int ledger_tip_check_hash(const LedgerTipRow *r, int have_mac,
+                                 const uint8_t mac_bytes[32],
+                                 char *err, size_t err_cap) {
+    uint8_t prev_hash[32];
+    memcpy(prev_hash, r->prev, 32);
+
+    uint8_t recomputed[32];
+    size_t buflen = 32 + r->payload_len + (have_mac ? 32 : 0);
+    uint8_t *buf = (uint8_t *)malloc(buflen ? buflen : 1);
+    if (!buf) {
+        snprintf(err, err_cap, "fractalsql: out of memory verifying the ledger");
+        return -1;
+    }
+    memcpy(buf, prev_hash, 32);
+    if (r->payload_len) memcpy(buf + 32, r->payload, r->payload_len);
+    if (have_mac) memcpy(buf + 32 + r->payload_len, mac_bytes, 32);
+    fsql_sha256(buf, buflen, recomputed);
+    free(buf);
+
+    if (memcmp(recomputed, r->hash, 32) != 0) {
+        snprintf(err, err_cap,
+            "fractalsql: fractal_ledger_load: ledger chain verification "
+            "failed -- the latest entry's hash does not match its stored "
+            "payload/mac (structural tamper, independent of any MAC key); "
+            "run fractal_ledger_verify() to locate exactly where the chain "
+            "diverges, or re-flush to start a fresh chain");
+        return -1;
+    }
+    return 0;
+}
+
+/* Chain-link check against the row immediately before this one, if
+ * any; a lone (genesis) row instead requires the all-zero sentinel.
+ * Steps `stmt` once (it sits on the verified tip row). Returns 0, or
+ * -1 with `err` filled (the caller finalizes its statement). */
+static int ledger_tip_check_chain(sqlite3_stmt *stmt,
+                                  const uint8_t prev_hash[32],
+                                  char *err, size_t err_cap) {
+    int rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        const void *prior_hash = sqlite3_column_blob(stmt, 3);
+        int prior_hash_len = sqlite3_column_bytes(stmt, 3);
+        if (prior_hash_len != 32 || memcmp(prev_hash, prior_hash, 32) != 0) {
+            snprintf(err, err_cap,
+                "fractalsql: fractal_ledger_load: ledger chain verification "
+                "failed -- the latest entry's prev_hash does not match its "
+                "predecessor's entry_hash (a row was rewritten, reordered, "
+                "or deleted); run fractal_ledger_verify() to locate exactly "
+                "where the chain diverges");
+            return -1;
+        }
+        return 0;
+    }
+    uint8_t zero[32];
+    memset(zero, 0, 32);
+    if (memcmp(prev_hash, zero, 32) != 0) {
+        snprintf(err, err_cap,
+            "fractalsql: fractal_ledger_load: ledger chain verification "
+            "failed -- the sole entry's prev_hash is not the genesis "
+            "sentinel (an earlier row was deleted); run "
+            "fractal_ledger_verify() to locate exactly where the chain "
+            "diverges");
+        return -1;
+    }
+    return 0;
+}
+static int ledger_verify_tip(const FsqlLedgerCtx *lc, int kind,
                              char *err, size_t err_cap) {
     static const char SQL[] =
         "SELECT payload, mac, prev_hash, entry_hash FROM fractalsql_ledger "
@@ -699,18 +841,10 @@ static int ledger_verify_tip(FsqlLedgerCtx *lc, int kind,
         return -1;
     }
 
-    const void *payload = sqlite3_column_blob(stmt, 0);
-    int plen = sqlite3_column_bytes(stmt, 0);
-    size_t payload_len = (size_t)(plen > 0 ? plen : 0);
-    int mac_null = (sqlite3_column_type(stmt, 1) == SQLITE_NULL);
-    const void *mac_blob = sqlite3_column_blob(stmt, 1);
-    int mac_len = sqlite3_column_bytes(stmt, 1);
-    const void *prev_blob = sqlite3_column_blob(stmt, 2);
-    int prev_len = sqlite3_column_bytes(stmt, 2);
-    const void *hash_blob = sqlite3_column_blob(stmt, 3);
-    int hash_len = sqlite3_column_bytes(stmt, 3);
+    LedgerTipRow row;
+    ledger_tip_row_load(&row, stmt);
 
-    if (prev_len != 32 || hash_len != 32) {
+    if (row.prev_len != 32 || row.hash_len != 32) {
         sqlite3_finalize(stmt);
         snprintf(err, err_cap,
             "fractalsql: fractal_ledger_load: ledger chain verification "
@@ -719,104 +853,27 @@ static int ledger_verify_tip(FsqlLedgerCtx *lc, int kind,
     }
 
     const char *key = ledger_key(lc);
-    int require_mac = key != NULL;
 
-    if (require_mac && mac_null) {
+    uint8_t mac_bytes[32];
+    int have_mac = !row.mac_null;
+    if (ledger_tip_check_mac(&row, key, mac_bytes, err, err_cap) != 0) {
         sqlite3_finalize(stmt);
-        snprintf(err, err_cap,
-            "fractalsql: fractal_ledger_load: ledger MAC verification "
-            "failed -- the persisted blob has no MAC (written before "
-            "enterprise_ledger_key was set); re-flush with the key "
-            "configured, or unset the key for structural-only validation");
         return -1;
     }
 
-    uint8_t mac_bytes[32];
-    int have_mac = !mac_null;
-    if (have_mac) {
-        if (mac_len != 32) {
-            sqlite3_finalize(stmt);
-            snprintf(err, err_cap,
-                "fractalsql: fractal_ledger_load: ledger MAC verification "
-                "failed -- stored MAC is %d bytes, expected 32", mac_len);
-            return -1;
-        }
-        memcpy(mac_bytes, mac_blob, 32);
-        if (require_mac) {
-            uint8_t tag[32];
-            fsql_hmac_sha256((const uint8_t *)key, strlen(key),
-                             payload, payload_len, tag);
-            if (fsql_ct_memcmp(tag, mac_bytes, 32) != 0) {
-                sqlite3_finalize(stmt);
-                snprintf(err, err_cap,
-                    "fractalsql: fractal_ledger_load: ledger MAC verification "
-                    "failed -- the persisted QTL blob is tampered (HMAC "
-                    "mismatch); set enterprise_ledger_key to the key used at "
-                    "flush, or re-flush to re-tag it");
-                return -1;
-            }
-        }
-    }
+    uint8_t prev_hash[32];
+    memcpy(prev_hash, row.prev, 32);
 
-    uint8_t prev_hash[32], entry_hash[32];
-    memcpy(prev_hash, prev_blob, 32);
-    memcpy(entry_hash, hash_blob, 32);
-
-    uint8_t recomputed[32];
-    {
-        size_t buflen = 32 + payload_len + (have_mac ? 32 : 0);
-        uint8_t *buf = (uint8_t *)malloc(buflen ? buflen : 1);
-        if (!buf) {
-            sqlite3_finalize(stmt);
-            snprintf(err, err_cap, "fractalsql: out of memory verifying the ledger");
-            return -1;
-        }
-        memcpy(buf, prev_hash, 32);
-        if (payload_len) memcpy(buf + 32, payload, payload_len);
-        if (have_mac) memcpy(buf + 32 + payload_len, mac_bytes, 32);
-        fsql_sha256(buf, buflen, recomputed);
-        free(buf);
-    }
-    if (memcmp(recomputed, entry_hash, 32) != 0) {
+    if (ledger_tip_check_hash(&row, have_mac, mac_bytes, err, err_cap) != 0) {
         sqlite3_finalize(stmt);
-        snprintf(err, err_cap,
-            "fractalsql: fractal_ledger_load: ledger chain verification "
-            "failed -- the latest entry's hash does not match its stored "
-            "payload/mac (structural tamper, independent of any MAC key); "
-            "run fractal_ledger_verify() to locate exactly where the chain "
-            "diverges, or re-flush to start a fresh chain");
         return -1;
     }
 
     /* Chain-link check against the row immediately before this one, if
      * any; a lone (genesis) row instead requires the all-zero sentinel. */
-    rc = sqlite3_step(stmt);
-    if (rc == SQLITE_ROW) {
-        const void *prior_hash = sqlite3_column_blob(stmt, 3);
-        int prior_hash_len = sqlite3_column_bytes(stmt, 3);
-        if (prior_hash_len != 32 || memcmp(prev_hash, prior_hash, 32) != 0) {
-            sqlite3_finalize(stmt);
-            snprintf(err, err_cap,
-                "fractalsql: fractal_ledger_load: ledger chain verification "
-                "failed -- the latest entry's prev_hash does not match its "
-                "predecessor's entry_hash (a row was rewritten, reordered, "
-                "or deleted); run fractal_ledger_verify() to locate exactly "
-                "where the chain diverges");
-            return -1;
-        }
-    } else {
-        uint8_t zero[32];
-        memset(zero, 0, 32);
-        if (memcmp(prev_hash, zero, 32) != 0) {
-            sqlite3_finalize(stmt);
-            snprintf(err, err_cap,
-                "fractalsql: fractal_ledger_load: ledger chain verification "
-                "failed -- the sole entry's prev_hash is not the genesis "
-                "sentinel (an earlier row was deleted); run "
-                "fractal_ledger_verify() to locate exactly where the chain "
-                "diverges");
-            return -1;
-        }
+    if (ledger_tip_check_chain(stmt, prev_hash, err, err_cap) != 0) {
+        sqlite3_finalize(stmt);
+        return -1;
     }
 
     sqlite3_finalize(stmt);
@@ -853,6 +910,107 @@ static void ledger_flush_fn(sqlite3_context *sctx, int argc,
     sqlite3_result_text(sctx, "ok", -1, SQLITE_STATIC);
 }
 
+/* One table row -> one host slot. Returns 0 when the row was seeded
+ * (or skipped as a future/foreign kind), -1 with the load error in
+ * `err` when the row is rejected (malformed/tampered MAC, or OOM) and
+ * the whole seed must abort. */
+static int ledger_seed_row(FsqlLedgerCtx *lc, sqlite3_stmt *stmt,
+                           const char *key, size_t keylen,
+                           char *err, size_t err_cap) {
+    int kind = sqlite3_column_int(stmt, 0);
+    if (kind < 1 || kind > FSQL_LEDGER_MAX_KIND)
+        return 0;   /* not a core ledger slot (future/foreign row) */
+
+    const void *payload = sqlite3_column_blob(stmt, 1);
+    int plen = sqlite3_column_bytes(stmt, 1);
+    const void *mac = sqlite3_column_blob(stmt, 2);
+    int mlen = sqlite3_column_bytes(stmt, 2);
+    int mac_null = (sqlite3_column_type(stmt, 2) == SQLITE_NULL);
+
+    /* A non-NULL mac that is not exactly 32 bytes can never be a
+     * valid tag, and ledger_slot_store would memcpy 32 bytes out of
+     * it regardless of its real length. This holds with or without
+     * a key configured, so the check lives outside the `if (key)`
+     * block. */
+    if (!mac_null && mlen != 32) {
+        snprintf(err, err_cap,
+            "fractalsql: fractal_ledger_load: ledger MAC verification "
+            "failed -- stored MAC is %d bytes, expected 32",
+            mlen);
+        return -1;
+    }
+    if (key) {
+        /* A configured key requires an authenticated blob; refuse
+         * one persisted before the key was set. */
+        if (mac_null) {
+            snprintf(err, err_cap,
+                "fractalsql: fractal_ledger_load: ledger MAC verification "
+                "failed -- the persisted blob has no MAC (written before "
+                "enterprise_ledger_key was set); re-flush with the key "
+                "configured, or unset the key for structural-only "
+                "validation");
+            return -1;
+        }
+        uint8_t tag[32];
+        fsql_hmac_sha256((const uint8_t *)key, keylen,
+                         payload, (size_t)(plen > 0 ? plen : 0), tag);
+        if (fsql_ct_memcmp(tag, mac, 32) != 0) {
+            snprintf(err, err_cap,
+                "fractalsql: fractal_ledger_load: ledger MAC verification "
+                "failed -- the persisted QTL blob is tampered (HMAC "
+                "mismatch); set enterprise_ledger_key to the key used at "
+                "flush, or re-flush to re-tag it");
+            return -1;
+        }
+    }
+    /* No key configured: accept rows regardless of a stale (but
+     * well-formed, 32-byte) tag; verification is impossible
+     * without the key (historical structural-only behavior). */
+
+    if (ledger_slot_store(lc, kind, payload,
+                          (size_t)(plen > 0 ? plen : 0),
+                          mac_null ? NULL : (const uint8_t *)mac) != 0) {
+        snprintf(err, err_cap, "fractalsql: out of memory loading the ledger");
+        return -1;
+    }
+    return 0;
+}
+
+/* Seed the buffer from the LATEST row per kind (the chain may hold
+ * many historical rows per kind; the core only ever wants "the
+ * current blob," same as ledger_vfs_read_entry's contract). Verifies
+ * each row's MAC per the envelope contract (read_entry re-verifies
+ * sealed slots again when the core pulls them back). Returns 0 / -1
+ * with `err` filled. */
+static int ledger_seed_from_table(FsqlLedgerCtx *lc, sqlite3 *db,
+                                  const char *key,
+                                  char *err, size_t err_cap) {
+    static const char SQL[] =
+        "SELECT kind, payload, mac FROM ("
+        "  SELECT kind, payload, mac,"
+        "         ROW_NUMBER() OVER (PARTITION BY kind ORDER BY id DESC) AS rn"
+        "  FROM fractalsql_ledger"
+        ") WHERE rn = 1";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, SQL, -1, &stmt, NULL) != SQLITE_OK) {
+        snprintf(err, err_cap, "fractalsql: ledger read prepare failed: %s",
+                 sqlite3_errmsg(db));
+        return -1;
+    }
+
+    size_t keylen = key ? strlen(key) : 0;
+    int failed = 0;
+
+    ledger_slots_clear_all(lc);   /* stale in-RAM blobs never survive a load */
+
+    while (!failed && sqlite3_step(stmt) == SQLITE_ROW) {
+        if (ledger_seed_row(lc, stmt, key, keylen, err, err_cap) != 0)
+            failed = 1;
+    }
+    sqlite3_finalize(stmt);
+    return failed ? -1 : 0;
+}
+
 /* load(): clear the buffer, authenticate + seed it from the table
  * (HMAC verification happens per the envelope contract; read_entry
  * re-verifies sealed slots when the core pulls them back), then let the
@@ -885,93 +1043,10 @@ static void ledger_load_fn(sqlite3_context *sctx, int argc,
         return;
     }
 
-    /* Seed the buffer from the LATEST row per kind (the chain may hold
-     * many historical rows per kind; the core only ever wants "the
-     * current blob," same as ledger_vfs_read_entry's contract). */
-    static const char SQL[] =
-        "SELECT kind, payload, mac FROM ("
-        "  SELECT kind, payload, mac,"
-        "         ROW_NUMBER() OVER (PARTITION BY kind ORDER BY id DESC) AS rn"
-        "  FROM fractalsql_ledger"
-        ") WHERE rn = 1";
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(st->db, SQL, -1, &stmt, NULL) != SQLITE_OK) {
-        snprintf(err, sizeof err, "fractalsql: ledger read prepare failed: %s",
-                 sqlite3_errmsg(st->db));
-        sqlite3_result_error(sctx, err, -1);
-        return;
-    }
-
+    /* Seed the buffer from the LATEST row per kind, with the same
+     * per-row envelope verification the table read always did. */
     const char *key = ledger_key(lc);
-    size_t keylen = key ? strlen(key) : 0;
-    int failed = 0;
-
-    ledger_slots_clear_all(lc);   /* stale in-RAM blobs never survive a load */
-
-    while (!failed && sqlite3_step(stmt) == SQLITE_ROW) {
-        int kind = sqlite3_column_int(stmt, 0);
-        if (kind < 1 || kind > FSQL_LEDGER_MAX_KIND)
-            continue;   /* not a core ledger slot (future/foreign row) */
-
-        const void *payload = sqlite3_column_blob(stmt, 1);
-        int plen = sqlite3_column_bytes(stmt, 1);
-        const void *mac = sqlite3_column_blob(stmt, 2);
-        int mlen = sqlite3_column_bytes(stmt, 2);
-        int mac_null = (sqlite3_column_type(stmt, 2) == SQLITE_NULL);
-
-        /* A non-NULL mac that is not exactly 32 bytes can never be a
-         * valid tag, and ledger_slot_store would memcpy 32 bytes out of
-         * it regardless of its real length. This holds with or without
-         * a key configured, so the check lives outside the `if (key)`
-         * block. */
-        if (!mac_null && mlen != 32) {
-            snprintf(err, sizeof err,
-                "fractalsql: fractal_ledger_load: ledger MAC verification "
-                "failed -- stored MAC is %d bytes, expected 32",
-                mlen);
-            failed = 1;
-            break;
-        }
-        if (key) {
-            /* A configured key requires an authenticated blob; refuse
-             * one persisted before the key was set. */
-            if (mac_null) {
-                snprintf(err, sizeof err,
-                    "fractalsql: fractal_ledger_load: ledger MAC verification "
-                    "failed -- the persisted blob has no MAC (written before "
-                    "enterprise_ledger_key was set); re-flush with the key "
-                    "configured, or unset the key for structural-only "
-                    "validation");
-                failed = 1;
-                break;
-            }
-            uint8_t tag[32];
-            fsql_hmac_sha256((const uint8_t *)key, keylen,
-                             payload, (size_t)(plen > 0 ? plen : 0), tag);
-            if (fsql_ct_memcmp(tag, mac, 32) != 0) {
-                snprintf(err, sizeof err,
-                    "fractalsql: fractal_ledger_load: ledger MAC verification "
-                    "failed -- the persisted QTL blob is tampered (HMAC "
-                    "mismatch); set enterprise_ledger_key to the key used at "
-                    "flush, or re-flush to re-tag it");
-                failed = 1;
-                break;
-            }
-        }
-        /* No key configured: accept rows regardless of a stale (but
-         * well-formed, 32-byte) tag; verification is impossible
-         * without the key (historical structural-only behavior). */
-
-        if (ledger_slot_store(lc, kind, payload,
-                              (size_t)(plen > 0 ? plen : 0),
-                              mac_null ? NULL : (const uint8_t *)mac) != 0) {
-            snprintf(err, sizeof err, "fractalsql: out of memory loading the ledger");
-            failed = 1;
-            break;
-        }
-    }
-    sqlite3_finalize(stmt);
-    if (failed) {
+    if (ledger_seed_from_table(lc, st->db, key, err, sizeof err) != 0) {
         ledger_slots_clear_all(lc);
         sqlite3_result_error(sctx, err, -1);
         return;
@@ -996,7 +1071,7 @@ static void ledger_load_fn(sqlite3_context *sctx, int argc,
 static void ledger_reset_common(sqlite3_context *sctx,
                                 int (*core_call)(fsql_ctx *),
                                 const char *api, int min_kind) {
-    FsqlState *st = ledger_state_of(sctx);
+    const FsqlState *st = ledger_state_of(sctx);
     if (!st) return;
     FsqlLedgerCtx *lc = ledger_ctx_of(st->ledger_ctx);
     if (!lc) {
@@ -1049,7 +1124,7 @@ static void ledger_count_fn_wrap(sqlite3_context *sctx, int argc,
                                  sqlite3_value **argv,
                                  ledger_count_fn core_call, const char *api) {
     (void)argc; (void)argv;
-    FsqlState *st = ledger_state_of(sctx);
+    const FsqlState *st = ledger_state_of(sctx);
     if (!st) return;
     size_t n = 0;
     int rc = core_call(st->ctx, &n);
@@ -1081,7 +1156,76 @@ static void ledger_shadow_count_fn(sqlite3_context *sctx, int argc,
 
 /* Pattern A growing-buffer contract (fractalsql_sql.h): call once with a
  * stack buffer; on FSQL_ETRUNCATED *json_cap reports the required size;
- * retry on the heap, growing until it fits (bounded). */
+ * retry on the heap, growing until it fits (bounded).
+ *
+ * The grow-and-retry driver. Returns:
+ *   LUD_OK         *out holds the unpacked bytes (stackbuf or a heap
+ *                  buffer the caller owns now) and *out_len the length;
+ *                  the NUL terminator is already written.
+ *   LUD_RANGE      the core reported FSQL_OK with a length beyond its
+ *                  buffer (contract violation) -- the caller emits the
+ *                  fixed refusal message.
+ *   LUD_CORE_FAIL  *out_rc holds the failing core rc (OOM, or truncation
+ *                  that exhausted the growth bound, or a retry that
+ *                  stopped making progress); all heap scratch is freed.
+ */
+typedef enum {
+    LUD_OK         = 0,
+    LUD_RANGE      = 1,
+    LUD_CORE_FAIL  = 2
+} LedgerUnpackRc;
+
+static LedgerUnpackRc ledger_audit_unpack_blob(FsqlState *st,
+                                               const void *blob,
+                                               size_t blob_len,
+                                               char *stackbuf,
+                                               char **out, size_t *out_len,
+                                               int *out_rc) {
+    char *heap = NULL;
+    char *buf = stackbuf;
+    size_t cap = FSQL_AUDIT_START_CAP;
+    size_t need = cap;
+    int rc = st->ent.audit_unpack(blob, blob_len, buf, &need);
+
+    while (rc == FSQL_ETRUNCATED) {
+        size_t next = (need > cap) ? need : (cap * 2);
+        if (next <= cap || next > FSQL_AUDIT_MAX_CAP) {
+            *out_rc = FSQL_ERR_OOM;   /* no progress or absurd requirement */
+            free(heap);
+            return LUD_CORE_FAIL;
+        }
+        cap = next;
+        free(heap);
+        heap = (char *)malloc(cap + 1);   /* +1 slack for the NUL */
+        if (!heap) { *out_rc = FSQL_ERR_OOM; return LUD_CORE_FAIL; }
+        buf = heap;
+        need = cap;
+        rc = st->ent.audit_unpack(blob, blob_len, buf, &need);
+    }
+    if (rc != FSQL_OK) {
+        free(heap);
+        goto core_fail;
+    }
+
+    /* Success still trusts the core's reported length for the NUL write:
+     * a contract-violating core (or a version mismatch) that returns
+     * FSQL_OK with *json_cap > cap would write past the buffer here.
+     * Conforming cores per fractalsql_sql.h never do this. */
+    if (need > cap) {
+        free(heap);
+        return LUD_RANGE;
+    }
+
+    buf[need] = '\0';   /* the +1 slack guarantees room on every path */
+    *out = buf;
+    *out_len = need;
+    return LUD_OK;
+
+core_fail:
+    *out_rc = rc;
+    return LUD_CORE_FAIL;
+}
+
 static void ledger_audit_unpack_fn(sqlite3_context *sctx, int argc,
                                    sqlite3_value **argv) {
     (void)argc;
@@ -1098,52 +1242,28 @@ static void ledger_audit_unpack_fn(sqlite3_context *sctx, int argc,
     if (!blob) blob = "";
 
     char stackbuf[FSQL_AUDIT_START_CAP + 1];
-    char *heap = NULL;
-    char *buf = stackbuf;
-    size_t cap = FSQL_AUDIT_START_CAP;
-    size_t need = cap;
-    int rc = st->ent.audit_unpack(blob, blob_len, buf, &need);
-
-    while (rc == FSQL_ETRUNCATED) {
-        size_t next = (need > cap) ? need : (cap * 2);
-        if (next <= cap || next > FSQL_AUDIT_MAX_CAP) {
-            rc = FSQL_ERR_OOM;   /* no progress or absurd requirement */
-            break;
-        }
-        cap = next;
-        free(heap);
-        heap = (char *)malloc(cap + 1);   /* +1 slack for the NUL */
-        if (!heap) { rc = FSQL_ERR_OOM; break; }
-        buf = heap;
-        need = cap;
-        rc = st->ent.audit_unpack(blob, blob_len, buf, &need);
-    }
-    if (rc != FSQL_OK) {
-        free(heap);
+    char *buf = NULL;
+    size_t need = 0;
+    int rc = FSQL_OK;
+    LedgerUnpackRc urc = ledger_audit_unpack_blob(st, blob, blob_len,
+                                                  stackbuf, &buf, &need, &rc);
+    if (urc == LUD_CORE_FAIL) {
         char msg[160];
         snprintf(msg, sizeof msg, "fractalsql: fsql_audit_unpack failed (rc=%d, %s)",
                  rc, ledger_rc_message(rc));
         sqlite3_result_error(sctx, msg, -1);
         return;
     }
-
-    /* Success still trusts the core's reported length for the NUL write:
-     * a contract-violating core (or a version mismatch) that returns
-     * FSQL_OK with *json_cap > cap would write past the buffer here.
-     * Conforming cores per fractalsql_sql.h never do this. */
-    if (need > cap) {
-        free(heap);
+    if (urc == LUD_RANGE) {
         sqlite3_result_error(sctx,
             "fractalsql: fsql_audit_unpack reported an out-of-range "
             "length -- refusing the result", -1);
         return;
     }
-
-    buf[need] = '\0';   /* the +1 slack guarantees room on every path */
-    if (heap) {
-        sqlite3_result_text(sctx, heap, (int)need, free);
+    if (buf == stackbuf) {
+        sqlite3_result_text(sctx, buf, (int)need, SQLITE_TRANSIENT);
     } else {
-        sqlite3_result_text(sctx, stackbuf, (int)need, SQLITE_TRANSIENT);
+        sqlite3_result_text(sctx, buf, (int)need, free);
     }
 }
 
@@ -1213,7 +1333,7 @@ static void ledger_audit_log_fn(sqlite3_context *sctx, int argc,
     FsqlState *st = ledger_state_of(sctx);
     if (!st) return;
     if (ledger_ensure_ent(st, sctx) != 0) return;
-    FsqlLedgerCtx *lc = ledger_ctx_of(st->ledger_ctx);
+    const FsqlLedgerCtx *lc = ledger_ctx_of(st->ledger_ctx);
     if (!lc) {
         sqlite3_result_error(sctx, "fractalsql: ledger context invalid", -1);
         return;
@@ -1302,11 +1422,64 @@ static void ledger_audit_log_fn(sqlite3_context *sctx, int argc,
  * Registered at both 0 and 1 args: NULL/omitted kind defaults to 1 (the
  * QTL Truth/Shadow stream); kind=2 walks the fractal_audit_log stream
  * independently; each kind is a separate chain (WHERE kind=? below). */
+
+/* Verify ONE chain row (a live SQLITE_ROW on `stmt`) against the
+ * running expectation: shape, sequence-gap, chain-link, and the
+ * unconditional structural recompute of entry_hash from the row's own
+ * (prev_hash, payload, mac). Returns NULL when the row verifies, else
+ * a JSON-report-ready failure reason ("out of memory" included -- an
+ * OOM aborts the walk as this row's failure). */
+static const char *ledger_verify_chain_row(sqlite3_stmt *stmt,
+                                           const uint8_t expect_prev[32],
+                                           sqlite3_int64 expect_id,
+                                           sqlite3_int64 row_id) {
+    const void *payload = sqlite3_column_blob(stmt, 1);
+    int plen = sqlite3_column_bytes(stmt, 1);
+    size_t payload_len = (size_t)(plen > 0 ? plen : 0);
+    int mac_null = (sqlite3_column_type(stmt, 2) == SQLITE_NULL);
+    const void *mac_blob = sqlite3_column_blob(stmt, 2);
+    int mac_len = sqlite3_column_bytes(stmt, 2);
+    const void *prev_blob = sqlite3_column_blob(stmt, 3);
+    int prev_len = sqlite3_column_bytes(stmt, 3);
+    const void *hash_blob = sqlite3_column_blob(stmt, 4);
+    int hash_len = sqlite3_column_bytes(stmt, 4);
+
+    if (prev_len != 32 || hash_len != 32 || (!mac_null && mac_len != 32))
+        return "malformed row (bad hash/mac length)";
+
+    /* Sequence-gap check: after the first row, every id must be
+     * exactly one more than the previous -- a gap means a row was
+     * deleted, visible even though we never saw the missing row. */
+    if (expect_id >= 0 && row_id != expect_id)
+        return "sequence gap (a row was deleted)";
+
+    /* Chain-link check: this row's prev_hash must equal the previous
+     * row's entry_hash (all-zero sentinel for the first row). */
+    if (memcmp(prev_blob, expect_prev, 32) != 0)
+        return "chain-link break (prev_hash mismatch)";
+
+    /* Structural check: entry_hash must recompute from this row's
+     * own (prev_hash, payload, mac). */
+    {
+        size_t buflen = 32 + payload_len + (mac_null ? 0 : 32);
+        uint8_t *buf = (uint8_t *)malloc(buflen ? buflen : 1);
+        if (!buf) return "out of memory";
+        memcpy(buf, expect_prev, 32);
+        if (payload_len) memcpy(buf + 32, payload, payload_len);
+        if (!mac_null) memcpy(buf + 32 + payload_len, mac_blob, 32);
+        uint8_t recomputed[32];
+        fsql_sha256(buf, buflen, recomputed);
+        free(buf);
+        if (memcmp(recomputed, hash_blob, 32) != 0)
+            return "entry_hash mismatch (blob or mac tampered)";
+    }
+    return NULL;
+}
 static void ledger_verify_fn(sqlite3_context *sctx, int argc,
                              sqlite3_value **argv) {
-    FsqlState *st = ledger_state_of(sctx);
+    const FsqlState *st = ledger_state_of(sctx);
     if (!st) return;
-    FsqlLedgerCtx *lc = ledger_ctx_of(st->ledger_ctx);
+    const FsqlLedgerCtx *lc = ledger_ctx_of(st->ledger_ctx);
     if (!lc) {
         sqlite3_result_error(sctx, "fractalsql: ledger context invalid", -1);
         return;
@@ -1344,66 +1517,18 @@ static void ledger_verify_fn(sqlite3_context *sctx, int argc,
 
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         sqlite3_int64 row_id = sqlite3_column_int64(stmt, 0);
-        const void *payload = sqlite3_column_blob(stmt, 1);
-        int plen = sqlite3_column_bytes(stmt, 1);
-        size_t payload_len = (size_t)(plen > 0 ? plen : 0);
-        int mac_null = (sqlite3_column_type(stmt, 2) == SQLITE_NULL);
-        const void *mac_blob = sqlite3_column_blob(stmt, 2);
-        int mac_len = sqlite3_column_bytes(stmt, 2);
-        const void *prev_blob = sqlite3_column_blob(stmt, 3);
-        int prev_len = sqlite3_column_bytes(stmt, 3);
-        const void *hash_blob = sqlite3_column_blob(stmt, 4);
-        int hash_len = sqlite3_column_bytes(stmt, 4);
-
         rows++;
 
-        if (prev_len != 32 || hash_len != 32 || (!mac_null && mac_len != 32)) {
-            failed = 1; fail_id = row_id;
-            fail_reason = "malformed row (bad hash/mac length)";
+        const char *row_reason = ledger_verify_chain_row(stmt, expect_prev,
+                                                         expect_id, row_id);
+        if (row_reason) {
+            failed = 1;
+            fail_id = row_id;
+            fail_reason = row_reason;
             break;
         }
 
-        /* Sequence-gap check: after the first row, every id must be
-         * exactly one more than the previous -- a gap means a row was
-         * deleted, visible even though we never saw the missing row. */
-        if (expect_id >= 0 && row_id != expect_id) {
-            failed = 1; fail_id = row_id;
-            fail_reason = "sequence gap (a row was deleted)";
-            break;
-        }
-
-        /* Chain-link check: this row's prev_hash must equal the previous
-         * row's entry_hash (all-zero sentinel for the first row). */
-        if (memcmp(prev_blob, expect_prev, 32) != 0) {
-            failed = 1; fail_id = row_id;
-            fail_reason = "chain-link break (prev_hash mismatch)";
-            break;
-        }
-
-        /* Structural check: entry_hash must recompute from this row's
-         * own (prev_hash, payload, mac). */
-        uint8_t recomputed[32];
-        {
-            size_t buflen = 32 + payload_len + (mac_null ? 0 : 32);
-            uint8_t *buf = (uint8_t *)malloc(buflen ? buflen : 1);
-            if (!buf) {
-                failed = 1; fail_id = row_id;
-                fail_reason = "out of memory";
-                break;
-            }
-            memcpy(buf, expect_prev, 32);
-            if (payload_len) memcpy(buf + 32, payload, payload_len);
-            if (!mac_null) memcpy(buf + 32 + payload_len, mac_blob, 32);
-            fsql_sha256(buf, buflen, recomputed);
-            free(buf);
-        }
-        if (memcmp(recomputed, hash_blob, 32) != 0) {
-            failed = 1; fail_id = row_id;
-            fail_reason = "entry_hash mismatch (blob or mac tampered)";
-            break;
-        }
-
-        memcpy(expect_prev, hash_blob, 32);
+        memcpy(expect_prev, sqlite3_column_blob(stmt, 4), 32);
         expect_id = row_id + 1;
     }
     if (!failed && rc != SQLITE_DONE) {

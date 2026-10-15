@@ -41,9 +41,16 @@ case "${ARCH}" in
 esac
 
 PROFILE="${PROFILE:-modern}"
+# Everything after the arch positional must be a --profile=... flag.
+# (Counter skip instead of "${@:2}", which breaks under `set -u` with
+# zero or one args on old bash — macOS ships 3.2.)
+_arg_i=0
 for arg in "$@"; do
+    _arg_i=$((_arg_i + 1))
+    [[ ${_arg_i} -eq 1 ]] && continue
     case "$arg" in
         --profile=*) PROFILE="${arg#--profile=}" ;;
+        *) echo "unknown argument '${arg}' — expected --profile=modern|legacy|musl" >&2; exit 2 ;;
     esac
 done
 case "${PROFILE}" in
@@ -59,6 +66,7 @@ if [[ "${PROFILE}" = "legacy" ]]; then
     case "${ARCH}" in
         amd64) BASE_IMAGE="quay.io/pypa/manylinux_2_28_x86_64" ;;
         arm64) BASE_IMAGE="quay.io/pypa/manylinux_2_28_aarch64" ;;
+        *) echo "internal error: unhandled arch '${ARCH}' (validate it above)" >&2; exit 2 ;;
     esac
     OUTPUT_SUFFIX="-legacy"
     SIZE_CEILING_BYTES="4194304"   # 4 MB

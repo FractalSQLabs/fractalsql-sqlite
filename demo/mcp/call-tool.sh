@@ -4,7 +4,7 @@
 #
 # The demo container's one-liner MCP tool call:
 #
-#   docker compose exec demo demo/mcp/call-tool.sh fractal_search \
+#   docker compose exec demo /demo/mcp/call-tool.sh fractal_search \
 #       '{"vector":[0.1,0.9],"query":[0.6,0.8]}'
 #
 # Runs the PRODUCTION MCP server binary (the same one mcp/ builds) with

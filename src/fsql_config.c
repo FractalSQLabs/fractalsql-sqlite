@@ -49,13 +49,14 @@
 #endif
 
 #include <sqlite3ext.h>
-SQLITE_EXTENSION_INIT3
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "fsql_sqlite_internal.h"
+
+SQLITE_EXTENSION_INIT3
 
 /* ------------------------------------------------------------------ */
 /* Key table                                                           */
@@ -68,7 +69,8 @@ typedef struct {
     CfgType     type;
     char      **str_slot;   /* &st->cfg.<char *>                     */
     int        *int_slot;   /* &st->cfg.<int>                        */
-    int         int_min, int_max;
+    int         int_min;
+    int         int_max;
     const char *dflt;       /* canonical default (set at state init) */
     const char *enum_vals;  /* CFG_ENUM only: "a|b|c"                */
 } CfgDef;
@@ -134,6 +136,29 @@ static char **cfg_str_slot(FsqlState *st, const CfgDef *d) {
     if (strcmp(d->key, "enterprise_ledger_key") == 0)   return &st->cfg.enterprise_ledger_key;
     return NULL;
 }
+
+/* Const read side of the same key map: cfg_str_slot exists to hand
+ * setters a WRITABLE slot (char **), which is why it needs a non-const
+ * state. fsql_config_get() only reads the current value through a
+ * const-FsqlState*, so it goes through this value-side twin instead of
+ * casting the const away. The two key maps must stay in sync; they are
+ * kept adjacent on purpose (same ordering, same comments). */
+static const char *cfg_str_value(const FsqlState *st, const CfgDef *d) {
+    if (strcmp(d->key, "reasoning_plugin") == 0)        return st->cfg.reasoning_plugin;
+    if (strcmp(d->key, "http_url") == 0)                return st->cfg.http_url;
+    if (strcmp(d->key, "http_token") == 0)              return st->cfg.http_token;
+    if (strcmp(d->key, "http_model") == 0)              return st->cfg.http_model;
+    if (strcmp(d->key, "http_embed_url") == 0)          return st->cfg.http_embed_url;
+    if (strcmp(d->key, "http_embed_model") == 0)        return st->cfg.http_embed_model;
+    if (strcmp(d->key, "http_think") == 0)              return st->cfg.http_think;
+    if (strcmp(d->key, "http_think_provider") == 0)     return st->cfg.http_think_provider;
+    if (strcmp(d->key, "http_native_url") == 0)         return st->cfg.http_native_url;
+    if (strcmp(d->key, "text_to_sql_allowed_statements") == 0)
+        return st->cfg.t2s_allowed_statements;
+    if (strcmp(d->key, "enterprise_lib") == 0)          return st->cfg.enterprise_lib;
+    if (strcmp(d->key, "enterprise_ledger_key") == 0)   return st->cfg.enterprise_ledger_key;
+    return NULL;
+}
 static int *cfg_int_slot(FsqlState *st, const CfgDef *d) {
     if (strcmp(d->key, "http_num_ctx") == 0)       return &st->cfg.http_num_ctx;
     if (strcmp(d->key, "text_to_sql_max_attempts") == 0)
@@ -182,6 +207,113 @@ int fsql_config_validate_plugin_path(const char *path) {
 /* set / get core                                                      */
 /* ------------------------------------------------------------------ */
 
+/* CFG_STR / CFG_PATH setter: an empty string resets the key to unset;
+ * path-type keys get absolute-path validation and URL keys a 2048 cap
+ * (plain string keys 8192). Returns 0, or -1 with err filled. */
+static int cfg_set_str_or_path(FsqlState *st, const CfgDef *d,
+                               const char *value, const char *bare,
+                               char *err, size_t err_cap) {
+    if (!value || !*value) {
+        /* Empty string resets to unset. */
+        char **slot = cfg_str_slot(st, d);
+        free(*slot); *slot = NULL;
+        return 0;
+    }
+    if (d->type == CFG_PATH && !key_is_url(bare)) {
+        if (fsql_config_validate_plugin_path(value) != 0) {
+            if (err) snprintf(err, err_cap,
+                "'%s' must be an absolute path with no '..' segments",
+                bare);
+            return -1;
+        }
+    } else if (d->type == CFG_PATH && key_is_url(bare)) {
+        if (strlen(value) > 2048) {
+            if (err) snprintf(err, err_cap, "'%s' too long", bare);
+            return -1;
+        }
+    } else if (strlen(value) > 8192) {
+        if (err) snprintf(err, err_cap, "'%s' too long", bare);
+        return -1;
+    }
+    char *copy = strdup(value);
+    if (!copy) {
+        if (err) snprintf(err, err_cap, "out of memory");
+        return -1;
+    }
+    char **slot = cfg_str_slot(st, d);
+    free(*slot);
+    *slot = copy;
+    return 0;
+}
+
+/* CFG_INT setter: strict base-10 parse plus the key's [min,max] range.
+ * Returns 0, or -1 with err filled. */
+static int cfg_set_int(FsqlState *st, const CfgDef *d, const char *value,
+                       const char *bare, char *err, size_t err_cap) {
+    char *end = NULL;
+    long v = strtol(value ? value : "", &end, 10);
+    if (!end || *end != '\0' || end == value) {
+        if (err) snprintf(err, err_cap,
+            "'%s' expects an integer", bare);
+        return -1;
+    }
+    if (v < d->int_min || v > d->int_max) {
+        if (err) snprintf(err, err_cap,
+            "'%s' must be %d..%d", bare, d->int_min, d->int_max);
+        return -1;
+    }
+    *cfg_int_slot(st, d) = (int)v;
+    return 0;
+}
+
+/* CFG_BOOL setter: accepts true/on/1/yes and false/off/0/no/"" (NULL
+ * means unset = false). Returns 0, or -1 with err filled. */
+static int cfg_set_bool(FsqlState *st, const CfgDef *d, const char *value,
+                        const char *bare, char *err, size_t err_cap) {
+    int v;
+    if (!value) v = 0;
+    else if (!strcmp(value, "true") || !strcmp(value, "on") ||
+             !strcmp(value, "1") || !strcmp(value, "yes")) v = 1;
+    else if (!strcmp(value, "false") || !strcmp(value, "off") ||
+             !strcmp(value, "0") || !strcmp(value, "no") ||
+             !strcmp(value, "")) v = 0;
+    else {
+        if (err) snprintf(err, err_cap,
+            "'%s' expects true/false/on/off/1/0", bare);
+        return -1;
+    }
+    *cfg_int_slot(st, d) = v;
+    return 0;
+}
+
+/* CFG_ENUM setter: `value` must be one of the '|' separated members of
+ * d->enum_vals. Returns 0, or -1 with err filled. */
+static int cfg_set_enum(FsqlState *st, const CfgDef *d, const char *value,
+                        const char *bare, char *err, size_t err_cap) {
+    int ok = 0;
+    const char *p = d->enum_vals;
+    while (p && *p) {
+        const char *bar = strchr(p, '|');
+        size_t len = bar ? (size_t)(bar - p) : strlen(p);
+        if (strlen(value) == len && strncmp(value, p, len) == 0) { ok = 1; break; }
+        p = bar ? bar + 1 : NULL;
+    }
+    if (!ok) {
+        if (err) snprintf(err, err_cap,
+            "'%s' must be one of: %s", bare, d->enum_vals);
+        return -1;
+    }
+    char *copy = strdup(value);
+    if (!copy) {
+        if (err) snprintf(err, err_cap, "out of memory");
+        return -1;
+    }
+    char **slot = cfg_str_slot(st, d);
+    free(*slot);
+    *slot = copy;
+    return 0;
+}
+
 int fsql_config_set(FsqlState *st, const char *name,
                     const char *value, char *err, size_t err_cap) {
     const CfgDef *d = cfg_lookup(name);
@@ -207,95 +339,14 @@ int fsql_config_set(FsqlState *st, const char *name,
 
     switch (d->type) {
     case CFG_STR:
-    case CFG_PATH: {
-        if (!value || !*value) {
-            /* Empty string resets to unset. */
-            char **slot = cfg_str_slot(st, d);
-            free(*slot); *slot = NULL;
-            return 0;
-        }
-        if (d->type == CFG_PATH && !key_is_url(bare)) {
-            if (fsql_config_validate_plugin_path(value) != 0) {
-                if (err) snprintf(err, err_cap,
-                    "'%s' must be an absolute path with no '..' segments",
-                    bare);
-                return -1;
-            }
-        } else if (d->type == CFG_PATH && key_is_url(bare)) {
-            if (strlen(value) > 2048) {
-                if (err) snprintf(err, err_cap, "'%s' too long", bare);
-                return -1;
-            }
-        } else if (strlen(value) > 8192) {
-            if (err) snprintf(err, err_cap, "'%s' too long", bare);
-            return -1;
-        }
-        char *copy = strdup(value);
-        if (!copy) {
-            if (err) snprintf(err, err_cap, "out of memory");
-            return -1;
-        }
-        char **slot = cfg_str_slot(st, d);
-        free(*slot);
-        *slot = copy;
-        return 0;
-    }
-    case CFG_INT: {
-        char *end = NULL;
-        long v = strtol(value ? value : "", &end, 10);
-        if (!end || *end != '\0' || end == value) {
-            if (err) snprintf(err, err_cap,
-                "'%s' expects an integer", bare);
-            return -1;
-        }
-        if (v < d->int_min || v > d->int_max) {
-            if (err) snprintf(err, err_cap,
-                "'%s' must be %d..%d", bare, d->int_min, d->int_max);
-            return -1;
-        }
-        *cfg_int_slot(st, d) = (int)v;
-        return 0;
-    }
-    case CFG_BOOL: {
-        int v;
-        if (!value) v = 0;
-        else if (!strcmp(value, "true") || !strcmp(value, "on") ||
-                 !strcmp(value, "1") || !strcmp(value, "yes")) v = 1;
-        else if (!strcmp(value, "false") || !strcmp(value, "off") ||
-                 !strcmp(value, "0") || !strcmp(value, "no") ||
-                 !strcmp(value, "")) v = 0;
-        else {
-            if (err) snprintf(err, err_cap,
-                "'%s' expects true/false/on/off/1/0", bare);
-            return -1;
-        }
-        *cfg_int_slot(st, d) = v;
-        return 0;
-    }
-    case CFG_ENUM: {
-        int ok = 0;
-        const char *p = d->enum_vals;
-        while (p && *p) {
-            const char *bar = strchr(p, '|');
-            size_t len = bar ? (size_t)(bar - p) : strlen(p);
-            if (strlen(value) == len && strncmp(value, p, len) == 0) { ok = 1; break; }
-            p = bar ? bar + 1 : NULL;
-        }
-        if (!ok) {
-            if (err) snprintf(err, err_cap,
-                "'%s' must be one of: %s", bare, d->enum_vals);
-            return -1;
-        }
-        char *copy = strdup(value);
-        if (!copy) {
-            if (err) snprintf(err, err_cap, "out of memory");
-            return -1;
-        }
-        char **slot = cfg_str_slot(st, d);
-        free(*slot);
-        *slot = copy;
-        return 0;
-    }
+    case CFG_PATH:
+        return cfg_set_str_or_path(st, d, value, bare, err, err_cap);
+    case CFG_INT:
+        return cfg_set_int(st, d, value, bare, err, err_cap);
+    case CFG_BOOL:
+        return cfg_set_bool(st, d, value, bare, err, err_cap);
+    case CFG_ENUM:
+        return cfg_set_enum(st, d, value, bare, err, err_cap);
     }
     return -1;
 }
@@ -308,7 +359,7 @@ const char *fsql_config_get(const FsqlState *st, const char *name) {
          * in the SQL wrapper below; direct pointer access only. */
         return NULL;
     }
-    return *cfg_str_slot((FsqlState *)st, d);
+    return cfg_str_value(st, d);
 }
 
 /* ------------------------------------------------------------------ */

@@ -84,6 +84,29 @@ def main() -> int:
                     help="RNG seed (default: %(default)s)")
     args = ap.parse_args()
 
+    # --db arrives as raw CLI text and is used both as a filesystem path
+    # and as a connection string, so pin it to the current working
+    # directory (symlinks resolved via realpath) before anything touches
+    # it. A traversal-style argument can then neither redirect where the
+    # database is written (path traversal) nor where it is opened
+    # (connection-string injection).
+    root = os.path.realpath(os.getcwd())
+    db = os.path.realpath(args.db)
+    try:
+        contained = os.path.commonpath([root, db]) == root
+    except ValueError:  # different drives on Windows
+        contained = False
+    if not contained:
+        print(f"data_gen.py: --db must resolve inside {root} "
+              f"(got: {args.db})", file=sys.stderr)
+        return 2
+
+    # int() re-cast at the point of use: --dim is CLI-supplied text that
+    # feeds the f-string CREATE VIRTUAL TABLE below, and an explicit
+    # numeric cast at the use site is what guarantees the interpolated
+    # piece is a number, not an identifier.
+    dim = int(args.dim)
+
     rng = np.random.default_rng(args.seed)
 
     print(f"Generating {args.n} points in R^{args.dim}, "
@@ -103,10 +126,10 @@ def main() -> int:
           f"({vectors.nbytes / 1e6:.1f} MB)")
 
     # ---- load into SQLite -----------------------------------------------
-    if os.path.exists(args.db):
-        os.remove(args.db)
+    if os.path.exists(db):
+        os.remove(db)
     print(f"Creating {args.db} ...")
-    conn = sqlite3.connect(args.db)
+    conn = sqlite3.connect(db)
     conn.isolation_level = None  # manual BEGIN/COMMIT control below
     conn.enable_load_extension(True)
     conn.load_extension(os.path.abspath(args.ext))
@@ -129,7 +152,7 @@ def main() -> int:
     """)
     conn.execute(
         f"CREATE VIRTUAL TABLE bench_vec_index USING vec0("
-        f"embedding float[{args.dim}], +coords TEXT)")
+        f"embedding float[{dim}], +coords TEXT)")
 
     print(f"  inserting {args.clusters} cluster centers ...")
     conn.executemany(

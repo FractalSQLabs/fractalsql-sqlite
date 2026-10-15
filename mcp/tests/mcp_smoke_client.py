@@ -51,6 +51,7 @@ import http.client as httpc
 import json
 import os
 import re
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -125,6 +126,9 @@ def main() -> int:  # noqa: ANN201
       (3,'gamma','0.2,0.8,0.2'),(4,'delta','0.15,0.15,0.12');
     DROP TABLE IF EXISTS mcp_sm_logs;
     CREATE TABLE mcp_sm_logs(ts INTEGER, host TEXT, metric REAL);
+    DROP TABLE IF EXISTS mcp_sm_vec_src;
+    CREATE TABLE mcp_sm_vec_src(id INTEGER PRIMARY KEY, txt TEXT, emb TEXT);
+    INSERT INTO mcp_sm_vec_src(id, txt, emb) VALUES (1, 'needs embedding', NULL);
     """)
     for i in range(1, 97):
         con.execute(
@@ -304,6 +308,90 @@ def main() -> int:  # noqa: ANN201
               isinstance(rows, list)
               and {x["doc_id"] for x in rows} <= {1, 4})
 
+        # rows.h's boundedCount(): the k=200 ceiling-clamp test above only
+        # exercises the IN-RANGE path; its own range validation is
+        # otherwise untested. (Its "must be an integer" type check turns
+        # out to be dead via any live call: tool_registry.h's own schema-
+        # layer jsonTypeMatches(Integer, v) already rejects a non-integer
+        # k, with a DIFFERENT message, before boundedCount ever runs --
+        # confirmed by reading mcp_json.h's jsonTypeMatches directly, not
+        # guessed. This asserts the real (schema-layer) behavior instead.)
+        r = call("fractal_search_telemetry",
+                 {"table_name": "mcp_sm_docs", "vector_col": "emb",
+                  "query": [0.1, 0.1, 0.1], "k": "not-a-number"})
+        check("tool_registry.h: a wrong-typed k is refused at the schema "
+              "layer before boundedCount ever runs",
+              r is not None and r["result"].get("isError") is True
+              and "has the wrong type" in json.dumps(r["result"]))
+        r = call("fractal_search_telemetry",
+                 {"table_name": "mcp_sm_docs", "vector_col": "emb",
+                  "query": [0.1, 0.1, 0.1], "k": 0})
+        check("rows.h: an out-of-range k (0) is refused",
+              r is not None and r["result"].get("isError") is True
+              and "out of range" in json.dumps(r["result"]))
+        r = call("fractal_search_telemetry",
+                 {"table_name": "mcp_sm_docs", "vector_col": "emb",
+                  "query": [0.1, 0.1, 0.1], "k": 2, "limit": 0})
+        check("rows.h: a non-positive limit is refused",
+              r is not None and r["result"].get("isError") is True
+              and "limit must be a positive integer" in json.dumps(r["result"]))
+
+        # discovery.cpp: fractal_feedback_report's optional dwell_ms (the
+        # 3-arg SQL variant) -- untested anywhere; the SQL-level build_test.sh
+        # gates only cover 'positive'/'negative'/'dwell' kinds, not this
+        # adapter's own dwell_ms-present branch.
+        r = call("fractal_search_telemetry",
+                 {"table_name": "mcp_sm_docs", "vector_col": "emb",
+                  "query": [0.1, 0.1, 0.1], "k": 1})
+        handle = r["result"]["structuredContent"][0]["scan_pos"]
+        r = call("fractal_feedback_report",
+                 {"result_handle": handle, "kind": "dwell", "dwell_ms": 1500})
+        check("discovery.cpp: feedback_report with dwell_ms supplied uses "
+              "the 3-arg SQL variant",
+              r is not None and r["result"].get("isError") is not True)
+
+        # enterprise.cpp: fractal_audit_unpack -- untested at the MCP layer
+        # (dormant in Community; expect the same clean "enterprise tier
+        # not loaded" condition every other Enterprise tool documents).
+        r = call("fractal_audit_unpack", {"blob": "deadbeef"})
+        check("Enterprise: audit_unpack returns the clean 'enterprise tier "
+              "not loaded' condition on a Community install",
+              r is not None and r["result"].get("isError") is True
+              and "enterprise tier not loaded" in json.dumps(r["result"]))
+
+        # logging.cpp: redactAndCap's own >256-char string cap -- every
+        # logged tool-call argument so far has been short.
+        r = call("fractal_reason", {"query": "x" * 300})
+        check("logging.cpp: a >256-char logged argument is length-capped, "
+              "not logged verbatim",
+              r is not None and r["result"].get("isError") is not True)
+
+        # tool_registry.h's validateArgs: a required arg OMITTED entirely
+        # (distinct code path from the existing "explicit null" test) and
+        # an OPTIONAL NULLABLE arg given explicit null (the p.nullable
+        # true-branch, vs. simply leaving it out).
+        r = call("fractal_search", {"vector": [0.1, 0.9]})
+        check("tool_registry.h: a required arg left out entirely is "
+              "refused (distinct from an explicit null)",
+              r is not None and r["result"].get("isError") is True
+              and "missing required argument" in json.dumps(r["result"]))
+        r = call("fractal_agent_recall_hybrid",
+                 {"mem_table": "mcp_sm_docs", "vec_col": "emb",
+                  "query_vec": [0.1, 0.1, 0.1], "filter_col": None})
+        check("tool_registry.h: an optional NULLABLE arg given explicit "
+              "null is accepted (consumes the nullable slot)",
+              r is not None and r["result"].get("isError") is not True)
+
+        # analytics.cpp: fractal_vector_hamming_distance -- not called by
+        # name anywhere in this suite; the generic sweep's wrong-typed
+        # stub args for its two hex-STRING params fail schema validation
+        # before ever reaching the adapter body.
+        r = call("fractal_vector_hamming_distance", {"a": "ff00", "b": "00ff"})
+        check("analytics.cpp: hamming_distance round-trips two real hex "
+              "strings", r is not None and r["result"].get("isError")
+              is not True and isinstance(
+                  r["result"]["structuredContent"].get("value"), int))
+
         # Cognition tier (against the harness's mock reasoning)
         r = call("fractal_reason",
                  {"query": "reply with a short confirmation"})
@@ -336,6 +424,110 @@ def main() -> int:  # noqa: ANN201
               "triage_summary)",
               isinstance(sc, dict)
               and "mcp-gate-canary" in (sc.get("triage_summary") or ""))
+
+        # Optional-nullable-argument adapter branches (agency.cpp): the
+        # generic coverage sweep below only ever supplies REQUIRED args, so
+        # every `a.contains(key) && !a.at(key).is_null()` ternary's "arg
+        # present" side goes untested unless called explicitly here with the
+        # optional field both omitted and supplied. Acceptance is generous
+        # (any real response, success or clean error) -- the goal is
+        # exercising the adapter's own arg-marshalling branches, not
+        # re-proving the underlying engine call's own semantics (already
+        # covered at the SQL level by build_test.sh's gate 29).
+        r = call("fractal_agent_recall_hybrid",
+                 {"mem_table": "mcp_sm_docs", "vec_col": "emb",
+                  "query_vec": [0.1, 0.1, 0.1]})
+        check("Agency: recall_hybrid with filter_col/filter_val/content_col "
+              "all omitted (the nstr ternary's null side)",
+              r is not None and "result" in r)
+
+        r = call("fractal_agent_allocate",
+                 {"mu": [0.1, 0.2], "cov": [1.0, 0.0, 0.0, 1.0],
+                  "cardinality": 2})
+        check("Agency: allocate with context omitted",
+              r is not None and "result" in r)
+        r = call("fractal_agent_allocate",
+                 {"mu": [0.1, 0.2], "cov": [1.0, 0.0, 0.0, 1.0],
+                  "cardinality": 2, "context": "{}"})
+        check("Agency: allocate with context explicitly supplied",
+              r is not None and "result" in r)
+
+        r = call("fractal_agent_rebalance_sibling",
+                 {"mu": [0.1, 0.2], "cov": [1.0, 0.0, 0.0, 1.0],
+                  "cardinality": 2, "alloc_table": "mcp_sm_docs",
+                  "alloc_emb_col": "emb", "baseline_vec": [0.1, 0.1, 0.1]})
+        check("Agency: rebalance_sibling with seed omitted",
+              r is not None and "result" in r)
+        r = call("fractal_agent_rebalance_sibling",
+                 {"mu": [0.1, 0.2], "cov": [1.0, 0.0, 0.0, 1.0],
+                  "cardinality": 2, "alloc_table": "mcp_sm_docs",
+                  "alloc_emb_col": "emb", "baseline_vec": [0.1, 0.1, 0.1],
+                  "seed": 42.0})
+        check("Agency: rebalance_sibling with seed explicitly supplied",
+              r is not None and "result" in r)
+
+        r = call("fractal_agent_diverse_portfolios",
+                 {"mu": [0.1, 0.2], "cov": [1.0, 0.0, 0.0, 1.0],
+                  "cardinality": 2})
+        check("Agency: diverse_portfolios with seed omitted",
+              r is not None and "result" in r)
+        r = call("fractal_agent_diverse_portfolios",
+                 {"mu": [0.1, 0.2], "cov": [1.0, 0.0, 0.0, 1.0],
+                  "cardinality": 2, "seed": 42.0})
+        check("Agency: diverse_portfolios with seed explicitly supplied",
+              r is not None and "result" in r)
+
+        r = call("fractal_agent_patient_deterioration_triage",
+                 {"patient_table": "mcp_sm_docs", "vec_col": "emb",
+                  "query_vec": [0.1, 0.1, 0.1], "baseline_vec": [0.1, 0.1, 0.1],
+                  "current_vec": [0.2, 0.2, 0.2]})
+        check("Agency: patient_deterioration_triage with cohort_doc_ids "
+              "omitted", r is not None and "result" in r)
+        r = call("fractal_agent_patient_deterioration_triage",
+                 {"patient_table": "mcp_sm_docs", "vec_col": "emb",
+                  "query_vec": [0.1, 0.1, 0.1], "baseline_vec": [0.1, 0.1, 0.1],
+                  "current_vec": [0.2, 0.2, 0.2], "cohort_doc_ids": [1, 2]})
+        check("Agency: patient_deterioration_triage with cohort_doc_ids "
+              "explicitly supplied", r is not None and "result" in r)
+
+        r = call("fractal_agent_data_analyst", {"question": "how many docs"})
+        check("Agency: data_analyst with table_names omitted",
+              r is not None and "result" in r)
+        r = call("fractal_agent_data_analyst",
+                 {"question": "how many docs",
+                  "table_names": ["mcp_sm_docs"]})
+        check("Agency: data_analyst with table_names explicitly supplied",
+              r is not None and "result" in r)
+
+        r = call("fractal_sql_agent", {"question": "how many docs"})
+        check("Agency: sql_agent with table_names omitted",
+              r is not None and "result" in r)
+        r = call("fractal_sql_agent",
+                 {"question": "how many docs",
+                  "table_names": ["mcp_sm_docs"]})
+        check("Agency: sql_agent with table_names explicitly supplied",
+              r is not None and "result" in r)
+
+        # Optional-nullable-argument adapter branches (analytics.cpp).
+        r = call("fractal_optimize_subset",
+                 {"item_values": [1.0, 2.0, 3.0],
+                  "upper_bounds": [0.5, 0.5, 0.5], "k": 2, "seed": 1.0})
+        check("Analytics: optimize_subset with prev_weights omitted",
+              r is not None and "result" in r)
+        r = call("fractal_optimize_subset",
+                 {"item_values": [1.0, 2.0, 3.0],
+                  "upper_bounds": [0.5, 0.5, 0.5], "k": 2, "seed": 1.0,
+                  "prev_weights": [0.2, 0.2, 0.2]})
+        check("Analytics: optimize_subset with prev_weights explicitly "
+              "supplied", r is not None and "result" in r)
+
+        r = call("fractal_store_morphology", {"feature_array": [0.1, 0.2]})
+        check("Analytics: store_morphology with doc_id omitted",
+              r is not None and "result" in r)
+        r = call("fractal_store_morphology",
+                 {"feature_array": [0.1, 0.2], "doc_id": 7})
+        check("Analytics: store_morphology with doc_id explicitly supplied",
+              r is not None and "result" in r)
 
         # the enterprise clean-error path (6/2.3)
         r = call("fractal_ledger_reset_hard", {})
@@ -382,6 +574,16 @@ def main() -> int:  # noqa: ANN201
         check("schema error: non-array vector rejected",
               r["result"].get("isError")
               and r["result"]["structuredContent"]["error_class"] == "schema")
+        # Explicit JSON null for a required arg is a DIFFERENT validateArgs
+        # branch than simply omitting the key (tool_registry.h checks
+        # !contains(key) first, then is_null() separately) -- distinct from
+        # the omitted-key path every other schema-error check above takes.
+        r = call("fractal_search", {"vector": None, "query": [0.1, 0.2]})
+        check("schema error: explicit null for a required arg rejected "
+              "(distinct from simply omitting it)",
+              r["result"].get("isError")
+              and r["result"]["structuredContent"]["error_class"] == "schema"
+              and "vector" in r["result"]["content"][0]["text"])
 
         # $/cancel propagation
         # A slow-but-terminating O(n^2) DFT keeps the statement in-flight;
@@ -453,17 +655,23 @@ def main() -> int:  # noqa: ANN201
                            ("fractalsql://agents", "agents")):
             send({"jsonrpc": "2.0", "id": 9100, "method": "resources/read",
                   "params": {"uri": uri}})
-            r = recv()
+            # Match by id, not "next message": a late reply from the
+            # cancelled call above can still be in the queue (seen under
+            # --tsan's slowdown) and would otherwise shift every reply
+            # after it by one.
+            r = wait_for(9100, 20)
             check(f"resource fractalsql://{label} reads as real content",
-                  r is not None and r.get("result", {}).get("contents"))
+                  r is not None and (r.get("result") or {}).get("contents"))
         send({"jsonrpc": "2.0", "id": 9200, "method": "prompts/list"})
-        prompts = recv()["result"]["prompts"]
+        prompts = ((wait_for(9200, 20) or {}).get("result") or {}).get("prompts") or []
         check("prompts/list: the 11-prompt starter set",
               len(prompts) == 11)
         send({"jsonrpc": "2.0", "id": 9201, "method": "prompts/get",
               "params": {"name": "safe_sql_question",
                          "arguments": {"question": "how many orders?"}}})
-        msg = recv()["result"]["messages"][0]["content"]["text"]
+        pg = wait_for(9201, 20) or {}
+        msg = (((pg.get("result") or {}).get("messages") or [{}])[0]
+               .get("content") or {}).get("text", "")
         check("safe_sql_question prompt keeps auto_execute explicitly OFF",
               "EXPLICITLY FALSE" in msg)
 
@@ -489,11 +697,27 @@ def main() -> int:  # noqa: ANN201
             print("FAIL prompts/get detail:", name, "->", why)
             _failures += 1
 
+        # prompts/get error paths: the generic sweep above always supplies
+        # every declared argument, so a required slot's OWN absence (as
+        # opposed to a bad prompt name) is never exercised.
+        send({"jsonrpc": "2.0", "id": 9252, "method": "prompts/get",
+              "params": {"name": "incident_triage", "arguments": {}}})
+        r = wait_for(9252, 10)
+        check("prompts/get: a required slot left out is refused -32602",
+              r is not None and r.get("error", {}).get("code") == -32602
+              and "is required" in r["error"]["message"])
+        send({"jsonrpc": "2.0", "id": 9253, "method": "prompts/get",
+              "params": {"name": "not_a_real_prompt", "arguments": {}}})
+        r = wait_for(9253, 10)
+        check("prompts/get: an unknown prompt name is refused -32602",
+              r is not None and r.get("error", {}).get("code") == -32602
+              and "unknown prompt" in r["error"]["message"])
+
         # full-catalog resources exercise: resources/list, then read each
         # declared URI (ledger/vectorizer included, via their Community
         # clean conditions)
         send({"jsonrpc": "2.0", "id": 9260, "method": "resources/list"})
-        list_resp = recv(deadline=20)
+        list_resp = wait_for(9260, 20)
         res_list = (((list_resp or {}).get("result") or {})
                     .get("resources")) or []
         bad_resources = []
@@ -565,6 +789,62 @@ def main() -> int:  # noqa: ANN201
         # itself still raises (it IS the reasoning step; the partial mode only
         # rescues the data half). Repoint the plugin through the admin
         # tool (per-connection, like the engine's own config surface).
+        # Admin tier: the enterprise-key/secret-key refusal branches and
+        # configure_reasoning's own field-application loop. None of these
+        # are exercised by the generic coverage sweep (it supplies only
+        # REQUIRED args, and set_config/get_config/configure_reasoning's
+        # interesting behavior is all gated behind OPTIONAL ones).
+        r = call("fractalsql_set_config",
+                 {"key": "enterprise_lib", "value": "/tmp/whatever.so"})
+        check("Admin: set_config on an enterprise key without "
+              "allow_secrets=true is refused",
+              r is not None and (r.get("result") or {}).get("isError") is True
+              and "allow_secrets=true" in json.dumps(r["result"]))
+        r = call("fractalsql_get_config", {"key": "http_token"})
+        check("Admin: get_config on a secret key is refused (never read "
+              "back through any tool)",
+              r is not None and (r.get("result") or {}).get("isError") is True
+              and "never read back" in json.dumps(r["result"]))
+        r = call("fractalsql_configure_reasoning", {"model": "mcp-smoke-model"})
+        sc = (r.get("result") or {}).get("structuredContent") if r else None
+        check("Admin: configure_reasoning applies a single field (model)",
+              r is not None and (r.get("result") or {}).get("isError") is not True
+              and isinstance(sc, dict)
+              and "http_model" in (sc.get("applied") or {}))
+        r = call("fractalsql_configure_reasoning", {"allow_plaintext": True})
+        sc = (r.get("result") or {}).get("structuredContent") if r else None
+        check("Admin: configure_reasoning applies allow_plaintext (the "
+              "bool->on/off engine-spelling ternary)",
+              r is not None and (r.get("result") or {}).get("isError") is not True
+              and isinstance(sc, dict)
+              and (sc.get("applied") or {}).get("http_allow_plaintext", {}).get("new")
+              == "on")
+
+        # fractalsql://vectorizer/status's SUCCESS path (real rows, not the
+        # "registry is empty" Schema error the generic resources sweep
+        # below documents and tolerates) needs an actual QUEUED row, which
+        # needs a vectorizer created over a table with at least one NULL
+        # embedding (fractal_vectorizer_status is the processing QUEUE,
+        # not just a registry listing -- confirmed by direct testing: a
+        # vectorizer created over a table whose embedding column is
+        # already fully populated queues nothing and the view stays
+        # empty). mcp_sm_vec_src's one row exists for exactly this.
+        r = call("fractal_vectorizer_create",
+                 {"source_table": "mcp_sm_vec_src", "text_col": "txt",
+                  "embedding_col": "emb"})
+        check("Vectorizer: fractal_vectorizer_create installs a registry "
+              "row", r is not None and (r.get("result") or {}).get("isError")
+              is not True)
+        send({"jsonrpc": "2.0", "id": 9270, "method": "resources/read",
+              "params": {"uri": "fractalsql://vectorizer/status"}})
+        vr = wait_for(9270, 20)
+        vr_contents = ((vr or {}).get("result") or {}).get("contents") or []
+        vr_text = vr_contents[0].get("text", "") if vr_contents else ""
+        check("Admin/Resources: fractalsql://vectorizer/status returns "
+              "real queued rows once a vectorizer exists",
+              vr is not None and "error" not in vr and vr_contents
+              and "mcp_sm_vec_src" in vr_text)
+
         broken = os.path.join(os.environ["MCP_SERVER_CWD"],
                               "no_such_reasoning_plugin_for_mcp_smoke")
         r = call("fractalsql_set_config",
@@ -669,6 +949,25 @@ def main() -> int:  # noqa: ANN201
         r = wait_for(1, 10)
         check("unknown method returns -32601", r is not None
               and r.get("error", {}).get("code") == -32601)
+        send({"jsonrpc": "2.0", "id": 9301})   # missing "method"
+        r = wait_for(9301, 10)
+        check("a request missing \"method\" is refused -32600 invalid "
+              "request",
+              r is not None and r.get("error", {}).get("code") == -32600)
+        send({"jsonrpc": "2.0", "id": 9302, "method": "tools/call",
+              "params": {"name": "fractal_reason", "arguments": "not an object"}})
+        r = wait_for(9302, 10)
+        check("tools/call with non-object arguments is refused -32602 "
+              "(rejected before runTool's own isError-result wrapping)",
+              r is not None and r.get("error", {}).get("code") == -32602
+              and "must be a JSON object" in r["error"]["message"])
+        send({"jsonrpc": "2.0", "id": 9303, "method": "resources/read",
+              "params": {"uri": "fractalsql://not-a-real-resource"}})
+        r = wait_for(9303, 10)
+        check("resources/read on an unknown URI is refused -32602 "
+              "(a top-level JSON-RPC error, not a tools/call-shaped result)",
+              r is not None and r.get("error", {}).get("code") == -32602
+              and "unknown resource uri" in r["error"]["message"])
     finally:
         finish(proc, server_log)
 
@@ -794,7 +1093,7 @@ def run_http_and_cli_phase() -> None:
                               input="")
     r = cli_run(["--version"])
     check("CLI: --version prints the release banner",
-          r.returncode == 0 and "2.0.7" in r.stdout)
+          r.returncode == 0 and "2.0.8" in r.stdout)
     r = cli_run(["--help"])
     check("CLI: --help prints the flag table",
           r.returncode == 0 and "--tool" in r.stdout)
@@ -808,9 +1107,73 @@ def run_http_and_cli_phase() -> None:
                              FRACTALSQL_EXTENSION_PATH=""))
     check("CLI: missing database/extension env exits with the startup "
           "error", r.returncode != 0)
+    # The two startup env checks are sequential ifs (DB path checked
+    # first); the case above only ever exercises the FIRST one. This
+    # isolates the second by supplying a (harmlessly nonexistent) DB
+    # path and leaving only the extension path unset.
+    r = cli_run([], env=dict(base_env, FRACTALSQL_EXTENSION_PATH=""))
+    check("CLI: DB path set but extension path unset reports the "
+          "extension-specific error",
+          r.returncode != 0
+          and "FRACTALSQL_EXTENSION_PATH is required" in r.stderr)
+    # --write-manifest: the one one-shot flag (of write-lock/write-
+    # safety-lock/write-manifest/list-tools) with no existing test.
+    # FSQL_MCP_MANIFEST_PATH points this at a scratch file rather than
+    # the committed mcp/manifest.json.
+    manifest_tmp = os.path.join(server_cwd, "mcp_manifest_probe.json")
+    r = cli_run(["--write-manifest"],
+                env=dict(base_env, FSQL_MCP_MANIFEST_PATH=manifest_tmp))
+    check("CLI: --write-manifest regenerates a manifest and exits",
+          r.returncode == 0 and os.path.isfile(manifest_tmp)
+          and "fractal_search" in open(manifest_tmp, encoding="utf-8").read())
+    # --http with NEITHER auth env var set: runHttpMode's own config
+    # validation must reject this before ever trying to bind the port.
+    r = cli_run(["--http", "18997"],
+                env=dict(base_env, FSQL_MCP_AUTH_TOKEN="",
+                         FSQL_MCP_AUTH_TOKEN_FILE=""))
+    check("CLI: --http with neither FSQL_MCP_AUTH_TOKEN nor "
+          "FSQL_MCP_AUTH_TOKEN_FILE set exits before binding",
+          r.returncode == 2
+          and "FSQL_MCP_AUTH_TOKEN_FILE" in r.stderr)
+    # A PRESENT but invalid extension path: a real file that isn't a
+    # loadable SQLite extension, unlike the empty-string case above (caught
+    # earlier, by main.cpp's own "is this set at all" check). DbConnection
+    # is lazy (db.h's acquire()) -- it only connects on the first request
+    # that actually needs the DB, so a bare startup-and-exit (cli_run's
+    # input="") never reaches loadExtensionLockedDown() at all. A real
+    # tools/call forces that connection attempt, exercising its
+    # sqlite3_load_extension() failure branch for real.
+    bad_ext_path = os.path.join(os.environ["MCP_HERE"], ".mcp-schema-lock")
+    resps, code = quick_stdio(
+        [{"jsonrpc": "2.0", "id": 1, "method": "initialize",
+          "params": INIT_PARAMS},
+         {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+          "params": {"name": "fractal_search",
+                     "arguments": {"vector": [0.1, 0.9], "query": [0.6, 0.8]}}}],
+        {"FRACTALSQL_EXTENSION_PATH": bad_ext_path})
+    bad_ext_resp = next((x for x in resps if x and x.get("id") == 2), None)
+    bad_ext_text = json.dumps(bad_ext_resp)
+    check("a present-but-invalid extension path fails the first real "
+          "request with a clean load-failure error (DbConnection is lazy, "
+          "so startup alone never reaches it)",
+          bad_ext_resp is not None
+          and (bad_ext_resp.get("result", {}).get("isError")
+               or "error" in bad_ext_resp)
+          and "failed to load extension" in bad_ext_text)
+
+    # the matching-lock path (checkSchemaGate's LockCheckResult::Ok
+    # branch, which logs "schema_lock_ok") -- the default stdio session
+    # above never hits it: the server's default lock-path resolution
+    # walks up from its CWD looking for a checkout root, which the
+    # scratch server_cwd this harness uses isn't, so without an
+    # explicit override it resolves Absent, not Ok. Point
+    # FSQL_MCP_SCHEMA_LOCK at the real committed lock explicitly instead.
+    lock_path = os.path.join(os.environ["MCP_HERE"], ".mcp-schema-lock")
+    r = cli_run([], env=dict(base_env, FSQL_MCP_SCHEMA_LOCK=lock_path))
+    check("CLI: a matching schema lock logs schema_lock_ok and still "
+          "serves", r.returncode == 0 and "schema_lock_ok" in r.stderr)
 
     # lock-failure postures against a tampered copy of the committed lock
-    lock_path = os.path.join(os.environ["MCP_HERE"], ".mcp-schema-lock")
     committed = open(lock_path, encoding="utf-8").read()
     flip = "0" if committed[10:11] != "0" else "1"
     bad_lock = os.path.join(server_cwd, "mcp_tampered_schema_lock")
@@ -1002,6 +1365,48 @@ def run_http_and_cli_phase() -> None:
         check("HTTP: DELETE closes the post-rotation session cleanly",
               s == 200)
 
+        # SIGHUP: a forced reload that ignores the mtime check entirely
+        # (TokenStore::forceReloadFromSighup -> reload(true)), distinct
+        # from the mtime-triggered hot reload just proven above. Pin the
+        # file's mtime back to the SAME value the running process has
+        # already recorded (lastMtime_ == 8) after writing new content,
+        # so an ordinary per-request reload(false) would see an
+        # unchanged mtime and skip re-reading the file -- only SIGHUP's
+        # force=true bypass can pick up tok_c.
+        if os.name != "nt":
+            tok_c = "g37-tok-gamma"
+            with open(token_file, "w", encoding="utf-8") as fh:
+                fh.write(tok_c + "\n")
+            os.utime(token_file, (8, 8))
+            s, _, _ = rpc({"jsonrpc": "2.0", "id": 11, "method": "initialize",
+                           "params": INIT_PARAMS}, token=tok_c)
+            check("SIGHUP: before the signal, an unchanged mtime means the "
+                  "new file content is NOT yet picked up (still tok_b)",
+                  s == 401)
+            os.kill(http_proc.pid, signal.SIGHUP)
+            time.sleep(0.3)
+            s, h4, _ = rpc({"jsonrpc": "2.0", "id": 12, "method": "initialize",
+                            "params": INIT_PARAMS}, token=tok_c)
+            check("SIGHUP: forces a reload that ignores the mtime check, "
+                  "picking up the new token immediately",
+                  s == 200 and bool(h4.get("mcp-session-id")))
+            s, _, _ = http_req("DELETE", "/mcp", token=tok_c,
+                               session=h4.get("mcp-session-id"))
+            check("HTTP: DELETE closes the post-SIGHUP session cleanly",
+                  s == 200)
+
+        # A session left OPEN (never DELETEd) at shutdown: runHttpTransport's
+        # own cleanup loop closes every still-live session's DB connection
+        # via closeSession() before the process exits. Every session minted
+        # above was explicitly DELETEd, so without this, that loop always
+        # iterates zero times.
+        s, h3, _ = rpc({"jsonrpc": "2.0", "id": 10, "method": "initialize",
+                        "params": INIT_PARAMS},
+                       token=(tok_c if os.name != "nt" else tok_b))
+        check("HTTP: one more session minted, deliberately left open for "
+              "the termination test below",
+              s == 200 and bool(h3.get("mcp-session-id")))
+
         # main's listen-failure branch: a second process on the same port
         # must exit nonzero while the first still serves
         conflict = subprocess.run([mcp_exe, "--http"], capture_output=True,
@@ -1032,6 +1437,149 @@ def run_http_and_cli_phase() -> None:
             except Exception:
                 pass
         http_log.close()
+
+    if os.name != "nt":
+        run_shutdown_drain_phase(mcp_exe, server_cwd, base_env)
+
+
+def run_shutdown_drain_phase(mcp_exe, server_cwd, base_env) -> None:
+    """A dedicated, isolated server instance whose only job is to prove
+    runHttpTransport's own shutdown sequencing -- the activeRequestCount()
+    drain-wait loop and the liveConnections grace-wait loop right after it
+    -- actually runs its wait body at least once, not just its (almost
+    always instantly-false) loop condition. Both are a no-op unless a
+    real request is still being processed by its own detached connection
+    thread at the exact instant SIGTERM arrives, normally a sub-
+    millisecond race. tests/slow_reasoning_plugin.c's artificial,
+    caller-controlled sleep (FSQL_MOCK_SLOW_MS) turns that race into a
+    wide, deterministic window: the request is still "in flight" for as
+    long as we choose, so SIGTERM during that window always lands with
+    activeRequestCount() > 0 and the connection thread still live."""
+    global _failures
+    slow_plugin = os.environ.get("MCP_SLOW_REASONING_PLUGIN", "")
+    if not slow_plugin or not os.path.isfile(slow_plugin):
+        check("HTTP shutdown: slow_reasoning_plugin not available, "
+              "skipping (harness did not build it)", True)
+        return
+
+    port = 18997
+    token = "g37-shutdown-drain-tok"
+    env = dict(base_env)
+    env.update({
+        "FSQL_MCP_HTTP_PORT": str(port),
+        "FSQL_MCP_HTTP_HOST": "127.0.0.1",
+        "FSQL_MCP_HTTP_PATH": "/mcp",
+        "FSQL_MCP_AUTH_TOKEN": token,
+        "FSQL_MCP_AUTH_TOKEN_FILE": "",
+        # Short drain so the test doesn't need a long sleep; the slow
+        # plugin's own delay (well past this) guarantees the drain
+        # loop's condition is true at least once before it gives up.
+        "FSQL_MCP_SHUTDOWN_DRAIN_MS": "300",
+        "FSQL_MOCK_SLOW_MS": "2000",
+        "FRACTALSQL_BOOTSTRAP_SQL":
+            "SELECT fractalsql_set('reasoning_plugin','" + slow_plugin + "');",
+    })
+    log_path = os.path.join(server_cwd, "mcp_http_shutdown_drain.log")
+    log = open(log_path, "w", encoding="utf-8")
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            [mcp_exe, "--http", str(port)], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=log, cwd=server_cwd,
+            env=env, text=True)
+        proc.stdin.close()
+
+        def req(method, path, body=None, token=None, session=None,
+                 timeout=15.0):
+            headers = {}
+            if token is not None:
+                headers["Authorization"] = "Bearer " + token
+            if session is not None:
+                headers["Mcp-Session-Id"] = session
+            try:
+                conn = httpc.HTTPConnection("127.0.0.1", port, timeout=timeout)
+                conn.request(method, path, body=body, headers=headers)
+                resp = conn.getresponse()
+                data = resp.read().decode("utf-8", "replace")
+                hdrs = {k.lower(): v for k, v in resp.getheaders()}
+                conn.close()
+                return resp.status, hdrs, data
+            except Exception:
+                return None, {}, ""
+
+        up = False
+        for _ in range(100):
+            s, _, _ = req("GET", "/healthz", timeout=2.0)
+            if s == 200:
+                up = True
+                break
+            time.sleep(0.15)
+        if not up:
+            check("HTTP shutdown: drain-wait server came up", False)
+            return
+
+        s, h, _ = req("POST", "/mcp",
+                       body=json.dumps({"jsonrpc": "2.0", "id": 1,
+                                        "method": "initialize",
+                                        "params": INIT_PARAMS}),
+                       token=token)
+        sess = h.get("mcp-session-id")
+        if s != 200 or not sess:
+            check("HTTP shutdown: drain-wait session minted", False)
+            return
+
+        # Fire the slow call on its own thread; its connection thread
+        # stays live (and activeRequestCount() stays > 0) for ~2s.
+        slow_result = {}
+
+        def fire_slow_call():
+            st, _, body = req(
+                "POST", "/mcp",
+                body=json.dumps({"jsonrpc": "2.0", "id": 2,
+                                 "method": "tools/call",
+                                 "params": {"name": "fractal_reason",
+                                            "arguments": {"query": "q"}}}),
+                token=token, session=sess, timeout=10.0)
+            slow_result["status"] = st
+            slow_result["body"] = body
+
+        t = threading.Thread(target=fire_slow_call, daemon=True)
+        t.start()
+        # Give the server time to read the request and enter
+        # handleDispatch (incrementing activeRequestCount) before the
+        # signal arrives -- well short of the plugin's own 2s sleep.
+        time.sleep(0.3)
+
+        t0 = time.monotonic()
+        proc.terminate()
+        # Same poke as the main HTTP session's own termination test: the
+        # SIGTERM handler only sets the stop flag while accept() blocks,
+        # so one more connection is needed to make the main loop notice
+        # and fall through to the drain sequence.
+        req("GET", "/healthz", timeout=5.0)
+        try:
+            rc = proc.wait(timeout=8)
+        except Exception:
+            proc.kill()
+            rc = proc.wait(timeout=10)
+        elapsed = time.monotonic() - t0
+
+        check("HTTP shutdown: a request still in flight (held open by "
+              "the slow reasoning plugin) does not block a clean "
+              "SIGTERM shutdown", rc == 0)
+        check("HTTP shutdown: the drain+grace wait is bounded, not a "
+              "hang (exited in {:.2f}s, well under the 2s the slow "
+              "call itself would need to finish)".format(elapsed),
+              elapsed < 6.0)
+        t.join(timeout=5.0)
+    finally:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            try:
+                proc.wait(timeout=10)
+            except Exception:
+                pass
+        log.close()
 
 
 def finish(proc, server_log) -> None:  # noqa: ANN001

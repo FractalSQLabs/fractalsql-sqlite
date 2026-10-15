@@ -70,7 +70,6 @@
  */
 
 #include <sqlite3ext.h>
-SQLITE_EXTENSION_INIT3
 
 #include <math.h>
 #include <stdarg.h>
@@ -81,6 +80,8 @@ SQLITE_EXTENSION_INIT3
 
 #include "fsql_hmac.h"
 #include "fsql_sqlite_internal.h"
+
+SQLITE_EXTENSION_INIT3
 
 /* Element-count ceiling for one decoded array argument (the same
  * 4 MiB input cap the rest of the extension applies; doubles in memory
@@ -217,12 +218,12 @@ static int decode_indices(sqlite3_value *v, size_t **out_idx, int *out_n,
  * fixed-shape documents below use plain stack buffers instead).
  * ------------------------------------------------------------------ */
 
-typedef struct { char *s; size_t len, cap; } SB;
+typedef struct { char *s; size_t len; size_t cap; } SB;
 
 static int sb_grow(SB *b, size_t need) {
     if (b->len + need + 1 <= b->cap) return 0;
     size_t ncap = b->cap ? b->cap : 256;
-    while (ncap < b->len + need + 1) ncap *= 2;
+    for (; ncap < b->len + need + 1; ncap *= 2);   /* ncap used below */
     char *ns = (char *)realloc(b->s, ncap);
     if (!ns) return -1;
     b->s = ns;
@@ -239,7 +240,8 @@ static int sb_append(SB *b, const char *s) {
 }
 
 static int sb_appendf(SB *b, const char *fmt, ...) {
-    va_list ap, ap2;
+    va_list ap;
+    va_list ap2;
     va_start(ap, fmt);
     va_copy(ap2, ap);
     int need = vsnprintf(NULL, 0, fmt, ap);
@@ -270,6 +272,21 @@ static void result_jsonf(sqlite3_context *ctx, char *buf, size_t cap,
     vsnprintf(buf, cap, fmt, ap);
     va_end(ap);
     sqlite3_result_text(ctx, buf, -1, SQLITE_TRANSIENT);
+}
+
+/* Appends `[w[0],w[1],...,w[n-1]]` (each %.10f, comma-separated, no
+ * surrounding whitespace) to b. Pure textual formatting in strict
+ * index order 0..n-1 -- identical traversal order to every inline
+ * weights-array loop it replaces, so it changes no floating-point
+ * computation, only where the formatting code lives. Returns 0 ok,
+ * -1 on allocation failure (same convention as the other sb_* helpers,
+ * so callers can keep accumulating `bad` the same way). */
+static int sb_append_weight_array(SB *b, const double *w, int n) {
+    int bad = sb_append(b, "[");
+    for (int i = 0; i < n && !bad; i++)
+        bad = sb_appendf(b, "%s%.10f", i ? "," : "", w[i]);
+    if (!bad) bad = sb_append(b, "]");
+    return bad;
 }
 
 /* ------------------------------------------------------------------
@@ -354,7 +371,9 @@ static void dim_drift_fn(sqlite3_context *ctx, int argc,
         return;
     }
 
-    double drift = 0.0, recent_alpha = 0.0, baseline_alpha = 0.0;
+    double drift = 0.0;
+    double recent_alpha = 0.0;
+    double baseline_alpha = 0.0;
     int rc = fsql_dimension_drift(series, (size_t)n, (size_t)window,
                                   &drift, &recent_alpha, &baseline_alpha);
     free(series);
@@ -418,28 +437,47 @@ static void dim_boxcount_fn(sqlite3_context *ctx, int argc,
  * Portfolio optimization
  * ------------------------------------------------------------------ */
 
-/* Shared input validation + decode for all portfolio variants.
- * Returns 0 on success with *mu_out / *cov_out malloc'd; on failure a
- * SQLite error has already been set and the outputs are NULL. */
-static int portfolio_decode(sqlite3_context *ctx, sqlite3_value *mu_v,
-                            sqlite3_value *cov_v, sqlite3_value *k_v,
-                            double **mu_out, int *n_assets_out,
-                            double **cov_out, int *k_out) {
-    *mu_out = NULL;
-    *cov_out = NULL;
+/* portfolio_decode's 3 raw SQL arguments, bundled so the function
+ * takes one input pointer instead of 3 positional sqlite3_value*
+ * (together with the output bundle below, this keeps the function at
+ * 3 parameters instead of the original 8, with no change to which
+ * value feeds which check). */
+typedef struct {
+    sqlite3_value *mu_v;
+    sqlite3_value *cov_v;
+    sqlite3_value *k_v;
+} PortfolioArgs;
 
-    if (sqlite3_value_type(mu_v) == SQLITE_NULL ||
-        sqlite3_value_type(cov_v) == SQLITE_NULL ||
-        sqlite3_value_type(k_v) == SQLITE_NULL) {
+/* portfolio_decode's decoded outputs. mu/cov are malloc'd (freed by
+ * the caller); on failure all fields are left zeroed. */
+typedef struct {
+    double *mu;
+    double *cov;
+    int n_assets;
+    int k;
+} PortfolioDecoded;
+
+/* Shared input validation + decode for all portfolio variants.
+ * Returns 0 on success with out->mu / out->cov malloc'd; on failure a
+ * SQLite error has already been set and *out is zeroed. */
+static int portfolio_decode(sqlite3_context *ctx, const PortfolioArgs *args,
+                            PortfolioDecoded *out) {
+    memset(out, 0, sizeof *out);
+
+    if (sqlite3_value_type(args->mu_v) == SQLITE_NULL ||
+        sqlite3_value_type(args->cov_v) == SQLITE_NULL ||
+        sqlite3_value_type(args->k_v) == SQLITE_NULL) {
         sqlite3_result_error(ctx,
             "fractalsql: mu, cov and k must not be NULL", -1);
         return -1;
     }
 
-    int n_assets = 0, cov_n = 0;
-    double *mu = NULL, *cov = NULL;
-    if (decode_series(mu_v, &mu, &n_assets) != 0 ||
-        decode_series(cov_v, &cov, &cov_n) != 0) {
+    int n_assets = 0;
+    int cov_n = 0;
+    double *mu = NULL;
+    double *cov = NULL;
+    if (decode_series(args->mu_v, &mu, &n_assets) != 0 ||
+        decode_series(args->cov_v, &cov, &cov_n) != 0) {
         free(mu); free(cov);
         sqlite3_result_error(ctx,
             "fractalsql: malformed mu/cov (expect CSV/JSON text or "
@@ -462,7 +500,7 @@ static int portfolio_decode(sqlite3_context *ctx, sqlite3_value *mu_v,
         return -1;
     }
 
-    int k = sqlite3_value_int(k_v);
+    int k = sqlite3_value_int(args->k_v);
     if (k <= 0 || k > n_assets) {
         char buf[128];
         snprintf(buf, sizeof buf,
@@ -473,10 +511,10 @@ static int portfolio_decode(sqlite3_context *ctx, sqlite3_value *mu_v,
         return -1;
     }
 
-    *mu_out = mu;
-    *cov_out = cov;
-    *n_assets_out = n_assets;
-    *k_out = k;
+    out->mu = mu;
+    out->cov = cov;
+    out->n_assets = n_assets;
+    out->k = k;
     return 0;
 }
 
@@ -517,7 +555,7 @@ static int opt_diffusion(int argc, sqlite3_value **argv, int idx,
  * same pattern as da_audit_log_best_effort in fsql_domain_agents.c.
  * `entry_json` is the bare entry object (no outer
  * {"type":..,"entry":..} envelope -- fractal_audit_log adds that). */
-static void sovereign_audit_log_best_effort(FsqlState *st,
+static void sovereign_audit_log_best_effort(const FsqlState *st,
                                             const char *entry_type,
                                             const char *entry_json) {
     sqlite3_stmt *stmt = NULL;
@@ -549,50 +587,78 @@ static int sovereign_inputs_hash_hex(const double *mu, const double *cov,
     return 0;
 }
 
-static void portfolio_audit_log_best_effort(FsqlState *st, const double *mu,
-                                            const double *cov, int n_assets,
-                                            int k, uint64_t seed,
-                                            double sharpe,
+/* Parameter bundles for the three audit-log helpers below (each was
+ * previously 8-12 positional scalar args). Each struct holds only the
+ * scalar/by-value call-specific fields -- mu/cov/weights/etc. stay
+ * separate pointer args, same as before, since they are the arrays
+ * the JSON body is built from. No field's meaning or value changes,
+ * only how it is passed. */
+typedef struct {
+    int n_assets;
+    int k;
+    uint64_t seed;
+    double sharpe;
+} PortfolioAuditSpec;
+
+typedef struct {
+    int n_assets;
+    int k;
+    int n_restarts;
+    uint64_t seed;
+    int n_found;
+} PortfolioMultimodalAuditSpec;
+
+typedef struct {
+    int n_assets;
+    int k;
+    int n_restarts;
+    int max_front;
+    uint64_t seed;
+    int n_found;
+} PortfolioParetoAuditSpec;
+
+static void portfolio_audit_log_best_effort(const FsqlState *st,
+                                            const double *mu,
+                                            const double *cov,
+                                            const PortfolioAuditSpec *spec,
                                             const double *weights) {
     char hash_hex[65];
-    if (sovereign_inputs_hash_hex(mu, cov, n_assets, hash_hex) != 0) return;
+    if (sovereign_inputs_hash_hex(mu, cov, spec->n_assets, hash_hex) != 0)
+        return;
 
     SB js; memset(&js, 0, sizeof js);
     int bad = sb_appendf(&js,
         "{\"seed\":%llu,\"n_assets\":%d,\"k\":%d,\"sharpe\":%.10f,"
-        "\"inputs_hash\":\"%s\",\"weights\":[",
-        (unsigned long long)seed, n_assets, k, sharpe, hash_hex);
-    for (int i = 0; i < n_assets && !bad; i++)
-        bad = sb_appendf(&js, "%s%.10f", i ? "," : "", weights[i]);
-    if (!bad) bad = sb_append(&js, "]}");
+        "\"inputs_hash\":\"%s\",\"weights\":",
+        (unsigned long long)spec->seed, spec->n_assets, spec->k,
+        spec->sharpe, hash_hex);
+    if (!bad) bad = sb_append_weight_array(&js, weights, spec->n_assets);
+    if (!bad) bad = sb_append(&js, "}");
     if (!bad) sovereign_audit_log_best_effort(st, "portfolio_optimize", js.s);
     free(js.s);
 }
 
-static void portfolio_multimodal_audit_log_best_effort(FsqlState *st,
-                                                        const double *mu,
-                                                        const double *cov,
-                                                        int n_assets, int k,
-                                                        int n_restarts,
-                                                        uint64_t seed,
-                                                        int n_found,
-                                                        const double *sharpes,
-                                                        const double *weights) {
+static void portfolio_multimodal_audit_log_best_effort(
+        const FsqlState *st, const double *mu, const double *cov,
+        const PortfolioMultimodalAuditSpec *spec, const double *sharpes,
+        const double *weights) {
     char hash_hex[65];
-    if (sovereign_inputs_hash_hex(mu, cov, n_assets, hash_hex) != 0) return;
+    if (sovereign_inputs_hash_hex(mu, cov, spec->n_assets, hash_hex) != 0)
+        return;
 
     SB js; memset(&js, 0, sizeof js);
     int bad = sb_appendf(&js,
         "{\"seed\":%llu,\"n_assets\":%d,\"k\":%d,\"n_restarts\":%d,"
         "\"n_found\":%d,\"inputs_hash\":\"%s\",\"candidates\":[",
-        (unsigned long long)seed, n_assets, k, n_restarts, n_found, hash_hex);
-    for (int c = 0; c < n_found && !bad; c++) {
-        bad = sb_appendf(&js, "%s{\"sharpe\":%.10f,\"weights\":[",
+        (unsigned long long)spec->seed, spec->n_assets, spec->k,
+        spec->n_restarts, spec->n_found, hash_hex);
+    for (int c = 0; c < spec->n_found && !bad; c++) {
+        bad = sb_appendf(&js, "%s{\"sharpe\":%.10f,\"weights\":",
                          c ? "," : "", sharpes[c]);
-        for (int i = 0; i < n_assets && !bad; i++)
-            bad = sb_appendf(&js, "%s%.10f", i ? "," : "",
-                             weights[(size_t)c * n_assets + i]);
-        if (!bad) bad = sb_append(&js, "]}");
+        if (!bad)
+            bad = sb_append_weight_array(
+                &js, weights + (size_t)c * spec->n_assets, spec->n_assets);
+        if (!bad) bad = sb_append(&js, "}");
     }
     if (!bad) bad = sb_append(&js, "]}");
     if (!bad)
@@ -602,26 +668,27 @@ static void portfolio_multimodal_audit_log_best_effort(FsqlState *st,
 }
 
 static void portfolio_multimodal_pareto_audit_log_best_effort(
-        FsqlState *st, const double *mu, const double *cov, int n_assets,
-        int k, int n_restarts, int max_front, uint64_t seed, int n_found,
-        const double *returns, const double *risks, const double *weights) {
+        FsqlState *st, const double *mu, const double *cov,
+        const PortfolioParetoAuditSpec *spec, const double *returns,
+        const double *risks, const double *weights) {
     char hash_hex[65];
-    if (sovereign_inputs_hash_hex(mu, cov, n_assets, hash_hex) != 0) return;
+    if (sovereign_inputs_hash_hex(mu, cov, spec->n_assets, hash_hex) != 0)
+        return;
 
     SB js; memset(&js, 0, sizeof js);
     int bad = sb_appendf(&js,
         "{\"seed\":%llu,\"n_assets\":%d,\"k\":%d,\"n_restarts\":%d,"
         "\"max_front\":%d,\"n_found\":%d,\"inputs_hash\":\"%s\","
         "\"candidates\":[",
-        (unsigned long long)seed, n_assets, k, n_restarts, max_front,
-        n_found, hash_hex);
-    for (int c = 0; c < n_found && !bad; c++) {
-        bad = sb_appendf(&js, "%s{\"return\":%.10f,\"risk\":%.10f,\"weights\":[",
+        (unsigned long long)spec->seed, spec->n_assets, spec->k,
+        spec->n_restarts, spec->max_front, spec->n_found, hash_hex);
+    for (int c = 0; c < spec->n_found && !bad; c++) {
+        bad = sb_appendf(&js, "%s{\"return\":%.10f,\"risk\":%.10f,\"weights\":",
                          c ? "," : "", returns[c], risks[c]);
-        for (int i = 0; i < n_assets && !bad; i++)
-            bad = sb_appendf(&js, "%s%.10f", i ? "," : "",
-                             weights[(size_t)c * n_assets + i]);
-        if (!bad) bad = sb_append(&js, "]}");
+        if (!bad)
+            bad = sb_append_weight_array(
+                &js, weights + (size_t)c * spec->n_assets, spec->n_assets);
+        if (!bad) bad = sb_append(&js, "}");
     }
     if (!bad) bad = sb_append(&js, "]}");
     if (!bad)
@@ -634,15 +701,16 @@ static void portfolio_multimodal_pareto_audit_log_best_effort(
  * [, diffusion_mode]]]) -> TEXT JSON {"sharpe":X,"weights":[...]}. */
 static void portfolio_fn(sqlite3_context *ctx, int argc,
                          sqlite3_value **argv) {
-    FsqlState *st = sovereign_state(ctx);
+    const FsqlState *st = sovereign_state(ctx);
     if (!st) return;
 
     char err[192];
-    double *mu = NULL, *cov = NULL;
-    int n_assets = 0, k = 0;
-    if (portfolio_decode(ctx, argv[0], argv[1], argv[2],
-                         &mu, &n_assets, &cov, &k) != 0)
+    PortfolioArgs args = { argv[0], argv[1], argv[2] };
+    PortfolioDecoded pd;
+    if (portfolio_decode(ctx, &args, &pd) != 0)
         return;
+    double *mu = pd.mu, *cov = pd.cov;
+    int n_assets = pd.n_assets, k = pd.k;
 
     uint64_t seed = opt_seed(argc, argv, 3);
     int use_obl = opt_bool(argc, argv, 4);
@@ -671,15 +739,14 @@ static void portfolio_fn(sqlite3_context *ctx, int argc,
         sqlite3_result_error(ctx, buf, -1);
         return;
     }
-    portfolio_audit_log_best_effort(st, mu, cov, n_assets, k, seed, sharpe,
-                                    weights);
+    PortfolioAuditSpec aspec = { n_assets, k, seed, sharpe };
+    portfolio_audit_log_best_effort(st, mu, cov, &aspec, weights);
 
     SB out;
     memset(&out, 0, sizeof out);
-    int bad = sb_appendf(&out, "{\"sharpe\":%.10f,\"weights\":[", sharpe);
-    for (int i = 0; i < n_assets && !bad; i++)
-        bad = sb_appendf(&out, "%s%.10f", i ? "," : "", weights[i]);
-    if (!bad) bad = sb_append(&out, "]}");
+    int bad = sb_appendf(&out, "{\"sharpe\":%.10f,\"weights\":", sharpe);
+    if (!bad) bad = sb_append_weight_array(&out, weights, n_assets);
+    if (!bad) bad = sb_append(&out, "}");
     free(mu); free(cov); free(weights);
     if (bad) { free(out.s); sqlite3_result_error_nomem(ctx); return; }
     sb_result(ctx, &out);
@@ -689,35 +756,112 @@ static void portfolio_fn(sqlite3_context *ctx, int argc,
  * [, overlap_threshold [, quality_frac [, seed [, use_obl
  * [, diffusion_mode]]]]]]) -> TEXT JSON
  * {"candidates":[{"sharpe":X,"weights":[...]} ,...],"n_found":N}. */
+/* portfolio_multimodal_fn's trailing options, bundled (same values,
+ * same meanings, just no longer 6 separate positional parameters on
+ * the dispatch helper below). */
+typedef struct {
+    int n_restarts;
+    double overlap_thr;
+    double quality_frac;
+    uint64_t seed;
+    int use_obl;
+    int diffusion_mode;
+} PortfolioMultimodalParams;
+
+/* weights/sharpes are caller-allocated output buffers (n_restarts *
+ * n_assets and n_restarts elements respectively); n_found and rc are
+ * filled in by the dispatch helper. */
+typedef struct {
+    double *weights;
+    double *sharpes;
+    int n_found;
+    int rc;
+} PortfolioMultimodalResult;
+
+/* Picks which enterprise core symbol serves this call and invokes it.
+ * Returns 1 with r->rc set to the backend's FSQL_* return code; or
+ * returns 0 when no symbol can serve this call at all, in which case a
+ * SQLite error has already been set on ctx (caller still owns freeing
+ * its own allocations). Preserves the exact preference order and
+ * error messages portfolio_multimodal_fn used to have inline: prefer
+ * the extended (_ex) symbol when the core has it (it alone can honor
+ * a non-default use_obl/diffusion_mode); otherwise fall back to the
+ * plain symbol for an older enterprise core that predates OBL/Lévy-
+ * flight support, but only for default-args calls. This is pure
+ * control flow over which function pointer to call -- it performs no
+ * floating-point computation itself. */
+static int portfolio_multimodal_dispatch(sqlite3_context *ctx, FsqlState *st,
+                                         const PortfolioDecoded *pd,
+                                         const PortfolioMultimodalParams *p,
+                                         PortfolioMultimodalResult *r) {
+    char enterr[256];
+    if (fsql_enterprise_ensure(st, enterr, sizeof enterr) != 1) {
+        sqlite3_result_error(ctx, enterr, -1);
+        return 0;
+    }
+    if (st->ent.optimize_portfolio_multimodal_ex) {
+        r->rc = st->ent.optimize_portfolio_multimodal_ex(
+            pd->mu, pd->cov, (size_t)pd->n_assets, (size_t)pd->k,
+            p->n_restarts, p->overlap_thr, p->quality_frac, p->seed,
+            p->use_obl, p->diffusion_mode, r->weights, r->sharpes,
+            &r->n_found);
+        return 1;
+    }
+    if (p->use_obl || p->diffusion_mode != 0) {
+        sqlite3_result_error(ctx,
+            "fractalsql: use_obl/diffusion_mode not available in this "
+            "enterprise library (this enterprise core build predates "
+            "portfolio OBL/Levy-flight support -- upgrade enterprise_lib, "
+            "or omit use_obl/diffusion_mode)", -1);
+        return 0;
+    }
+    if (st->ent.optimize_portfolio_multimodal) {
+        r->rc = st->ent.optimize_portfolio_multimodal(
+            pd->mu, pd->cov, (size_t)pd->n_assets, (size_t)pd->k,
+            p->n_restarts, p->overlap_thr, p->quality_frac, p->seed,
+            r->weights, r->sharpes, &r->n_found);
+        return 1;
+    }
+    sqlite3_result_error(ctx,
+        "fractalsql: fractal_optimize_portfolio_multimodal not "
+        "available in this enterprise library (this enterprise core "
+        "build predates portfolio multimodal support -- upgrade "
+        "enterprise_lib)", -1);
+    return 0;
+}
+
 static void portfolio_multimodal_fn(sqlite3_context *ctx, int argc,
                                     sqlite3_value **argv) {
     FsqlState *st = sovereign_state(ctx);
     if (!st) return;
 
     char err[192];
-    double *mu = NULL, *cov = NULL;
-    int n_assets = 0, k = 0;
-    if (portfolio_decode(ctx, argv[0], argv[1], argv[2],
-                         &mu, &n_assets, &cov, &k) != 0)
+    PortfolioArgs args = { argv[0], argv[1], argv[2] };
+    PortfolioDecoded pd;
+    if (portfolio_decode(ctx, &args, &pd) != 0)
         return;
+    double *mu = pd.mu, *cov = pd.cov;
+    int n_assets = pd.n_assets, k = pd.k;
 
-    int n_restarts = opt_int(argc, argv, 3, 8);
-    double overlap_thr = opt_double(argc, argv, 4, 0.15);
-    double quality_frac = opt_double(argc, argv, 5, 0.90);
-    uint64_t seed = opt_seed(argc, argv, 6);
-    int use_obl = opt_bool(argc, argv, 7);
-    int diffusion_mode = opt_diffusion(argc, argv, 8, err, sizeof err);
-    if (diffusion_mode < 0) {
+    PortfolioMultimodalParams params;
+    params.n_restarts = opt_int(argc, argv, 3, 8);
+    params.overlap_thr = opt_double(argc, argv, 4, 0.15);
+    params.quality_frac = opt_double(argc, argv, 5, 0.90);
+    params.seed = opt_seed(argc, argv, 6);
+    params.use_obl = opt_bool(argc, argv, 7);
+    params.diffusion_mode = opt_diffusion(argc, argv, 8, err, sizeof err);
+    if (params.diffusion_mode < 0) {
         free(mu); free(cov);
         sqlite3_result_error(ctx, err, -1);
         return;
     }
-    if (n_restarts <= 0 || n_restarts > 64) {
+    if (params.n_restarts <= 0 || params.n_restarts > 64) {
         free(mu); free(cov);
         sqlite3_result_error(ctx,
             "fractalsql: n_restarts must satisfy 1 <= n_restarts <= 64", -1);
         return;
     }
+    int n_restarts = params.n_restarts;
 
     double *weights = (double *)malloc((size_t)n_restarts *
                                        (size_t)n_assets * sizeof(double));
@@ -727,57 +871,21 @@ static void portfolio_multimodal_fn(sqlite3_context *ctx, int argc,
         sqlite3_result_error_nomem(ctx);
         return;
     }
-    int n_found = 0;
-    /* Enterprise-gated. Prefer the extended (_ex) symbol when the core
-     * has it; if it doesn't, a non-default use_obl/diffusion_mode
-     * can't be honored (that specific error); otherwise fall back to
-     * the plain symbol, which still serves default-args calls against
-     * an older enterprise core that predates OBL/Lévy-flight support.
-     * Demanding _ex unconditionally (as this used to) rejected that
-     * older-core default-args case. */
-    char enterr[256];
-    if (fsql_enterprise_ensure(st, enterr, sizeof enterr) != 1) {
+    PortfolioMultimodalResult result = { weights, sharpes, 0, FSQL_OK };
+    if (!portfolio_multimodal_dispatch(ctx, st, &pd, &params, &result)) {
         free(mu); free(cov); free(weights); free(sharpes);
-        sqlite3_result_error(ctx, enterr, -1);
         return;
     }
-    int rc;
-    if (st->ent.optimize_portfolio_multimodal_ex) {
-        rc = st->ent.optimize_portfolio_multimodal_ex(
-            mu, cov, (size_t)n_assets, (size_t)k, n_restarts,
-            overlap_thr, quality_frac, seed, use_obl, diffusion_mode,
-            weights, sharpes, &n_found);
-    } else if (use_obl || diffusion_mode != 0) {
-        free(mu); free(cov); free(weights); free(sharpes);
-        sqlite3_result_error(ctx,
-            "fractalsql: use_obl/diffusion_mode not available in this "
-            "enterprise library (this enterprise core build predates "
-            "portfolio OBL/Levy-flight support -- upgrade enterprise_lib, "
-            "or omit use_obl/diffusion_mode)", -1);
-        return;
-    } else if (st->ent.optimize_portfolio_multimodal) {
-        rc = st->ent.optimize_portfolio_multimodal(
-            mu, cov, (size_t)n_assets, (size_t)k, n_restarts,
-            overlap_thr, quality_frac, seed,
-            weights, sharpes, &n_found);
-    } else {
-        free(mu); free(cov); free(weights); free(sharpes);
-        sqlite3_result_error(ctx,
-            "fractalsql: fractal_optimize_portfolio_multimodal not "
-            "available in this enterprise library (this enterprise core "
-            "build predates portfolio multimodal support -- upgrade "
-            "enterprise_lib)", -1);
-        return;
-    }
-    if (rc != FSQL_OK) {
+    if (result.rc != FSQL_OK) {
         char buf[160];
         snprintf(buf, sizeof buf,
                  "fractalsql: fractal_optimize_portfolio_multimodal rc=%d",
-                 rc);
+                 result.rc);
         free(mu); free(cov); free(weights); free(sharpes);
         sqlite3_result_error(ctx, buf, -1);
         return;
     }
+    int n_found = result.n_found;
 
     /* Clamp against the allocated buffers: the vendor contract
      * (fractalsql_sql.h) guarantees 1..n_restarts, but a version-
@@ -786,20 +894,21 @@ static void portfolio_multimodal_fn(sqlite3_context *ctx, int argc,
     if (n_found > n_restarts) n_found = n_restarts;
     if (n_found < 0)          n_found = 0;
 
-    portfolio_multimodal_audit_log_best_effort(st, mu, cov, n_assets, k,
-                                               n_restarts, seed, n_found,
+    PortfolioMultimodalAuditSpec aspec =
+        { n_assets, k, n_restarts, params.seed, n_found };
+    portfolio_multimodal_audit_log_best_effort(st, mu, cov, &aspec,
                                                sharpes, weights);
 
     SB out;
     memset(&out, 0, sizeof out);
     int bad = sb_append(&out, "{\"candidates\":[");
     for (int c = 0; c < n_found && !bad; c++) {
-        bad = sb_appendf(&out, "%s{\"sharpe\":%.10f,\"weights\":[",
+        bad = sb_appendf(&out, "%s{\"sharpe\":%.10f,\"weights\":",
                          c ? "," : "", sharpes[c]);
-        for (int i = 0; i < n_assets && !bad; i++)
-            bad = sb_appendf(&out, "%s%.10f", i ? "," : "",
-                             weights[(size_t)c * n_assets + i]);
-        if (!bad) bad = sb_append(&out, "]}");
+        if (!bad)
+            bad = sb_append_weight_array(
+                &out, weights + (size_t)c * n_assets, n_assets);
+        if (!bad) bad = sb_append(&out, "}");
     }
     if (!bad)
         bad = sb_appendf(&out, "],\"n_found\":%d}", n_found);
@@ -819,11 +928,12 @@ static void portfolio_pareto_fn(sqlite3_context *ctx, int argc,
     if (!st) return;
 
     char err[192];
-    double *mu = NULL, *cov = NULL;
-    int n_assets = 0, k = 0;
-    if (portfolio_decode(ctx, argv[0], argv[1], argv[2],
-                         &mu, &n_assets, &cov, &k) != 0)
+    PortfolioArgs args = { argv[0], argv[1], argv[2] };
+    PortfolioDecoded pd;
+    if (portfolio_decode(ctx, &args, &pd) != 0)
         return;
+    double *mu = pd.mu, *cov = pd.cov;
+    int n_assets = pd.n_assets, k = pd.k;
 
     int n_restarts = opt_int(argc, argv, 3, 8);
     int max_front = opt_int(argc, argv, 4, 8);
@@ -894,24 +1004,26 @@ static void portfolio_pareto_fn(sqlite3_context *ctx, int argc,
     if (n_found > max_front) n_found = max_front;
     if (n_found < 0)         n_found = 0;
 
+    PortfolioParetoAuditSpec aspec =
+        { n_assets, k, n_restarts, max_front, seed, n_found };
     portfolio_multimodal_pareto_audit_log_best_effort(
-        st, mu, cov, n_assets, k, n_restarts, max_front, seed, n_found,
-        returns, risks, weights);
+        st, mu, cov, &aspec, returns, risks, weights);
 
     SB out;
     memset(&out, 0, sizeof out);
     int bad = sb_append(&out, "{\"candidates\":[");
     for (int c = 0; c < n_found && !bad; c++) {
-        double ret = returns[c], risk = risks[c];
+        double ret = returns[c];
+        double risk = risks[c];
         bad = sb_appendf(&out,
                          "%s{\"return\":%.10f,\"risk\":%.10f,"
-                         "\"sharpe\":%.10f,\"weights\":[",
+                         "\"sharpe\":%.10f,\"weights\":",
                          c ? "," : "", ret, risk,
                          risk != 0.0 ? ret / risk : 0.0);
-        for (int i = 0; i < n_assets && !bad; i++)
-            bad = sb_appendf(&out, "%s%.10f", i ? "," : "",
-                             weights[(size_t)c * n_assets + i]);
-        if (!bad) bad = sb_append(&out, "]}");
+        if (!bad)
+            bad = sb_append_weight_array(
+                &out, weights + (size_t)c * n_assets, n_assets);
+        if (!bad) bad = sb_append(&out, "}");
     }
     if (!bad)
         bad = sb_appendf(&out, "],\"n_found\":%d}", n_found);
@@ -971,7 +1083,9 @@ static void vascular_fn(sqlite3_context *ctx, int argc,
         return;
     }
 
-    double mean_tortuosity = 0.0, branch_density = 0.0, fdim = 0.0;
+    double mean_tortuosity = 0.0;
+    double branch_density = 0.0;
+    double fdim = 0.0;
     int rc = fsql_vascular_network(node_coords, (size_t)(nc_n / 3),
                                    edges, arc, (size_t)(e_n / 2),
                                    &mean_tortuosity, &branch_density,
@@ -1026,7 +1140,9 @@ static void cortical_fn(sqlite3_context *ctx, int argc,
         return;
     }
 
-    double mesh_area = 0.0, hull_area = 0.0, gi = 0.0;
+    double mesh_area = 0.0;
+    double hull_area = 0.0;
+    double gi = 0.0;
     int rc = fsql_cortical_folding(vertices, (size_t)(v_n / 3),
                                    faces, (size_t)(f_n / 3),
                                    &mesh_area, &hull_area, &gi);
@@ -1085,7 +1201,9 @@ static void nerve_fn(sqlite3_context *ctx, int argc,
         return;
     }
 
-    double fld = 0.0, branch_density = 0.0, fdim = 0.0;
+    double fld = 0.0;
+    double branch_density = 0.0;
+    double fdim = 0.0;
     int rc = fsql_nerve_plexus_metric(node_coords, (size_t)(nc_n / dim),
                                       (size_t)dim, edges,
                                       (size_t)(e_n / 2),
@@ -1133,7 +1251,8 @@ static void morphology_fn(sqlite3_context *ctx, int argc,
         return;
     }
 
-    double dimension = 0.0, lacunarity = 0.0;
+    double dimension = 0.0;
+    double lacunarity = 0.0;
     int rc = fsql_morphological_complexity(points, (size_t)(p_n / dim),
                                            (size_t)dim, &dimension,
                                            &lacunarity);
@@ -1162,7 +1281,7 @@ static void morphology_fn(sqlite3_context *ctx, int argc,
 static void diversify_enable_fn(sqlite3_context *ctx, int argc,
                                 sqlite3_value **argv) {
     (void)argc; (void)argv;
-    FsqlState *st = sovereign_state(ctx);
+    const FsqlState *st = sovereign_state(ctx);
     if (!st) return;
     int rc = fsql_diversify_enable(st->ctx);
     if (rc != FSQL_OK) {
@@ -1179,7 +1298,7 @@ static void diversify_enable_fn(sqlite3_context *ctx, int argc,
 static void diversify_disable_fn(sqlite3_context *ctx, int argc,
                                  sqlite3_value **argv) {
     (void)argc; (void)argv;
-    FsqlState *st = sovereign_state(ctx);
+    const FsqlState *st = sovereign_state(ctx);
     if (!st) return;
     int rc = fsql_diversify_disable(st->ctx);
     if (rc != FSQL_OK) {
@@ -1246,7 +1365,7 @@ static double json_get_double(const char *s, const char *key, int *found) {
 static void diversify_set_params_fn(sqlite3_context *ctx, int argc,
                                     sqlite3_value **argv) {
     (void)argc;
-    FsqlState *st = sovereign_state(ctx);
+    const FsqlState *st = sovereign_state(ctx);
     if (!st) return;
 
     /* A NULL/absent params document changes nothing: every field left
@@ -1307,7 +1426,7 @@ static void diversify_set_params_fn(sqlite3_context *ctx, int argc,
 static void diversify_dq_fn(sqlite3_context *ctx, int argc,
                             sqlite3_value **argv) {
     (void)argc; (void)argv;
-    FsqlState *st = sovereign_state(ctx);
+    const FsqlState *st = sovereign_state(ctx);
     if (!st) return;
     double dq = fsql_diversify_current_dq(st->ctx);
     if (isnan(dq)) { sqlite3_result_null(ctx); return; }
@@ -1320,7 +1439,7 @@ static void diversify_dq_fn(sqlite3_context *ctx, int argc,
 static void diversify_overhead_fn(sqlite3_context *ctx, int argc,
                                   sqlite3_value **argv) {
     (void)argc; (void)argv;
-    FsqlState *st = sovereign_state(ctx);
+    const FsqlState *st = sovereign_state(ctx);
     if (!st) return;
     double us = fsql_diversify_overhead_p99_us(st->ctx);
     if (isnan(us)) { sqlite3_result_null(ctx); return; }
@@ -1352,7 +1471,7 @@ static int parse_engagement_kind(sqlite3_value *v, char *err,
  * 'negative'. dwell_ms: DEFAULT NULL -> 0. */
 static void feedback_report_fn(sqlite3_context *ctx, int argc,
                                sqlite3_value **argv) {
-    FsqlState *st = sovereign_state(ctx);
+    const FsqlState *st = sovereign_state(ctx);
     if (!st) return;
 
     char err[192];
@@ -1407,7 +1526,7 @@ static void feedback_report_fn(sqlite3_context *ctx, int argc,
 static void isolate_background_fn(sqlite3_context *ctx, int argc,
                                   sqlite3_value **argv) {
     (void)argc;
-    FsqlState *st = sovereign_state(ctx);
+    const FsqlState *st = sovereign_state(ctx);
     if (!st) return;
     if (sqlite3_value_type(argv[0]) == SQLITE_NULL) {
         sqlite3_result_null(ctx);
@@ -1583,8 +1702,12 @@ static void optimize_subset_fn(sqlite3_context *ctx, int argc,
                                sqlite3_value **argv) {
     if (any_arg_null(3, argv)) { sqlite3_result_null(ctx); return; }
 
-    double *item_values = NULL, *upper = NULL, *prev = NULL;
-    int n_items = 0, n_upper = 0, n_prev = 0;
+    double *item_values = NULL;
+    double *upper = NULL;
+    double *prev = NULL;
+    int n_items = 0;
+    int n_upper = 0;
+    int n_prev = 0;
     if (decode_series(argv[0], &item_values, &n_items) != 0 ||
         decode_series(argv[1], &upper, &n_upper) != 0) {
         free(item_values); free(upper);
@@ -1646,10 +1769,9 @@ static void optimize_subset_fn(sqlite3_context *ctx, int argc,
     }
 
     SB out; memset(&out, 0, sizeof out);
-    int bad = sb_appendf(&out, "{\"score\":%.10f,\"weights\":[", -score);
-    for (int i = 0; i < n_items && !bad; i++)
-        bad = sb_appendf(&out, "%s%.10f", i ? "," : "", weights[i]);
-    if (!bad) bad = sb_append(&out, "]}");
+    int bad = sb_appendf(&out, "{\"score\":%.10f,\"weights\":", -score);
+    if (!bad) bad = sb_append_weight_array(&out, weights, n_items);
+    if (!bad) bad = sb_append(&out, "}");
     free(item_values); free(upper); free(prev); free(weights);
     if (bad) { free(out.s); sqlite3_result_error_nomem(ctx); return; }
     sb_result(ctx, &out);
@@ -1776,8 +1898,11 @@ static void cycle_detect_fn(sqlite3_context *ctx, int argc,
         return;
     }
 
-    int found = 0, detected = 0;
-    size_t cycle_len = 0, at_index = 0, idx = 0;
+    int found = 0;
+    int detected = 0;
+    size_t cycle_len = 0;
+    size_t at_index = 0;
+    size_t idx = 0;
     int step_rc;
     while (!found && (step_rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         const char *hex_txt = (const char *)sqlite3_column_text(stmt, 0);
@@ -1926,13 +2051,13 @@ int fsql_sovereign_register(sqlite3 *db, FsqlState *st) {
     int rc;
 
     struct { const char *name; int narg; void *fn; } pure[] = {
-        { "fractal_dimension_dfa",             1, (void *)dim_dfa_fn       },
-        { "fractal_dimension_drift",           2, (void *)dim_drift_fn     },
-        { "fractal_dimension_boxcount",        2, (void *)dim_boxcount_fn  },
-        { "fractal_vascular_network",          3, (void *)vascular_fn      },
-        { "fractal_cortical_folding",          2, (void *)cortical_fn      },
-        { "fractal_nerve_plexus_metric",       3, (void *)nerve_fn         },
-        { "fractal_morphological_complexity",  2, (void *)morphology_fn    },
+        { "fractal_dimension_dfa",             1, (void *)&dim_dfa_fn       },
+        { "fractal_dimension_drift",           2, (void *)&dim_drift_fn     },
+        { "fractal_dimension_boxcount",        2, (void *)&dim_boxcount_fn  },
+        { "fractal_vascular_network",          3, (void *)&vascular_fn      },
+        { "fractal_cortical_folding",          2, (void *)&cortical_fn      },
+        { "fractal_nerve_plexus_metric",       3, (void *)&nerve_fn         },
+        { "fractal_morphological_complexity",  2, (void *)&morphology_fn    },
     };
     for (size_t i = 0; i < sizeof(pure) / sizeof(pure[0]); i++) {
         rc = reg_fn(db, pure[i].name, pure[i].narg, f_pure, st, pure[i].fn);
@@ -1948,19 +2073,19 @@ int fsql_sovereign_register(sqlite3 *db, FsqlState *st) {
 
     for (size_t i = 0; i < sizeof(portfolio_arities) / sizeof(int); i++) {
         rc = reg_fn(db, "fractal_optimize_portfolio", portfolio_arities[i],
-                    f_run, st, (void *)portfolio_fn);
+                    f_run, st, (void *)&portfolio_fn);
         if (rc != SQLITE_OK) return rc;
     }
     for (size_t i = 0; i < sizeof(multimodal_arities) / sizeof(int); i++) {
         rc = reg_fn(db, "fractal_optimize_portfolio_multimodal",
                     multimodal_arities[i], f_run, st,
-                    (void *)portfolio_multimodal_fn);
+                    (void *)&portfolio_multimodal_fn);
         if (rc != SQLITE_OK) return rc;
     }
     for (size_t i = 0; i < sizeof(pareto_arities) / sizeof(int); i++) {
         rc = reg_fn(db, "fractal_optimize_portfolio_multimodal_pareto",
                     pareto_arities[i], f_run, st,
-                    (void *)portfolio_pareto_fn);
+                    (void *)&portfolio_pareto_fn);
         if (rc != SQLITE_OK) return rc;
     }
 
@@ -1977,44 +2102,44 @@ int fsql_sovereign_register(sqlite3 *db, FsqlState *st) {
 
     for (size_t i = 0; i < sizeof(change_point_arities) / sizeof(int); i++) {
         rc = reg_fn(db, "fractal_change_point_detect", change_point_arities[i],
-                    f_pure, st, (void *)change_point_fn);
+                    f_pure, st, (void *)&change_point_fn);
         if (rc != SQLITE_OK) return rc;
     }
     for (size_t i = 0; i < sizeof(periodogram_arities) / sizeof(int); i++) {
         rc = reg_fn(db, "fractal_periodogram", periodogram_arities[i],
-                    f_pure, st, (void *)periodogram_fn);
+                    f_pure, st, (void *)&periodogram_fn);
         if (rc != SQLITE_OK) return rc;
     }
     for (size_t i = 0; i < sizeof(subset_arities) / sizeof(int); i++) {
         rc = reg_fn(db, "fractal_optimize_subset", subset_arities[i],
-                    f_pure, st, (void *)optimize_subset_fn);
+                    f_pure, st, (void *)&optimize_subset_fn);
         if (rc != SQLITE_OK) return rc;
     }
     for (size_t i = 0; i < sizeof(fingerprint_arities) / sizeof(int); i++) {
         rc = reg_fn(db, "fractal_state_fingerprint", fingerprint_arities[i],
-                    f_pure, st, (void *)state_fingerprint_fn);
+                    f_pure, st, (void *)&state_fingerprint_fn);
         if (rc != SQLITE_OK) return rc;
     }
     for (size_t i = 0; i < sizeof(cycle_detect_arities) / sizeof(int); i++) {
         rc = reg_fn(db, "fractal_cycle_detect", cycle_detect_arities[i],
-                    f_pure, st, (void *)cycle_detect_fn);
+                    f_pure, st, (void *)&cycle_detect_fn);
         if (rc != SQLITE_OK) return rc;
     }
     for (size_t i = 0; i < sizeof(tda_arities) / sizeof(int); i++) {
         rc = reg_fn(db, "fractal_tda_persistence_diagram", tda_arities[i],
-                    f_pure, st, (void *)tda_persistence_fn);
+                    f_pure, st, (void *)&tda_persistence_fn);
         if (rc != SQLITE_OK) return rc;
     }
 
     struct { const char *name; int narg; void *fn; } stateful[] = {
-        { "fractal_diversify_enable",           0, (void *)diversify_enable_fn    },
-        { "fractal_diversify_disable",          0, (void *)diversify_disable_fn   },
-        { "fractal_diversify_set_params",       1, (void *)diversify_set_params_fn},
-        { "fractal_diversify_current_dq",       0, (void *)diversify_dq_fn        },
-        { "fractal_diversify_overhead_p99_us",  0, (void *)diversify_overhead_fn  },
-        { "fractal_feedback_report",            2, (void *)feedback_report_fn     },
-        { "fractal_feedback_report",            3, (void *)feedback_report_fn     },
-        { "fractal_isolate_background",         1, (void *)isolate_background_fn  },
+        { "fractal_diversify_enable",           0, (void *)&diversify_enable_fn    },
+        { "fractal_diversify_disable",          0, (void *)&diversify_disable_fn   },
+        { "fractal_diversify_set_params",       1, (void *)&diversify_set_params_fn},
+        { "fractal_diversify_current_dq",       0, (void *)&diversify_dq_fn        },
+        { "fractal_diversify_overhead_p99_us",  0, (void *)&diversify_overhead_fn  },
+        { "fractal_feedback_report",            2, (void *)&feedback_report_fn     },
+        { "fractal_feedback_report",            3, (void *)&feedback_report_fn     },
+        { "fractal_isolate_background",         1, (void *)&isolate_background_fn  },
     };
     for (size_t i = 0; i < sizeof(stateful) / sizeof(stateful[0]); i++) {
         rc = reg_fn(db, stateful[i].name, stateful[i].narg, f_run, st,

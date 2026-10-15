@@ -109,7 +109,7 @@ jobs:
           zip_name="sqlite-amalgamation-${SQLITE_VERSION}.zip"
           url="https://www.sqlite.org/${SQLITE_YEAR}/${zip_name}"
           mkdir -p deps
-          curl -fsSL -o deps/sqlite.zip "$url"
+          curl -fsSL --proto '=https' -o deps/sqlite.zip "$url"
           unzip -q deps/sqlite.zip -d deps
           mv "deps/sqlite-amalgamation-${SQLITE_VERSION}" deps/sqlite
 
@@ -154,61 +154,36 @@ jobs:
 
   sanitizers:
     name: asan/ubsan (linux)
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
+    # Full default gate set (02-42) under ASan+UBSan via build_test.sh,
+    # which LD_PRELOADs libasan/libubsan into the unsanitized sqlite3
+    # CLI / python3 host. Replaces the earlier short Python smoke (gate
+    # 02 covers the same extension-load/edition/version/search checks).
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Install toolchain
         run: |
           sudo apt-get update
+          # libssl-dev: gate 37 (mcp_smoke) builds the MCP server
+          # via mcp/Makefile.
           sudo apt-get install -y --no-install-recommends \
-              build-essential sqlite3 libsqlite3-dev pkg-config
+              build-essential sqlite3 libsqlite3-dev pkg-config libssl-dev
 
-      - name: Build with sanitizers
+      - name: SQLite amalgamation headers
         run: |
-          make clean || true
-          make CFLAGS="-std=c11 -O1 -g -fPIC -fsanitize=address,undefined -fno-omit-frame-pointer -Wall -Wextra -I/usr/include -Iinclude -Isrc"
+          zip_name="sqlite-amalgamation-${SQLITE_VERSION}.zip"
+          url="https://www.sqlite.org/${SQLITE_YEAR}/${zip_name}"
+          mkdir -p deps
+          curl -fsSL --proto '=https' -o deps/sqlite.zip "$url"
+          unzip -q deps/sqlite.zip -d deps
+          mv "deps/sqlite-amalgamation-${SQLITE_VERSION}" deps/sqlite
 
-      - name: Smoke under sanitizers
+      - name: build_test.sh --asan --ubsan
         run: |
-          # Load the sanitized extension; SQLite's own test harness for
-          # loadable extensions exercises the C paths the pytest suite
-          # drives. Exit code + stderr are the gate.
-          #
-          # The extension is asan/ubsan-instrumented; the python3 that
-          # loads it is not. The Makefile's LDFLAGS deliberately omit
-          # -fsanitize, so the sanitizer runtimes are not dependencies
-          # of the .so — its __asan_* / __ubsan_* calls resolve against
-          # the loading process, which must therefore have them
-          # preloaded first (libasan first: ASan insists on being the
-          # first-loaded runtime). Without this, dlopen fails and
-          # SQLite's append-".so" retry masks the real error as
-          # "./fractalsql.so.so: cannot open shared object file".
-          export LD_PRELOAD="$(gcc -print-file-name=libasan.so):$(gcc -print-file-name=libubsan.so)"
-          # Preloading libasan also arms LeakSanitizer for the whole
-          # process, and the unsanitized host (CPython) reports its own
-          # benign shutdown allocations (e.g. the _datetime module's
-          # init-time dicts) at exit — interpreter noise that drowns
-          # any signal from the extension. This job gates on memory
-          # ERRORS and UB under the extension's code paths, so leak
-          # detection stays off here; it runs where the host itself is
-          # instrumented.
-          export ASAN_OPTIONS=detect_leaks=0
-          python3 - <<'EOF'
-          import sqlite3
-          conn = sqlite3.connect(":memory:")
-          conn.enable_load_extension(True)
-          conn.load_extension("./fractalsql.so")
-          conn.enable_load_extension(False)
-          cur = conn.cursor()
-          assert cur.execute("SELECT fractalsql_edition()").fetchone()[0] == "Community"
-          assert cur.execute("SELECT fractalsql_version()").fetchone()[0] == "2.0.7"
-          d = cur.execute("SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0')").fetchone()[0]
-          assert abs(d) < 1e-6
-          print("asan/ubsan smoke OK")
-          EOF
+          chmod +x build_test.sh
+          ./build_test.sh --asan --ubsan
 
   # windows-asan / windows-ubsan / darwin-asan / darwin-ubsan / linux-tsan:
   # weekly/workflow_dispatch-only cadence, same basic-sanity scope as the
@@ -223,7 +198,7 @@ jobs:
   # existing one.
   windows-asan:
     name: build_test.ps1 -Asan (Windows)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
     runs-on: windows-2022
     timeout-minutes: 30
     steps:
@@ -237,6 +212,20 @@ jobs:
       - name: Install sqlite3 CLI
         shell: pwsh
         run: choco install sqlite --no-progress
+
+      - name: SQLite amalgamation headers (Windows)
+        shell: pwsh
+        run: |
+          # Same as the windows gates job: gate 01 needs sqlite3ext.h
+          # from FSQL_SQLITE_DIR, and a runner has no vendored copy.
+          $zipName = "sqlite-amalgamation-${env:SQLITE_VERSION}.zip"
+          $url     = "https://www.sqlite.org/${env:SQLITE_YEAR}/$zipName"
+          New-Item -ItemType Directory -Force -Path deps | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile "deps\sqlite.zip"
+          Expand-Archive -Path "deps\sqlite.zip" -DestinationPath deps -Force
+          Rename-Item -Path "deps\sqlite-amalgamation-${env:SQLITE_VERSION}" `
+                      -NewName "sqlite"
+          Add-Content -Path $env:GITHUB_ENV -Value "FSQL_SQLITE_DIR=$PWD\deps\sqlite"
 
       - name: build_test.ps1 -Asan
         shell: pwsh
@@ -246,7 +235,7 @@ jobs:
 
   windows-ubsan:
     name: build_test.ps1 -Ubsan (Windows)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
     runs-on: windows-2022
     timeout-minutes: 30
     steps:
@@ -261,6 +250,20 @@ jobs:
         shell: pwsh
         run: choco install sqlite --no-progress
 
+      - name: SQLite amalgamation headers (Windows)
+        shell: pwsh
+        run: |
+          # Same as the windows gates job: gate 01 needs sqlite3ext.h
+          # from FSQL_SQLITE_DIR, and a runner has no vendored copy.
+          $zipName = "sqlite-amalgamation-${env:SQLITE_VERSION}.zip"
+          $url     = "https://www.sqlite.org/${env:SQLITE_YEAR}/$zipName"
+          New-Item -ItemType Directory -Force -Path deps | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile "deps\sqlite.zip"
+          Expand-Archive -Path "deps\sqlite.zip" -DestinationPath deps -Force
+          Rename-Item -Path "deps\sqlite-amalgamation-${env:SQLITE_VERSION}" `
+                      -NewName "sqlite"
+          Add-Content -Path $env:GITHUB_ENV -Value "FSQL_SQLITE_DIR=$PWD\deps\sqlite"
+
       - name: build_test.ps1 -Ubsan
         shell: pwsh
         run: |
@@ -269,14 +272,29 @@ jobs:
 
   darwin-asan:
     name: build_test.sh --asan (macOS)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
     runs-on: macos-14
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Install toolchain
-        run: brew install sqlite pkg-config
+        run: |
+          # openssl@3: gate 37 (mcp_smoke) builds the MCP server.
+          brew install sqlite pkg-config openssl@3
+          # Non-system sqlite3 first on PATH: Apple's /usr/bin/sqlite3
+          # has no extension loading, and SIP would strip the sanitizer
+          # runtime's DYLD_INSERT_LIBRARIES from it anyway.
+          echo "$(brew --prefix sqlite)/bin" >> "$GITHUB_PATH"
+
+      - name: SQLite amalgamation headers
+        run: |
+          zip_name="sqlite-amalgamation-${SQLITE_VERSION}.zip"
+          url="https://www.sqlite.org/${SQLITE_YEAR}/${zip_name}"
+          mkdir -p deps
+          curl -fsSL --proto '=https' -o deps/sqlite.zip "$url"
+          unzip -q deps/sqlite.zip -d deps
+          mv "deps/sqlite-amalgamation-${SQLITE_VERSION}" deps/sqlite
 
       - name: build_test.sh --asan
         run: |
@@ -285,14 +303,29 @@ jobs:
 
   darwin-ubsan:
     name: build_test.sh --ubsan (macOS)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
     runs-on: macos-14
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Install toolchain
-        run: brew install sqlite pkg-config
+        run: |
+          # openssl@3: gate 37 (mcp_smoke) builds the MCP server.
+          brew install sqlite pkg-config openssl@3
+          # Non-system sqlite3 first on PATH: Apple's /usr/bin/sqlite3
+          # has no extension loading, and SIP would strip the sanitizer
+          # runtime's DYLD_INSERT_LIBRARIES from it anyway.
+          echo "$(brew --prefix sqlite)/bin" >> "$GITHUB_PATH"
+
+      - name: SQLite amalgamation headers
+        run: |
+          zip_name="sqlite-amalgamation-${SQLITE_VERSION}.zip"
+          url="https://www.sqlite.org/${SQLITE_YEAR}/${zip_name}"
+          mkdir -p deps
+          curl -fsSL --proto '=https' -o deps/sqlite.zip "$url"
+          unzip -q deps/sqlite.zip -d deps
+          mv "deps/sqlite-amalgamation-${SQLITE_VERSION}" deps/sqlite
 
       - name: build_test.sh --ubsan
         run: |
@@ -301,7 +334,7 @@ jobs:
 
   linux-tsan:
     name: build_test.sh --tsan (linux)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     # TSan support (tests/tsan_ledger_runner.c, gate 33
@@ -329,7 +362,7 @@ jobs:
           zip_name="sqlite-amalgamation-${SQLITE_VERSION}.zip"
           url="https://www.sqlite.org/${SQLITE_YEAR}/${zip_name}"
           mkdir -p deps
-          curl -fsSL -o deps/sqlite.zip "$url"
+          curl -fsSL --proto '=https' -o deps/sqlite.zip "$url"
           unzip -q deps/sqlite.zip -d deps
           mv "deps/sqlite-amalgamation-${SQLITE_VERSION}" deps/sqlite
 
@@ -349,7 +382,7 @@ jobs:
   # lcov pipeline is proven.
   coverage:
     name: coverage (lcov)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -372,7 +405,7 @@ jobs:
           zip_name="sqlite-amalgamation-${SQLITE_VERSION}.zip"
           url="https://www.sqlite.org/${SQLITE_YEAR}/${zip_name}"
           mkdir -p deps
-          curl -fsSL -o deps/sqlite.zip "$url"
+          curl -fsSL --proto '=https' -o deps/sqlite.zip "$url"
           unzip -q deps/sqlite.zip -d deps
           mv "deps/sqlite-amalgamation-${SQLITE_VERSION}" deps/sqlite
 
@@ -380,6 +413,10 @@ jobs:
         run: |
           chmod +x build_test.sh
           ./build_test.sh --coverage
+
+      - name: Show lcov log (failure diagnostics)
+        if: failure()
+        run: cat /tmp/fractalsql_bt_lcov.log || true
 
       - name: Upload coverage report
         if: always()

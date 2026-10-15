@@ -14,6 +14,7 @@ Usage: python3 call-tool.py <server-cmd...> -- <tool-name> [json-args]
 """
 
 import json
+import shutil
 import subprocess
 import sys
 
@@ -29,8 +30,23 @@ def main() -> int:  # noqa: ANN201
         return 2
     sep = argv.index("--")
     server_cmd, tool_name = argv[:sep], argv[sep + 1:]
+    if not server_cmd or not tool_name:
+        print("usage: call-tool.py <server-cmd...> -- <tool-name> [json-args]",
+              file=sys.stderr)
+        return 2
     args = json.loads(sys.argv[-1]) if len(tool_name) > 1 else {}
     tool_name = tool_name[0]
+
+    # Command-injection guard: server_cmd[0] is raw CLI text about to be
+    # executed, so require it to resolve to a real, executable file before
+    # Popen (and hand Popen the resolved absolute path, unchanged behavior
+    # with a guaranteed-resolvable argv[0]).
+    server_exe = shutil.which(server_cmd[0])
+    if server_exe is None:
+        print(f"call-tool.py: server command not found or not executable: "
+              f"{server_cmd[0]}", file=sys.stderr)
+        return 2
+    server_cmd = [server_exe] + server_cmd[1:]
 
     proc = subprocess.Popen(server_cmd, stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, text=True)

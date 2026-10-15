@@ -123,7 +123,7 @@ namespace fsqlmcp::vectors
 
     std::string blobToHex( const std::uint8_t* data, std::size_t len )
     {
-        static const char* kHex = "0123456789abcdef";
+        static const char* const kHex = "0123456789abcdef";
         std::string out;
         out.reserve( len * 2 );
         for( std::size_t i = 0; i < len; ++i )

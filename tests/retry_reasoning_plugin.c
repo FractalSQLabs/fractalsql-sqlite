@@ -28,7 +28,7 @@
 #include <string.h>
 
 #ifdef _WIN32
-#include <windows.h>
+#include <Windows.h>
 #endif
 
 #define RETRY_PROMPT_FILE "/tmp/fractalsql_bt_retry_prompt.txt"
@@ -67,7 +67,7 @@ retry_format(void *u, const char *q, size_t ql, const char *c, size_t cl,
 static void
 retry_free(void *opaque)
 {
-    fsql_ai_response_t *r = (fsql_ai_response_t *) opaque;
+    const fsql_ai_response_t *r = (const fsql_ai_response_t *) opaque;
     if (r != NULL && r->summary != NULL)
         free(r->summary);
 }

@@ -28,6 +28,8 @@ Usage:
     python3 bench/vector_type_head_to_head.py --db bench/fractalsql_bench.db
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -172,7 +174,23 @@ def main() -> int:
                          "(default: %(default)s)")
     args = ap.parse_args()
 
-    conn = sqlite3.connect(args.db)
+    # --db arrives as raw CLI text and feeds the connection string, so
+    # pin it to the current working directory (symlinks resolved via
+    # realpath) before opening it. A traversal-style argument can then
+    # neither redirect what file is read nor what the connection
+    # actually opens.
+    root = os.path.realpath(os.getcwd())
+    db = os.path.realpath(args.db)
+    try:
+        contained = os.path.commonpath([root, db]) == root
+    except ValueError:  # different drives on Windows
+        contained = False
+    if not contained:
+        print(f"vector_type_head_to_head.py: --db must resolve inside "
+              f"{root} (got: {args.db})", file=sys.stderr)
+        return 2
+
+    conn = sqlite3.connect(db)
     conn.isolation_level = None  # manual BEGIN/COMMIT control below
     conn.enable_load_extension(True)
     conn.load_extension(os.path.abspath(args.ext))

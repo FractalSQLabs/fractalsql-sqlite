@@ -81,7 +81,7 @@
 #include <string.h>
 
 #ifdef _WIN32
-#include <windows.h>
+#include <Windows.h>
 #else
 #define _POSIX_C_SOURCE 200809L
 #include <dlfcn.h>
@@ -204,36 +204,13 @@ static ent_sig_result_t ent_check_signature(const char *lib_path) {
  * ensure: 1 = enterprise surface live, 0 = not (reason in err).
  * ------------------------------------------------------------------- */
 
-int fsql_enterprise_ensure(FsqlState *st, char *err, size_t err_cap) {
-    if (!st) {
-        if (err) snprintf(err, err_cap,
-            "fractalsql: extension not initialized");
-        return 0;
-    }
-    if (st->ent_loaded) return 1;
-    if (st->ent_attempted) {
-        if (err) snprintf(err, err_cap,
-            "fractalsql: enterprise tier not loaded (an earlier attempt "
-            "failed -- set enterprise_lib and reopen the connection)");
-        return 0;
-    }
-    st->ent_attempted = 1;
-
-    /* Effective signature policy (see the header comment): mandatory
-     * unless the operator opted out via the environment. The SQL key
-     * can raise the bar, never lower it below the env-decided default. */
-    int require = st->cfg.enterprise_require_signature;
-    const char *allow_unverified = getenv("FSQL_ENTERPRISE_ALLOW_UNVERIFIED");
-    if (!allow_unverified || !allow_unverified[0]) require = 1;
-
-    const char *lib = st->cfg.enterprise_lib;
-    if (!lib || !lib[0]) {
-        if (err) snprintf(err, err_cap,
-            "fractalsql: enterprise tier not loaded (install FractalSQL "
-            "Enterprise and set enterprise_lib to its path)");
-        return 0;
-    }
-
+/* Applies the signature-acceptance rule BEFORE the load (nothing is
+ * mapped yet, so refusals need no cleanup). Returns 1 = proceed to
+ * the dlopen attempt, 0 = refused (err filled): a present-but-wrong
+ * .sig is always fatal; a missing or unreadable-library verification
+ * fails closed in mandatory mode. */
+static int ent_signature_gate(const char *lib, int require,
+                              char *err, size_t err_cap) {
     ent_sig_result_t sig = ent_check_signature(lib);
     if (sig == ENT_SIG_INVALID) {
         /* A present-but-wrong .sig is always fatal, regardless of
@@ -258,7 +235,7 @@ int fsql_enterprise_ensure(FsqlState *st, char *err, size_t err_cap) {
         /* Mandatory mode fails closed: if the library's bytes cannot
          * even be read for verification, it does not load. (In
          * operator-opted-out mode this stays permissive, falling
-         * through to the dlopen attempt below, which fails cleanly on
+         * through to the dlopen attempt, which fails cleanly on
          * a genuinely unreadable/absent file.) */
         if (err) snprintf(err, err_cap,
             "fractalsql: could not read enterprise library for "
@@ -266,44 +243,52 @@ int fsql_enterprise_ensure(FsqlState *st, char *err, size_t err_cap) {
         return 0;
     }
     /* ENT_SIG_OK, ENT_SIG_MISSING+require=off, and ENT_SIG_IOERROR
-     * (operator opt-out only) all proceed to the dlopen attempt below,
-     * which will itself fail cleanly if the library file is genuinely
+     * (operator opt-out only) all proceed to the dlopen attempt, which
+     * will itself fail cleanly if the library file is genuinely
      * unreadable/absent. */
+    return 1;
+}
 
-    void *h = ent_dlopen(lib);
-    if (!h) {
+/* Re-verify the on-disk bytes AFTER the load (TOCTOU narrowing) and
+ * apply the same acceptance rule. Returns 1 = use the handle, 0 =
+ * refused (err filled; the freshly mapped handle is discarded unused
+ * and the enterprise surface stays zeroed). */
+static int ent_verify_after_load(FsqlState *st, const char *lib,
+                                 int require, void *h,
+                                 char *err, size_t err_cap) {
+    /* The bytes verified above and the image the loader just mapped
+     * are bound together only by the pathname, so a writer with access
+     * to the library's directory can swap the file between
+     * verification and load. Re-verify the on-disk bytes now that the
+     * load has happened: a swap is caught here and the handle is
+     * discarded unused. Residual risk, documented rather than hidden:
+     * constructors of a swapped-in file still ran at load time --
+     * closing that needs an exclusive-open handoff to the loader,
+     * which has no portable dlopen/LoadLibrary form. */
+    ent_sig_result_t sig2 = ent_check_signature(lib);
+    int ok2 = (sig2 == ENT_SIG_OK) ||
+              (sig2 == ENT_SIG_MISSING && !require) ||
+              (sig2 == ENT_SIG_IOERROR && !require);
+    if (!ok2) {
         if (err) snprintf(err, err_cap,
-            "fractalsql: could not load enterprise library");
+            "fractalsql: enterprise library changed between "
+            "signature verification and load -- refusing to use it "
+            "(the file was swapped or modified; retry with a "
+            "stable library file)");
+        ent_dlclose_failed(h);
+        memset(&st->ent, 0, sizeof st->ent);
         return 0;
     }
+    return 1;
+}
 
-    /* TOCTOU narrowing: the bytes verified above and the image the
-     * loader just mapped are bound together only by the pathname, so a
-     * writer with access to the library's directory can swap the file
-     * between verification and load. Re-verify the on-disk bytes now
-     * that the load has happened and apply the same acceptance rule:
-     * a swap is caught here and the handle is discarded unused.
-     * Residual risk, documented rather than hidden: constructors of a
-     * swapped-in file still ran at load time -- closing that needs an
-     * exclusive-open handoff to the loader, which has no portable
-     * dlopen/LoadLibrary form. */
-    {
-        ent_sig_result_t sig2 = ent_check_signature(lib);
-        int ok2 = (sig2 == ENT_SIG_OK) ||
-                  (sig2 == ENT_SIG_MISSING && !require) ||
-                  (sig2 == ENT_SIG_IOERROR && !require);
-        if (!ok2) {
-            if (err) snprintf(err, err_cap,
-                "fractalsql: enterprise library changed between "
-                "signature verification and load -- refusing to use it "
-                "(the file was swapped or modified; retry with a "
-                "stable library file)");
-            ent_dlclose_failed(h);
-            memset(&st->ent, 0, sizeof st->ent);
-            return 0;
-        }
-    }
-
+/* Resolves the required ledger/audit symbols (hard failure on any
+ * missing one) and the optional multimodal portfolio symbols
+ * (tolerant-absence convention; call sites check for NULL and report
+ * the upgrade hint). Returns 1 = live, 0 = refused (err filled, the
+ * handle closed, the enterprise surface zeroed). */
+static int ent_resolve_symbols(FsqlState *st, void *h,
+                               char *err, size_t err_cap) {
     memset(&st->ent, 0, sizeof st->ent);
     st->ent.ledger_flush = (fsql_ent_ledger_fn)ent_dlsym(h, "fsql_ledger_flush");
     st->ent.ledger_load = (fsql_ent_ledger_fn)ent_dlsym(h, "fsql_ledger_load");
@@ -335,6 +320,54 @@ int fsql_enterprise_ensure(FsqlState *st, char *err, size_t err_cap) {
         (fsql_ent_portfolio_pareto_fn)ent_dlsym(h, "fsql_optimize_portfolio_multimodal_pareto");
     st->ent.optimize_portfolio_multimodal_ex =
         (fsql_ent_portfolio_mm_ex_fn)ent_dlsym(h, "fsql_optimize_portfolio_multimodal_ex");
+    return 1;
+}
+
+/* Effective signature policy (see the header comment): mandatory
+ * unless the operator opted out via the environment. The SQL key
+ * can raise the bar, never lower it below the env-decided default. */
+static int ent_effective_require(const FsqlState *st) {
+    int require = st->cfg.enterprise_require_signature;
+    const char *allow_unverified = getenv("FSQL_ENTERPRISE_ALLOW_UNVERIFIED");
+    if (!allow_unverified || !allow_unverified[0]) require = 1;
+    return require;
+}
+
+int fsql_enterprise_ensure(FsqlState *st, char *err, size_t err_cap) {
+    if (!st) {
+        if (err) snprintf(err, err_cap,
+            "fractalsql: extension not initialized");
+        return 0;
+    }
+    if (st->ent_loaded) return 1;
+    if (st->ent_attempted) {
+        if (err) snprintf(err, err_cap,
+            "fractalsql: enterprise tier not loaded (an earlier attempt "
+            "failed -- set enterprise_lib and reopen the connection)");
+        return 0;
+    }
+    st->ent_attempted = 1;
+    int require = ent_effective_require(st);
+
+    const char *lib = st->cfg.enterprise_lib;
+    if (!lib || !lib[0]) {
+        if (err) snprintf(err, err_cap,
+            "fractalsql: enterprise tier not loaded (install FractalSQL "
+            "Enterprise and set enterprise_lib to its path)");
+        return 0;
+    }
+
+    if (!ent_signature_gate(lib, require, err, err_cap)) return 0;
+
+    void *h = ent_dlopen(lib);
+    if (!h) {
+        if (err) snprintf(err, err_cap,
+            "fractalsql: could not load enterprise library");
+        return 0;
+    }
+
+    if (!ent_verify_after_load(st, lib, require, h, err, err_cap)) return 0;
+    if (!ent_resolve_symbols(st, h, err, err_cap)) return 0;
 
     st->ent_handle = h;
     st->ent_loaded = 1;

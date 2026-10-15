@@ -118,7 +118,7 @@ clang -std=c11 -O3 -fPIC \
     "${CORE_A}" \
     -lm
 
-test -f fractalsql.dylib || { echo "build did not produce fractalsql.dylib" >&2; exit 1; }
+[[ -f fractalsql.dylib ]] || { echo "build did not produce fractalsql.dylib" >&2; exit 1; }
 # Assert the output really is ${ARCH} — the -arch flag above is what
 # makes this true, and a silent host-arch fallback would otherwise only
 # surface as undefined symbols (or, for the native leg, not at all).

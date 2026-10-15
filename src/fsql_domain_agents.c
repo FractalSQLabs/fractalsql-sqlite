@@ -87,7 +87,6 @@
 #endif
 
 #include <sqlite3ext.h>
-SQLITE_EXTENSION_INIT3
 
 #include <inttypes.h>
 #include <math.h>
@@ -99,6 +98,8 @@ SQLITE_EXTENSION_INIT3
 
 #include "fsql_sqlite_internal.h"
 #include "fsql_vector.h"
+
+SQLITE_EXTENSION_INIT3
 
 /* ------------------------------------------------------------------ */
 /* Error + string-buffer helpers (same pattern as fsql_agents.c's own,  */
@@ -112,6 +113,20 @@ static void da_set_err(char *err, size_t err_cap, const char *fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(err, err_cap, fmt, ap);
     va_end(ap);
+}
+
+/* Reports the db's current error text, adding the "fractalsql: "
+ * prefix unless it's already there -- every sqlite3_result_error()
+ * call in this codebase carries that prefix on its own, so a failing
+ * statement that was itself one of our own functions reporting an
+ * error would otherwise come back doubled ("fractalsql: fractalsql:
+ * ..."). */
+static void da_set_sqlite_err(char *err, size_t err_cap, sqlite3 *db) {
+    const char *msg = sqlite3_errmsg(db);
+    if (msg && strncmp(msg, "fractalsql: ", 12) == 0)
+        da_set_err(err, err_cap, "%s", msg);
+    else
+        da_set_err(err, err_cap, "fractalsql: %s", msg);
 }
 
 static void da_result_err(sqlite3_context *ctx, const char *err) {
@@ -135,7 +150,7 @@ static int sb_reserve(StrBuf *b, size_t need) {
     if (b->oom) return -1;
     if (b->len + need + 1 <= b->cap) return 0;
     size_t nc = b->cap ? b->cap : 256;
-    while (nc < b->len + need + 1) nc *= 2;
+    for (; nc < b->len + need + 1; nc *= 2);
     char *nb = (char *)realloc(b->buf, nc);
     if (!nb) { b->oom = 1; return -1; }
     b->buf = nb; b->cap = nc;
@@ -149,7 +164,8 @@ static void sb_putn(StrBuf *b, const char *s, size_t n) {
 }
 static void sb_puts(StrBuf *b, const char *s) { sb_putn(b, s, strlen(s)); }
 static void sb_printf(StrBuf *b, const char *fmt, ...) {
-    va_list ap, ap2;
+    va_list ap;
+    va_list ap2;
     va_start(ap, fmt);
     va_copy(ap2, ap);
     int need = vsnprintf(NULL, 0, fmt, ap);
@@ -335,7 +351,7 @@ static char *da_vec_json(const double *v, int n) {
 /* Reasoning (Cognition step): direct call, no SQL re-entry            */
 /* ------------------------------------------------------------------ */
 
-static int da_require_reasoning(FsqlState *st, const char *who,
+static int da_require_reasoning(const FsqlState *st, const char *who,
                                 char *err, size_t err_cap) {
     if (!st || !st->ctx) {
         da_set_err(err, err_cap, "fractalsql: extension not initialized");
@@ -385,7 +401,7 @@ static char *da_reason(FsqlState *st, const char *who, const char *prompt,
 
 /* SELECT 1 FROM "table" LIMIT 1: returns 1 (has rows), 0 (empty), or
  * -1 on a real error (err filled). */
-static int da_table_has_rows(FsqlState *st, const char *table,
+static int da_table_has_rows(const FsqlState *st, const char *table,
                              char *err, size_t err_cap) {
     StrBuf sql; sb_init(&sql);
     sb_puts(&sql, "SELECT 1 FROM ");
@@ -400,7 +416,7 @@ static int da_table_has_rows(FsqlState *st, const char *table,
     int rc = sqlite3_prepare_v2(st->db, sql.buf, -1, &stmt, NULL);
     sb_free(&sql);
     if (rc != SQLITE_OK) {
-        da_set_err(err, err_cap, "fractalsql: %s", sqlite3_errmsg(st->db));
+        da_set_sqlite_err(err, err_cap, st->db);
         return -1;
     }
     rc = sqlite3_step(stmt);
@@ -414,7 +430,7 @@ static int da_table_has_rows(FsqlState *st, const char *table,
  * copy of the id (caller frees), or NULL (not found, not an error;
  * the caller COALESCEs). A real error (bad SQL, OOM) also returns
  * NULL but fills err; the caller distinguishes by checking err[0]. */
-static char *da_resolve_id(FsqlState *st, const char *table, const char *id_col,
+static char *da_resolve_id(const FsqlState *st, const char *table, const char *id_col,
                            int64_t doc_id, char *err, size_t err_cap) {
     StrBuf sql; sb_init(&sql);
     sb_puts(&sql, "SELECT ");
@@ -433,7 +449,7 @@ static char *da_resolve_id(FsqlState *st, const char *table, const char *id_col,
     int rc = sqlite3_prepare_v2(st->db, sql.buf, -1, &stmt, NULL);
     sb_free(&sql);
     if (rc != SQLITE_OK) {
-        da_set_err(err, err_cap, "fractalsql: %s", sqlite3_errmsg(st->db));
+        da_set_sqlite_err(err, err_cap, st->db);
         return NULL;
     }
     sqlite3_bind_int64(stmt, 1, (sqlite3_int64)doc_id);
@@ -443,7 +459,7 @@ static char *da_resolve_id(FsqlState *st, const char *table, const char *id_col,
         const unsigned char *t = sqlite3_column_text(stmt, 0);
         if (t) out = strdup((const char *)t);
     } else if (rc != SQLITE_DONE) {
-        da_set_err(err, err_cap, "fractalsql: %s", sqlite3_errmsg(st->db));
+        da_set_sqlite_err(err, err_cap, st->db);
     }
     sqlite3_finalize(stmt);
     return out;
@@ -455,7 +471,7 @@ static char *da_resolve_id(FsqlState *st, const char *table, const char *id_col,
  * No scan-position mapping is needed: the rowid IS the locator. Same
  * contract as da_resolve_id (NULL = not found, distinguish real errors
  * by err[0]). */
-static char *da_resolve_rowid(FsqlState *st, const char *table,
+static char *da_resolve_rowid(const FsqlState *st, const char *table,
                               const char *id_col, int64_t rowid,
                               char *err, size_t err_cap) {
     StrBuf sql; sb_init(&sql);
@@ -473,7 +489,7 @@ static char *da_resolve_rowid(FsqlState *st, const char *table,
     int rc = sqlite3_prepare_v2(st->db, sql.buf, -1, &stmt, NULL);
     sb_free(&sql);
     if (rc != SQLITE_OK) {
-        da_set_err(err, err_cap, "fractalsql: %s", sqlite3_errmsg(st->db));
+        da_set_sqlite_err(err, err_cap, st->db);
         return NULL;
     }
     sqlite3_bind_int64(stmt, 1, (sqlite3_int64)rowid);
@@ -483,7 +499,7 @@ static char *da_resolve_rowid(FsqlState *st, const char *table,
         const unsigned char *t = sqlite3_column_text(stmt, 0);
         if (t) out = strdup((const char *)t);
     } else if (rc != SQLITE_DONE) {
-        da_set_err(err, err_cap, "fractalsql: %s", sqlite3_errmsg(st->db));
+        da_set_sqlite_err(err, err_cap, st->db);
     }
     sqlite3_finalize(stmt);
     return out;
@@ -501,7 +517,7 @@ static char *da_resolve_rowid(FsqlState *st, const char *table,
  * *out_dist set (or *out_doc_id = -1 if the primitive returned an
  * empty array, not an error), or -1 with err filled on a real
  * error. */
-static int da_nearest1(FsqlState *st, const char *fn_sql,
+static int da_nearest1(const FsqlState *st, const char *fn_sql,
                        void (*bind_extra)(sqlite3_stmt *, void *),
                        void *bind_ctx,
                        const char *res_field,
@@ -522,14 +538,14 @@ static int da_nearest1(FsqlState *st, const char *fn_sql,
     int rc = sqlite3_prepare_v2(st->db, sql.buf, -1, &stmt, NULL);
     sb_free(&sql);
     if (rc != SQLITE_OK) {
-        da_set_err(err, err_cap, "fractalsql: %s", sqlite3_errmsg(st->db));
+        da_set_sqlite_err(err, err_cap, st->db);
         return -1;
     }
     if (bind_extra) bind_extra(stmt, bind_ctx);
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_ROW) {
         sqlite3_finalize(stmt);
-        da_set_err(err, err_cap, "fractalsql: %s", sqlite3_errmsg(st->db));
+        da_set_sqlite_err(err, err_cap, st->db);
         return -1;
     }
     if (sqlite3_column_type(stmt, 0) == SQLITE_NULL) {
@@ -549,7 +565,7 @@ static int da_nearest1(FsqlState *st, const char *fn_sql,
  * a malloc'd JSON-array TEXT ("[0,1,4,...]", caller frees) or NULL
  * (empty match, not an error) or NULL with err filled on a real
  * error (caller distinguishes via err[0]). */
-static char *da_build_cohort(FsqlState *st, const char *table,
+static char *da_build_cohort(const FsqlState *st, const char *table,
                              const char *filter_col, const char *filter_val,
                              char *err, size_t err_cap) {
     /* The cohort holds the rows' real rowids -- the same physical row
@@ -578,7 +594,7 @@ static char *da_build_cohort(FsqlState *st, const char *table,
     int rc = sqlite3_prepare_v2(st->db, sql.buf, -1, &stmt, NULL);
     sb_free(&sql);
     if (rc != SQLITE_OK) {
-        da_set_err(err, err_cap, "fractalsql: %s", sqlite3_errmsg(st->db));
+        da_set_sqlite_err(err, err_cap, st->db);
         return NULL;
     }
     if (filter_col) sqlite3_bind_text(stmt, 1, filter_val, -1, SQLITE_TRANSIENT);
@@ -588,7 +604,7 @@ static char *da_build_cohort(FsqlState *st, const char *table,
         const unsigned char *t = sqlite3_column_text(stmt, 0);
         if (t) out = strdup((const char *)t);
     } else if (rc != SQLITE_ROW && rc != SQLITE_DONE) {
-        da_set_err(err, err_cap, "fractalsql: %s", sqlite3_errmsg(st->db));
+        da_set_sqlite_err(err, err_cap, st->db);
     }
     sqlite3_finalize(stmt);
     return out;
@@ -600,13 +616,13 @@ static char *da_build_cohort(FsqlState *st, const char *table,
  * out of a composed primitive (fractal_dimension_drift, fractal_
  * optimize_portfolio, fractal_morphological_complexity, ...). NULL +
  * err on failure. */
-static char *da_scalar_text(FsqlState *st, const char *sql,
+static char *da_scalar_text(const FsqlState *st, const char *sql,
                             void (*bind_extra)(sqlite3_stmt *, void *),
                             void *bind_ctx, char *err, size_t err_cap) {
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(st->db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
-        da_set_err(err, err_cap, "fractalsql: %s", sqlite3_errmsg(st->db));
+        da_set_sqlite_err(err, err_cap, st->db);
         return NULL;
     }
     if (bind_extra) bind_extra(stmt, bind_ctx);
@@ -617,7 +633,7 @@ static char *da_scalar_text(FsqlState *st, const char *sql,
         if (t) out = strdup((const char *)t);
         else da_set_err(err, err_cap, "fractalsql: primitive call returned NULL");
     } else {
-        da_set_err(err, err_cap, "fractalsql: %s", sqlite3_errmsg(st->db));
+        da_set_sqlite_err(err, err_cap, st->db);
     }
     sqlite3_finalize(stmt);
     return out;
@@ -625,7 +641,7 @@ static char *da_scalar_text(FsqlState *st, const char *sql,
 
 /* json_extract a numeric field out of a JSON document TEXT, defaulting
  * to 0.0 if absent/NULL/unparseable. */
-static double da_json_num(FsqlState *st, const char *json, const char *path) {
+static double da_json_num(const FsqlState *st, const char *json, const char *path) {
     if (!json) return 0.0;
     char sql[128];
     snprintf(sql, sizeof sql, "SELECT COALESCE(json_extract(?1,'%s'),0.0)", path);
@@ -642,12 +658,12 @@ static double da_json_num(FsqlState *st, const char *json, const char *path) {
 /* Bind helper for the common "one text param at ?1" shape. */
 typedef struct OneText { const char *s; } OneText;
 static void bind_one_text(sqlite3_stmt *stmt, void *ctx) {
-    OneText *t = (OneText *)ctx;
+    const OneText *t = (const OneText *)ctx;
     sqlite3_bind_text(stmt, 1, t->s, -1, SQLITE_TRANSIENT);
 }
 typedef struct TwoText { const char *a; const char *b; } TwoText;
 static void bind_two_text(sqlite3_stmt *stmt, void *ctx) {
-    TwoText *t = (TwoText *)ctx;
+    const TwoText *t = (const TwoText *)ctx;
     sqlite3_bind_text(stmt, 1, t->a, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 2, t->b, -1, SQLITE_TRANSIENT);
 }
@@ -660,7 +676,7 @@ static void bind_two_text(sqlite3_stmt *stmt, void *ctx) {
  * peripheral to what an engine exists to compute, so any failure of
  * it (OOM, ledger I/O) must never surface as the engine's own error.
  * Any sqlite3_prepare_v2/step failure is silently discarded. */
-static void da_audit_log_best_effort(FsqlState *st, const char *entry_type,
+static void da_audit_log_best_effort(const FsqlState *st, const char *entry_type,
                                      const char *payload_json) {
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(st->db, "SELECT fractal_audit_log(?1,?2)", -1,
@@ -670,6 +686,371 @@ static void da_audit_log_best_effort(FsqlState *st, const char *entry_type,
     sqlite3_bind_text(stmt, 2, payload_json, -1, SQLITE_TRANSIENT);
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
+}
+
+/* Best-effort "run one fixed SQL statement, ignore result + failures":
+ * the diversify enable/disable/params and isolate calls below mutate
+ * session state and must never break the engine around them. */
+static void da_exec_ignore(const FsqlState *st, const char *sql) {
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(st->db, sql, -1, &stmt, NULL) == SQLITE_OK)
+        sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+/* Same, for one that takes a single INTEGER parameter. */
+static void da_exec_int1_ignore(const FsqlState *st, const char *sql,
+                                sqlite3_int64 v) {
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(st->db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, v);
+        sqlite3_step(stmt);
+    }
+    sqlite3_finalize(stmt);
+}
+
+/* ------------------------------------------------------------------ */
+/* Shared argument-validation helpers: every engine's prologue is the  */
+/* same arg-shape phase (argc range -> not-NULL -> text -> optional    */
+/* defaults -> identifier shape -> table has rows), factored out here  */
+/* so the per-engine bodies stay linear. Each helper reports the exact */
+/* same message the inline original did and returns 1 "ready" / 0      */
+/* "already reported the failure on ctx".                              */
+/* ------------------------------------------------------------------ */
+
+/* Trailing-argument accessors (same idea as fsql_sovereign.c's opt_*
+ * helpers for the portfolio family): argc is the registered arity
+ * actually invoked, so a missing or NULL trailing argument takes the
+ * documented DEFAULT. */
+static int da_opt_int(int argc, sqlite3_value **argv, int idx, int dflt) {
+    if (idx >= argc || sqlite3_value_type(argv[idx]) == SQLITE_NULL)
+        return dflt;
+    return sqlite3_value_int(argv[idx]);
+}
+static double da_opt_double(int argc, sqlite3_value **argv, int idx,
+                            double dflt) {
+    if (idx >= argc || sqlite3_value_type(argv[idx]) == SQLITE_NULL)
+        return dflt;
+    return sqlite3_value_double(argv[idx]);
+}
+/* TEXT variant: returns dflt for a missing/NULL arg; a present TEXT
+ * arg can still return NULL (SQLite OOM), exactly as the inline
+ * `sqlite3_value_text` reads did, and the caller's existing
+ * `if (!context) context = "{}";` line stays responsible for that. */
+static const char *da_opt_text(int argc, sqlite3_value **argv, int idx,
+                               const char *dflt) {
+    if (idx >= argc || sqlite3_value_type(argv[idx]) == SQLITE_NULL)
+        return dflt;
+    return (const char *)sqlite3_value_text(argv[idx]);
+}
+
+/* The engine's own "arguments must not be NULL" guard, over the first
+ * n arguments. Returns 1 ready, 0 with msg already emitted on ctx. */
+static int da_args_not_null(sqlite3_context *ctx, sqlite3_value **argv,
+                            int n, const char *msg) {
+    for (int i = 0; i < n; i++) {
+        if (sqlite3_value_type(argv[i]) == SQLITE_NULL) {
+            sqlite3_result_error(ctx, msg, -1);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Every table-backed engine emits the same identifier-shape message;
+ * NULL entries reject too (no caller reaches here without the not-NULL
+ * guard, so that is just da_ident_ok()'s own stance). Returns 1 ready,
+ * 0 with the message already emitted on ctx. */
+static int da_idents_plain(sqlite3_context *ctx, const char *const *ids,
+                           int n) {
+    for (int i = 0; i < n; i++) {
+        if (!da_ident_ok(ids[i])) {
+            sqlite3_result_error(ctx,
+                "fractalsql: table/column identifiers must be plain "
+                "identifiers ([A-Za-z_][A-Za-z0-9_]*)", -1);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* The shared "table must exist and have rows" phase: a prepare/exec
+ * failure reports err verbatim (da_result_err, exactly as before), an
+ * empty table reports the engine's own empty-table message with the
+ * table name substituted. Returns 1 ready, 0 already reported. */
+static int da_table_rows_ok(sqlite3_context *ctx, FsqlState *st,
+                            const char *table, char *err, size_t err_cap,
+                            const char *empty_fmt) {
+    int rows = da_table_has_rows(st, table, err, err_cap);
+    if (rows < 0) { da_result_err(ctx, err); return 0; }
+    if (rows == 0) {
+        char msg[256];
+        snprintf(msg, sizeof msg, empty_fmt, table);
+        sqlite3_result_error(ctx, msg, -1);
+        return 0;
+    }
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* Decision-document emission: most engines audit and return the SAME  */
+/* JSON document, and their partial-result (reasoning_step_failed) doc */
+/* differs only in the reason field, so each engine gets one tiny doc  */
+/* builder (below, beside its engine) and this one shared emitter.     */
+/*                                                                     */
+/* build() appends one complete document to `out` from `ud`; the       */
+/* emitter then audits it best-effort and hands it to SQLite as the    */
+/* result (TRANSIENT), exactly in the original build-audit-emit order. */
+/* Returns 0, or -1 with a NOMEM error already set on ctx (an OOM      */
+/* during the build never reached the audit in the originals either).  */
+/* ------------------------------------------------------------------ */
+static int da_emit_decision(sqlite3_context *ctx, const FsqlState *st,
+                            const char *entry_type,
+                            void (*build)(StrBuf *, void *), void *ud) {
+    StrBuf out; sb_init(&out);
+    build(&out, ud);
+    if (sb_failed(&out)) {
+        sb_free(&out);
+        sqlite3_result_error_nomem(ctx);
+        return -1;
+    }
+    da_audit_log_best_effort(st, entry_type, out.buf);
+    sqlite3_result_text(ctx, out.buf, (int)out.len, SQLITE_TRANSIENT);
+    sb_free(&out);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Shared data-phase helpers (the per-engine search steps all compose  */
+/* the same primitive calls; the helpers keep the error reports --     */
+/* message text AND the nomem-vs-error distinction -- exactly where    */
+/* the inline originals had them, by reporting on ctx themselves).     */
+/* ------------------------------------------------------------------ */
+
+/* Appends "fractal_search_telemetry('table','col',...)" (the table and
+ * column arrive as TEXT values -- sb_sql_lit, NOT quoted identifiers;
+ * see sb_sql_lit's comment) with the caller's trailing argument text
+ * still to come, e.g. ",?1,1)". */
+static void sb_telemetry_call(StrBuf *sql, const char *table,
+                              const char *emb_col) {
+    sb_puts(sql, "fractal_search_telemetry(");
+    sb_sql_lit(sql, table);
+    sb_puts(sql, ",");
+    sb_sql_lit(sql, emb_col);
+}
+
+/* The shared nearest-row telemetry search phase: builds the
+ * "fractal_search_telemetry('table','col',?1,1)" call, runs
+ * da_nearest1, and reports every failure on ctx exactly as the inline
+ * originals did (OOM -> nomem; prepare/exec -> "fractalsql: %s" via
+ * err/da_result_err; an empty top-1 -> the engine's empty-table
+ * message). Returns 0 with *out_doc_id/*out_dist set, -1 on failure. */
+static int da_nearest_telemetry_row(sqlite3_context *ctx, const FsqlState *st,
+                                    const char *table, const char *emb_col,
+                                    const char *query_json,
+                                    const char *res_field,
+                                    int64_t *out_doc_id, double *out_dist,
+                                    char *err, size_t err_cap,
+                                    const char *empty_fmt) {
+    StrBuf fnsql; sb_init(&fnsql);
+    sb_telemetry_call(&fnsql, table, emb_col);
+    sb_puts(&fnsql, ",?1,1)");
+    if (sb_failed(&fnsql)) {
+        sb_free(&fnsql);
+        sqlite3_result_error_nomem(ctx);
+        return -1;
+    }
+    OneText bind = { query_json };
+    int rc = da_nearest1(st, fnsql.buf, bind_one_text, &bind, res_field,
+                         out_doc_id, out_dist, err, err_cap);
+    sb_free(&fnsql);
+    if (rc != 0) { da_result_err(ctx, err); return -1; }
+    if (*out_doc_id < 0) {
+        char msg[256];
+        snprintf(msg, sizeof msg, empty_fmt, table);
+        sqlite3_result_error(ctx, msg, -1);
+        return -1;
+    }
+    return 0;
+}
+
+/* The shared nearest-row trajectory search phase: same contract as
+ * da_nearest_telemetry_row, for the two-vector
+ * "fractal_search_trajectory('table','col',?1,?2,1)" shape (used for
+ * baseline->current drift and portfolio-nearest-allocation checks). */
+static int da_nearest_traj_row(sqlite3_context *ctx, const FsqlState *st,
+                               const char *table, const char *emb_col,
+                               const char *a_json, const char *b_json,
+                               int64_t *out_doc_id, double *out_dist,
+                               char *err, size_t err_cap,
+                               const char *empty_fmt) {
+    StrBuf trajsql; sb_init(&trajsql);
+    sb_puts(&trajsql, "fractal_search_trajectory(");
+    sb_sql_lit(&trajsql, table);
+    sb_puts(&trajsql, ",");
+    sb_sql_lit(&trajsql, emb_col);
+    sb_puts(&trajsql, ",?1,?2,1)");
+    if (sb_failed(&trajsql)) {
+        sb_free(&trajsql);
+        sqlite3_result_error_nomem(ctx);
+        return -1;
+    }
+    TwoText bind = { a_json, b_json };
+    int rc = da_nearest1(st, trajsql.buf, bind_two_text, &bind, "doc_id",
+                         out_doc_id, out_dist, err, err_cap);
+    sb_free(&trajsql);
+    if (rc != 0) { da_result_err(ctx, err); return -1; }
+    if (*out_doc_id < 0) {
+        char msg[256];
+        snprintf(msg, sizeof msg, empty_fmt, table);
+        sqlite3_result_error(ctx, msg, -1);
+        return -1;
+    }
+    return 0;
+}
+
+/* The shared mu/cov decode phase for the portfolio-shape engines:
+ * decodes both vector arguments and renders them as JSON TEXT. On a
+ * decode failure the "mu/cov must be CSV/JSON vectors" error is
+ * reported on ctx and -1 returned; on success the caller owns both
+ * malloc'd strings and still NULL-checks them per its own convention
+ * (the engines differ there, so that check stays with the caller). */
+static int da_mu_cov_json(sqlite3_context *ctx, sqlite3_value *mu_v,
+                          sqlite3_value *cov_v, char **out_mu_json,
+                          char **out_cov_json) {
+    int mu_dim = 0;
+    int cov_dim = 0;
+    double *mu = da_decode_vec(mu_v, &mu_dim);
+    double *cov = da_decode_vec(cov_v, &cov_dim);
+    if (!mu || !cov) {
+        free(mu); free(cov);
+        sqlite3_result_error(ctx, "fractalsql: mu/cov must be CSV/JSON vectors", -1);
+        return -1;
+    }
+    *out_mu_json = da_vec_json(mu, mu_dim);
+    *out_cov_json = da_vec_json(cov, cov_dim);
+    free(mu); free(cov);
+    return 0;
+}
+
+/* The shared vector-argument decode phase: decodes one query/state
+ * vector argument and renders it as the JSON TEXT the search
+ * primitives accept. Returns a malloc'd string (caller frees), or NULL
+ * with the failure already reported on ctx (the caller's own
+ * "<this> must be a CSV/JSON vector" error on a malformed value; a
+ * NOMEM error on OOM). */
+static char *da_decode_vec_json(sqlite3_context *ctx, sqlite3_value *v,
+                                const char *malformed_msg) {
+    int dim = 0;
+    double *decoded = da_decode_vec(v, &dim);
+    if (!decoded) {
+        sqlite3_result_error(ctx, malformed_msg, -1);
+        return NULL;
+    }
+    char *json = da_vec_json(decoded, dim);
+    free(decoded);
+    if (!json) sqlite3_result_error_nomem(ctx);
+    return json;
+}
+
+/* Splices the engines' one shared rationale into every row of the
+ * per-candidate JSON document (the "one reasoning call covering all
+ * candidates, repeated per row" tail). The prepared json_each() scan
+ * and any failure inside it are best-effort exactly as before: rows
+ * for which the scan returns nothing are simply absent. */
+static void da_splice_rationale(sqlite3_context *ctx, const FsqlState *st,
+                                StrBuf *out, const char *rows_json,
+                                const char *rationale) {
+    sb_puts(out, "[");
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(st->db,
+            "SELECT key, json_extract(value,'$.candidate_id'), "
+            "json_extract(value,'$.sharpe'), json_extract(value,'$.weights') "
+            "FROM json_each(?1)", -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, rows_json, -1, SQLITE_TRANSIENT);
+        int first = 1;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            if (!first) sb_puts(out, ",");
+            first = 0;
+            int64_t cid = sqlite3_column_int64(stmt, 1);
+            double csh = sqlite3_column_double(stmt, 2);
+            const unsigned char *w = sqlite3_column_text(stmt, 3);
+            sb_printf(out, "{\"candidate_id\":%lld,\"sharpe\":%.10f,\"weights\":",
+                      (long long)cid, csh);
+            sb_puts(out, w ? (const char *)w : "null");
+            sb_puts(out, ",\"rationale\":");
+            sb_json_string(out, rationale);
+            sb_puts(out, "}");
+        }
+    }
+    sqlite3_finalize(stmt);
+    sb_puts(out, "]");
+}
+
+/* The anomaly_triage decision document: the audit entry and the result
+ * carry the same JSON, and the partial-result shape differs only in
+ * the triage_summary field. */
+typedef struct AnomalyDoc {
+    double threat_score;
+    const char *triage_summary; /* NULL when the reasoning step failed */
+    const char *failed_err;     /* non-NULL -> reasoning_step_failed shape */
+} AnomalyDoc;
+
+static void da_anomaly_doc(StrBuf *out, void *ud) {
+    AnomalyDoc *d = (AnomalyDoc *)ud;
+    sb_printf(out, "{\"threat_score\":%.10f,\"anomaly_type\":"
+                   "\"vector_drift\",\"triage_summary\":", d->threat_score);
+    if (d->failed_err) {
+        sb_puts(out, "null,\"reasoning_step_failed\":");
+        sb_json_string(out, d->failed_err);
+    } else {
+        sb_json_string(out, d->triage_summary);
+    }
+    sb_puts(out, "}");
+}
+
+/* Phase 1 data: the entity's metric series, ordered by time, as the
+ * "[1,2,3]" JSON TEXT the drift primitive accepts. Returns the
+ * malloc'd series (caller frees), or NULL with the failure already
+ * reported on ctx exactly as the inline phase did (nomem on the SQL
+ * build; the engine's own "no rows ... matching ..." message on an
+ * empty or NULL series). */
+static char *da_metric_series_json(sqlite3_context *ctx, FsqlState *st,
+                                   const char *log_table,
+                                   const char *metric_col,
+                                   const char *time_col,
+                                   const char *filter_col,
+                                   const char *filter_val,
+                                   char *err, size_t err_cap) {
+    StrBuf sql; sb_init(&sql);
+    sb_puts(&sql, "SELECT '[' || group_concat(v) || ']' FROM (SELECT ");
+    sb_sql_ident(&sql, metric_col);
+    sb_puts(&sql, " AS v FROM ");
+    sb_sql_ident(&sql, log_table);
+    sb_puts(&sql, " WHERE ");
+    sb_sql_ident(&sql, filter_col);
+    sb_puts(&sql, " = ?1 ORDER BY ");
+    sb_sql_ident(&sql, time_col);
+    sb_puts(&sql, ")");
+    if (sb_failed(&sql)) {
+        sb_free(&sql);
+        sqlite3_result_error_nomem(ctx);
+        return NULL;
+    }
+    OneText bind = { filter_val };
+    char *series_json = da_scalar_text(st, sql.buf, bind_one_text, &bind,
+                                       err, err_cap);
+    sb_free(&sql);
+    if (!series_json || strcmp(series_json, "[]") == 0) {
+        free(series_json);
+        char msg[384];
+        snprintf(msg, sizeof msg,
+                 "fractal_agent_anomaly_triage: no rows in %s.%s matching %s = %s",
+                 log_table, metric_col, filter_col, filter_val);
+        sqlite3_result_error(ctx, msg, -1);
+        return NULL;
+    }
+    return series_json;
 }
 
 /* ======================================================================
@@ -687,55 +1068,27 @@ static void agent_anomaly_triage_fn(sqlite3_context *ctx, int argc,
             "filter_col, filter_val [, baseline_window]) expects 5 or 6 args", -1);
         return;
     }
-    for (int i = 0; i < 5; i++) {
-        if (sqlite3_value_type(argv[i]) == SQLITE_NULL) {
-            sqlite3_result_error(ctx,
-                "fractal_agent_anomaly_triage: identifier arguments must not be NULL", -1);
-            return;
-        }
-    }
+    if (!da_args_not_null(ctx, argv, 5,
+            "fractal_agent_anomaly_triage: "
+            "identifier arguments must not be NULL"))
+        return;
     const char *log_table  = (const char *)sqlite3_value_text(argv[0]);
     const char *metric_col = (const char *)sqlite3_value_text(argv[1]);
     const char *time_col   = (const char *)sqlite3_value_text(argv[2]);
     const char *filter_col = (const char *)sqlite3_value_text(argv[3]);
     const char *filter_val = (const char *)sqlite3_value_text(argv[4]);
-    int baseline_window = (argc >= 6 && sqlite3_value_type(argv[5]) != SQLITE_NULL)
-                         ? sqlite3_value_int(argv[5]) : 32;
+    int baseline_window = da_opt_int(argc, argv, 5, 32);
     if (!log_table || !metric_col || !time_col || !filter_col || !filter_val) {
         sqlite3_result_error_nomem(ctx); return;
     }
-    if (!da_ident_ok(log_table) || !da_ident_ok(metric_col) || !da_ident_ok(time_col) ||
-        !da_ident_ok(filter_col)) {
-        sqlite3_result_error(ctx,
-            "fractalsql: table/column identifiers must be plain identifiers "
-            "([A-Za-z_][A-Za-z0-9_]*)", -1);
-        return;
-    }
+    const char *idents[] = { log_table, metric_col, time_col, filter_col };
+    if (!da_idents_plain(ctx, idents, 4)) return;
 
     /* 1. Fetch the entity's metric series, ordered by time. */
-    StrBuf sql; sb_init(&sql);
-    sb_puts(&sql, "SELECT '[' || group_concat(v) || ']' FROM (SELECT ");
-    sb_sql_ident(&sql, metric_col);
-    sb_puts(&sql, " AS v FROM ");
-    sb_sql_ident(&sql, log_table);
-    sb_puts(&sql, " WHERE ");
-    sb_sql_ident(&sql, filter_col);
-    sb_puts(&sql, " = ?1 ORDER BY ");
-    sb_sql_ident(&sql, time_col);
-    sb_puts(&sql, ")");
-    if (sb_failed(&sql)) { sb_free(&sql); sqlite3_result_error_nomem(ctx); return; }
-    OneText bind = { filter_val };
-    char *series_json = da_scalar_text(st, sql.buf, bind_one_text, &bind, err, sizeof err);
-    sb_free(&sql);
-    if (!series_json || strcmp(series_json, "[]") == 0) {
-        free(series_json);
-        char msg[384];
-        snprintf(msg, sizeof msg,
-                 "fractal_agent_anomaly_triage: no rows in %s.%s matching %s = %s",
-                 log_table, metric_col, filter_col, filter_val);
-        sqlite3_result_error(ctx, msg, -1);
-        return;
-    }
+    char *series_json = da_metric_series_json(ctx, st, log_table, metric_col,
+                                              time_col, filter_col,
+                                              filter_val, err, sizeof err);
+    if (!series_json) return;
 
     /* 2. Real Analytics: regime-change drift. */
     OneText sbind = { series_json };
@@ -770,44 +1123,49 @@ static void agent_anomaly_triage_fn(sqlite3_context *ctx, int argc,
     if (!rationale && rfailed) {
         /* Partial-result honesty:the drift data half is done; report it plus the
          * reasoning failure instead of discarding the computation. */
-        StrBuf out; sb_init(&out);
-        sb_printf(&out, "{\"threat_score\":%.10f,\"anomaly_type\":"
-                        "\"vector_drift\",\"triage_summary\":null,"
-                        "\"reasoning_step_failed\":", threat_score);
-        sb_json_string(&out, err);
-        sb_puts(&out, "}");
-        if (sb_failed(&out)) { sqlite3_result_error_nomem(ctx); return; }
-        da_audit_log_best_effort(st, "agent_anomaly_triage", out.buf);
-        sqlite3_result_text(ctx, out.buf, (int)out.len, SQLITE_TRANSIENT);
-        sb_free(&out);
+        AnomalyDoc pd = { threat_score, NULL, err };
+        da_emit_decision(ctx, st, "agent_anomaly_triage", da_anomaly_doc, &pd);
         return;
     }
     if (!rationale) { da_result_err(ctx, err); return; }
 
-    StrBuf audit; sb_init(&audit);
-    sb_printf(&audit, "{\"threat_score\":%.10f,\"anomaly_type\":\"vector_drift\","
-                      "\"triage_summary\":", threat_score);
-    sb_json_string(&audit, rationale);
-    sb_puts(&audit, "}");
-    if (!sb_failed(&audit))
-        da_audit_log_best_effort(st, "agent_anomaly_triage", audit.buf);
-    sb_free(&audit);
-
-    StrBuf out; sb_init(&out);
-    sb_printf(&out, "{\"threat_score\":%.10f,\"anomaly_type\":\"vector_drift\","
-                    "\"triage_summary\":", threat_score);
-    sb_json_string(&out, rationale);
-    sb_puts(&out, "}");
+    AnomalyDoc d = { threat_score, rationale, NULL };
+    da_emit_decision(ctx, st, "agent_anomaly_triage", da_anomaly_doc, &d);
     free(rationale);
-    if (sb_failed(&out)) { sb_free(&out); sqlite3_result_error_nomem(ctx); return; }
-    sqlite3_result_text(ctx, out.buf, (int)out.len, SQLITE_TRANSIENT);
-    sb_free(&out);
 }
 
 /* ======================================================================
  * Engine B: fractal_agent_allocate(mu, cov, cardinality, context
  *   DEFAULT NULL) -> TEXT JSON {allocation, sharpe, rationale}
  * ====================================================================== */
+
+/* The allocate decision document (audit and result carry the same JSON;
+ * the partial-result shape differs only in the rationale field). The
+ * audit entry's {"sharpe":..,"cardinality":..} shape stays inline in
+ * the engine -- the audit doc adds a field the result doc must not
+ * carry. */
+typedef struct AllocDoc {
+    const char *allocation;     /* the optimizer's own JSON result */
+    double sharpe;
+    const char *rationale;      /* NULL when the reasoning step failed */
+    const char *failed_err;     /* non-NULL -> reasoning_step_failed shape */
+} AllocDoc;
+
+static void da_alloc_doc(StrBuf *out, void *ud) {
+    AllocDoc *d = (AllocDoc *)ud;
+    sb_puts(out, "{\"allocation\":");
+    sb_json_raw_or_string(out, d->allocation);
+    if (d->failed_err) {
+        sb_printf(out, ",\"sharpe\":%.10f,\"rationale\":null,"
+                       "\"reasoning_step_failed\":", d->sharpe);
+        sb_json_string(out, d->failed_err);
+    } else {
+        sb_printf(out, ",\"sharpe\":%.10f,\"rationale\":", d->sharpe);
+        sb_json_string(out, d->rationale);
+    }
+    sb_puts(out, "}");
+}
+
 static void agent_allocate_fn(sqlite3_context *ctx, int argc,
                               sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
@@ -818,33 +1176,20 @@ static void agent_allocate_fn(sqlite3_context *ctx, int argc,
             "expects 3 or 4 args", -1);
         return;
     }
-    if (sqlite3_value_type(argv[0]) == SQLITE_NULL ||
-        sqlite3_value_type(argv[1]) == SQLITE_NULL ||
-        sqlite3_value_type(argv[2]) == SQLITE_NULL) {
-        sqlite3_result_error(ctx,
-            "fractal_agent_allocate: mu, cov, and cardinality are required", -1);
+    if (!da_args_not_null(ctx, argv, 3,
+            "fractal_agent_allocate: mu, cov, and cardinality are required"))
         return;
-    }
-    int mu_dim = 0, cov_dim = 0;
-    double *mu = da_decode_vec(argv[0], &mu_dim);
-    double *cov = da_decode_vec(argv[1], &cov_dim);
-    if (!mu || !cov) {
-        free(mu); free(cov);
-        sqlite3_result_error(ctx, "fractalsql: mu/cov must be CSV/JSON vectors", -1);
+    char *mu_json = NULL;
+    char *cov_json = NULL;
+    if (da_mu_cov_json(ctx, argv[0], argv[1], &mu_json, &cov_json) != 0)
         return;
-    }
     int cardinality = sqlite3_value_int(argv[2]);
-    char *mu_json = da_vec_json(mu, mu_dim);
-    char *cov_json = da_vec_json(cov, cov_dim);
-    free(mu); free(cov);
     if (!mu_json || !cov_json) {
         free(mu_json); free(cov_json);
         sqlite3_result_error_nomem(ctx);
         return;
     }
-    const char *context = "{}";
-    if (argc == 4 && sqlite3_value_type(argv[3]) != SQLITE_NULL)
-        context = (const char *)sqlite3_value_text(argv[3]);
+    const char *context = da_opt_text(argc, argv, 3, "{}");
     if (!context) context = "{}";
 
     char callsql[128];
@@ -870,18 +1215,9 @@ static void agent_allocate_fn(sqlite3_context *ctx, int argc,
     sb_free(&prompt);
     if (!rationale && rfailed) {
         /* Partial-result honesty:the SFS allocation data half is done; report it. */
-        StrBuf out; sb_init(&out);
-        sb_puts(&out, "{\"allocation\":");
-        sb_json_raw_or_string(&out, opt);
-        sb_printf(&out, ",\"sharpe\":%.10f,\"rationale\":null,"
-                        "\"reasoning_step_failed\":", sharpe);
-        sb_json_string(&out, err);
-        sb_puts(&out, "}");
+        AllocDoc pd = { opt, sharpe, NULL, err };
+        da_emit_decision(ctx, st, "agent_allocate", da_alloc_doc, &pd);
         free(opt);
-        if (sb_failed(&out)) { sqlite3_result_error_nomem(ctx); return; }
-        da_audit_log_best_effort(st, "agent_allocate", out.buf);
-        sqlite3_result_text(ctx, out.buf, (int)out.len, SQLITE_TRANSIENT);
-        sb_free(&out);
         return;
     }
     if (!rationale) { free(opt); da_result_err(ctx, err); return; }
@@ -895,16 +1231,9 @@ static void agent_allocate_fn(sqlite3_context *ctx, int argc,
         da_audit_log_best_effort(st, "agent_allocate", audit.buf);
     sb_free(&audit);
 
-    StrBuf out; sb_init(&out);
-    sb_puts(&out, "{\"allocation\":");
-    sb_json_raw_or_string(&out, opt);
-    sb_printf(&out, ",\"sharpe\":%.10f,\"rationale\":", sharpe);
-    sb_json_string(&out, rationale);
-    sb_puts(&out, "}");
+    AllocDoc d = { opt, sharpe, rationale, NULL };
+    da_emit_decision(ctx, st, "agent_allocate", da_alloc_doc, &d);
     free(opt); free(rationale);
-    if (sb_failed(&out)) { sb_free(&out); sqlite3_result_error_nomem(ctx); return; }
-    sqlite3_result_text(ctx, out.buf, (int)out.len, SQLITE_TRANSIENT);
-    sb_free(&out);
 }
 
 /* ======================================================================
@@ -943,44 +1272,22 @@ static void agent_route_task_fn(sqlite3_context *ctx, int argc,
             "([A-Za-z_][A-Za-z0-9_]*)", -1);
         return;
     }
-    int rows = da_table_has_rows(st, cap_table, err, sizeof err);
-    if (rows < 0) { da_result_err(ctx, err); return; }
-    if (rows == 0) {
-        char msg[256];
-        snprintf(msg, sizeof msg,
-                 "fractal_agent_route_task: no capability rows in %s", cap_table);
-        sqlite3_result_error(ctx, msg, -1);
+    if (!da_table_rows_ok(ctx, st, cap_table, err, sizeof err,
+                         "fractal_agent_route_task: no capability rows in %s"))
         return;
-    }
 
-    int dim = 0;
-    double *task = da_decode_vec(argv[0], &dim);
-    if (!task) { sqlite3_result_error(ctx, "fractalsql: task_emb must be a CSV/JSON vector", -1); return; }
-    char *task_json = da_vec_json(task, dim);
-    free(task);
-    if (!task_json) { sqlite3_result_error_nomem(ctx); return; }
+    char *task_json = da_decode_vec_json(ctx, argv[0],
+        "fractalsql: task_emb must be a CSV/JSON vector");
+    if (!task_json) return;
 
-    StrBuf fnsql; sb_init(&fnsql);
-    sb_puts(&fnsql, "fractal_search_telemetry(");
-    sb_sql_lit(&fnsql, cap_table);
-    sb_puts(&fnsql, ",");
-    sb_sql_lit(&fnsql, cap_emb_col);
-    sb_puts(&fnsql, ",?1,1)");
-    if (sb_failed(&fnsql)) { sb_free(&fnsql); free(task_json); sqlite3_result_error_nomem(ctx); return; }
-    OneText bind = { task_json };
     int64_t doc_id = -1; double dist = 0.0;
-    int rc = da_nearest1(st, fnsql.buf, bind_one_text, &bind, "doc_id",
-                         &doc_id, &dist, err, sizeof err);
-    sb_free(&fnsql);
-    free(task_json);
-    if (rc != 0) { da_result_err(ctx, err); return; }
-    if (doc_id < 0) {
-        char msg[256];
-        snprintf(msg, sizeof msg,
-                 "fractal_agent_route_task: no capability rows in %s", cap_table);
-        sqlite3_result_error(ctx, msg, -1);
+    if (da_nearest_telemetry_row(ctx, st, cap_table, cap_emb_col, task_json,
+                                "doc_id", &doc_id, &dist, err, sizeof err,
+                                "fractal_agent_route_task: no capability rows in %s") != 0) {
+        free(task_json);
         return;
     }
+    free(task_json);
 
     /* doc_id is the row's real rowid (the telemetry search's row
      * locator), so resolve it with a direct rowid predicate. */
@@ -1102,22 +1409,13 @@ static void agent_outlier_intercept_fn(sqlite3_context *ctx, int argc,
             "([A-Za-z_][A-Za-z0-9_]*)", -1);
         return;
     }
-    int rows = da_table_has_rows(st, history_table, err, sizeof err);
-    if (rows < 0) { da_result_err(ctx, err); return; }
-    if (rows == 0) {
-        char msg[256];
-        snprintf(msg, sizeof msg,
-                 "fractal_agent_outlier_intercept: no bad-state rows in %s", history_table);
-        sqlite3_result_error(ctx, msg, -1);
+    if (!da_table_rows_ok(ctx, st, history_table, err, sizeof err,
+                         "fractal_agent_outlier_intercept: no bad-state rows in %s"))
         return;
-    }
 
-    int dim = 0;
-    double *state = da_decode_vec(argv[0], &dim);
-    if (!state) { sqlite3_result_error(ctx, "fractalsql: state_vec must be a CSV/JSON vector", -1); return; }
-    char *state_json = da_vec_json(state, dim);
-    free(state);
-    if (!state_json) { sqlite3_result_error_nomem(ctx); return; }
+    char *state_json = da_decode_vec_json(ctx, argv[0],
+        "fractalsql: state_vec must be a CSV/JSON vector");
+    if (!state_json) return;
 
     /* 1. Real Analytics: distance from the proposed state to the
      * nearest known-bad state in the history table, under the
@@ -1136,26 +1434,12 @@ static void agent_outlier_intercept_fn(sqlite3_context *ctx, int argc,
     double dist = 0.0;
     int64_t doc_id = -1;
     if (strcmp(metric, "cosine") == 0) {
-        StrBuf fnsql; sb_init(&fnsql);
-        sb_puts(&fnsql, "fractal_search_telemetry(");
-        sb_sql_lit(&fnsql, history_table);
-        sb_puts(&fnsql, ",");
-        sb_sql_lit(&fnsql, emb_col);
-        sb_puts(&fnsql, ",?1,1)");
-        if (sb_failed(&fnsql)) { sb_free(&fnsql); free(state_json); sqlite3_result_error_nomem(ctx); return; }
-        OneText bind = { state_json };
-        int rc = da_nearest1(st, fnsql.buf, bind_one_text, &bind, "doc_id",
-                             &doc_id, &dist, err, sizeof err);
-        sb_free(&fnsql);
+        int rc = da_nearest_telemetry_row(ctx, st, history_table, emb_col,
+                                          state_json, "doc_id",
+                                          &doc_id, &dist, err, sizeof err,
+                                          "fractal_agent_outlier_intercept: no bad-state rows in %s");
         free(state_json);
-        if (rc != 0) { da_result_err(ctx, err); return; }
-        if (doc_id < 0) {
-            char msg[256];
-            snprintf(msg, sizeof msg,
-                     "fractal_agent_outlier_intercept: no bad-state rows in %s", history_table);
-            sqlite3_result_error(ctx, msg, -1);
-            return;
-        }
+        if (rc != 0) return;
     } else {   /* 'l2', validated above */
         StrBuf l2sql; sb_init(&l2sql);
         sb_puts(&l2sql, "SELECT rowid, fractal_vector_l2_distance(");
@@ -1182,7 +1466,7 @@ static void agent_outlier_intercept_fn(sqlite3_context *ctx, int argc,
         }
         if (rc != SQLITE_OK) {
             char l2err[256];
-            snprintf(l2err, sizeof l2err, "fractalsql: %s", sqlite3_errmsg(st->db));
+            da_set_sqlite_err(l2err, sizeof l2err, st->db);
             sqlite3_finalize(lstmt);
             free(state_json);
             da_result_err(ctx, l2err);
@@ -1317,12 +1601,9 @@ static void agent_recall_hybrid_fn(sqlite3_context *ctx, int argc,
         return;
     }
 
-    int dim = 0;
-    double *qv = da_decode_vec(argv[2], &dim);
-    if (!qv) { free(cohort); sqlite3_result_error(ctx, "fractalsql: query_vec must be a CSV/JSON vector", -1); return; }
-    char *qv_json = da_vec_json(qv, dim);
-    free(qv);
-    if (!qv_json) { free(cohort); sqlite3_result_error_nomem(ctx); return; }
+    char *qv_json = da_decode_vec_json(ctx, argv[2],
+        "fractalsql: query_vec must be a CSV/JSON vector");
+    if (!qv_json) { free(cohort); return; }
 
     StrBuf sql; sb_init(&sql);
     sb_puts(&sql, "SELECT '[' || group_concat(json_object('mem_id', x.idv, "
@@ -1411,20 +1692,11 @@ static void agent_recommend_diverse_fn(sqlite3_context *ctx, int argc,
     }
 
     /* Enable session-global repulsion. Caller owns disabling it. */
-    {
-        sqlite3_stmt *stmt = NULL;
-        if (sqlite3_prepare_v2(st->db, "SELECT fractal_diversify_enable()",
-                               -1, &stmt, NULL) == SQLITE_OK)
-            sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
-    }
+    da_exec_ignore(st, "SELECT fractal_diversify_enable()");
 
-    int dim = 0;
-    double *qv = da_decode_vec(argv[2], &dim);
-    if (!qv) { sqlite3_result_error(ctx, "fractalsql: query_vec must be a CSV/JSON vector", -1); return; }
-    char *qv_json = da_vec_json(qv, dim);
-    free(qv);
-    if (!qv_json) { sqlite3_result_error_nomem(ctx); return; }
+    char *qv_json = da_decode_vec_json(ctx, argv[2],
+        "fractalsql: query_vec must be a CSV/JSON vector");
+    if (!qv_json) return;
 
     StrBuf sql; sb_init(&sql);
     sb_puts(&sql, "SELECT '[' || group_concat(json_object('item_id', x.idv, "
@@ -1488,7 +1760,7 @@ static void agent_data_analyst_fn(sqlite3_context *ctx, int argc,
     int rc = sqlite3_prepare_v2(st->db, sql.buf, -1, &stmt, NULL);
     sb_free(&sql);
     if (rc != SQLITE_OK) {
-        char msg[256]; snprintf(msg, sizeof msg, "fractalsql: %s", sqlite3_errmsg(st->db));
+        char msg[256]; da_set_sqlite_err(msg, sizeof msg, st->db);
         sqlite3_result_error(ctx, msg, -1);
         return;
     }
@@ -1498,7 +1770,7 @@ static void agent_data_analyst_fn(sqlite3_context *ctx, int argc,
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_ROW) {
         char msg[512];
-        snprintf(msg, sizeof msg, "fractalsql: %s", sqlite3_errmsg(st->db));
+        da_set_sqlite_err(msg, sizeof msg, st->db);
         sqlite3_finalize(stmt);
         sqlite3_result_error(ctx, msg, -1);
         return;
@@ -1628,16 +1900,9 @@ static void agent_patient_deterioration_triage_fn(sqlite3_context *ctx, int argc
             "([A-Za-z_][A-Za-z0-9_]*)", -1);
         return;
     }
-    int rows = da_table_has_rows(st, patient_table, err, sizeof err);
-    if (rows < 0) { da_result_err(ctx, err); return; }
-    if (rows == 0) {
-        char msg[256];
-        snprintf(msg, sizeof msg,
-                 "fractal_agent_patient_deterioration_triage: no patient rows in %s",
-                 patient_table);
-        sqlite3_result_error(ctx, msg, -1);
+    if (!da_table_rows_ok(ctx, st, patient_table, err, sizeof err,
+                         "fractal_agent_patient_deterioration_triage: no patient rows in %s"))
         return;
-    }
 
     char *cohort = NULL;
     if (cohort_ids_json) {
@@ -1655,11 +1920,9 @@ static void agent_patient_deterioration_triage_fn(sqlite3_context *ctx, int argc
         return;
     }
 
-    int qdim = 0;
-    double *qv = da_decode_vec(argv[2], &qdim);
-    if (!qv) { free(cohort); sqlite3_result_error(ctx, "fractalsql: query_vec must be a CSV/JSON vector", -1); return; }
-    char *qv_json = da_vec_json(qv, qdim);
-    free(qv);
+    char *qv_json = da_decode_vec_json(ctx, argv[2],
+        "fractalsql: query_vec must be a CSV/JSON vector");
+    if (!qv_json) { free(cohort); return; }
 
     /* Cohort matches: up to k nearest patients, resolved to named id. */
     StrBuf sql; sb_init(&sql);
@@ -1700,7 +1963,8 @@ static void agent_patient_deterioration_triage_fn(sqlite3_context *ctx, int argc
     double cohort_dist = da_json_num(st, matches, "$[0].distance");
 
     /* Baseline -> current drift, single result. */
-    int bdim = 0, cdim = 0;
+    int bdim = 0;
+    int cdim = 0;
     double *bv = da_decode_vec(argv[3], &bdim);
     double *cv = da_decode_vec(argv[4], &cdim);
     if (!bv || !cv) {
@@ -1839,28 +2103,15 @@ static void agent_feedback_audit_fn(sqlite3_context *ctx, int argc,
             "([A-Za-z_][A-Za-z0-9_]*)", -1);
         return;
     }
-    int rows = da_table_has_rows(st, catalog_table, err, sizeof err);
-    if (rows < 0) { da_result_err(ctx, err); return; }
-    if (rows == 0) {
-        char msg[256];
-        snprintf(msg, sizeof msg,
-                 "fractal_agent_feedback_audit: no catalog rows in %s", catalog_table);
-        sqlite3_result_error(ctx, msg, -1);
+    if (!da_table_rows_ok(ctx, st, catalog_table, err, sizeof err,
+                         "fractal_agent_feedback_audit: no catalog rows in %s"))
         return;
-    }
 
     /* 1. Enable repulsion + the audit defaults. */
-    {
-        sqlite3_stmt *stmt = NULL;
-        if (sqlite3_prepare_v2(st->db, "SELECT fractal_diversify_enable()",
-                               -1, &stmt, NULL) == SQLITE_OK) sqlite3_step(stmt);
-        sqlite3_finalize(stmt); stmt = NULL;
-        if (sqlite3_prepare_v2(st->db,
-                "SELECT fractal_diversify_set_params("
-                "'{\"window_n\":5,\"repulsion_sigma\":0.3,\"repulsion_weight\":0.5}')",
-                -1, &stmt, NULL) == SQLITE_OK) sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
-    }
+    da_exec_ignore(st, "SELECT fractal_diversify_enable()");
+    da_exec_ignore(st,
+        "SELECT fractal_diversify_set_params("
+        "'{\"window_n\":5,\"repulsion_sigma\":0.3,\"repulsion_weight\":0.5}')");
 
     /* 2. Warm the D_q rolling window with warmup_count varied queries. */
     {
@@ -1899,12 +2150,9 @@ static void agent_feedback_audit_fn(sqlite3_context *ctx, int argc,
     }
 
     /* 3. Capture the audit target's top doc_id, report negative feedback. */
-    int dim = 0;
-    double *qv = da_decode_vec(argv[2], &dim);
-    if (!qv) { sqlite3_result_error(ctx, "fractalsql: query_vec must be a CSV/JSON vector", -1); return; }
-    char *qv_json = da_vec_json(qv, dim);
-    free(qv);
-    if (!qv_json) { sqlite3_result_error_nomem(ctx); return; }
+    char *qv_json = da_decode_vec_json(ctx, argv[2],
+        "fractalsql: query_vec must be a CSV/JSON vector");
+    if (!qv_json) return;
     StrBuf tsql; sb_init(&tsql);
     sb_puts(&tsql, "fractal_search_telemetry(");
     sb_sql_lit(&tsql, catalog_table);
@@ -1923,15 +2171,9 @@ static void agent_feedback_audit_fn(sqlite3_context *ctx, int argc,
                          err, sizeof err);
     sb_free(&tsql); free(qv_json);
     if (rc != 0) { da_result_err(ctx, err); return; }
-    if (target_doc >= 0) {
-        sqlite3_stmt *stmt = NULL;
-        if (sqlite3_prepare_v2(st->db, "SELECT fractal_isolate_background(?1)",
-                               -1, &stmt, NULL) == SQLITE_OK) {
-            sqlite3_bind_int64(stmt, 1, (sqlite3_int64)target_doc);
-            sqlite3_step(stmt);
-        }
-        sqlite3_finalize(stmt);
-    }
+    if (target_doc >= 0)
+        da_exec_int1_ignore(st, "SELECT fractal_isolate_background(?1)",
+                            (sqlite3_int64)target_doc);
 
     /* 4. Pure analytics: diversity quotient + session diagnostics. */
     double dq = 0.0;
@@ -1947,12 +2189,7 @@ static void agent_feedback_audit_fn(sqlite3_context *ctx, int argc,
                                 err, sizeof err);
 
     /* 5. Self-contained: disable diversify. */
-    {
-        sqlite3_stmt *stmt = NULL;
-        if (sqlite3_prepare_v2(st->db, "SELECT fractal_diversify_disable()",
-                               -1, &stmt, NULL) == SQLITE_OK) sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
-    }
+    da_exec_ignore(st, "SELECT fractal_diversify_disable()");
 
     StrBuf out; sb_init(&out);
     sb_printf(&out, "{\"diversity_quotient\":%.10f,\"explanation\":", dq);
@@ -2004,22 +2241,13 @@ static void agent_schedule_workload_fn(sqlite3_context *ctx, int argc,
             "([A-Za-z_][A-Za-z0-9_]*)", -1);
         return;
     }
-    int rows = da_table_has_rows(st, node_table, err, sizeof err);
-    if (rows < 0) { da_result_err(ctx, err); return; }
-    if (rows == 0) {
-        char msg[256];
-        snprintf(msg, sizeof msg,
-                 "fractal_agent_schedule_workload: no node rows in %s", node_table);
-        sqlite3_result_error(ctx, msg, -1);
+    if (!da_table_rows_ok(ctx, st, node_table, err, sizeof err,
+                         "fractal_agent_schedule_workload: no node rows in %s"))
         return;
-    }
 
-    int dim = 0;
-    double *task = da_decode_vec(argv[0], &dim);
-    if (!task) { sqlite3_result_error(ctx, "fractalsql: task_vec must be a CSV/JSON vector", -1); return; }
-    char *task_json = da_vec_json(task, dim);
-    free(task);
-    if (!task_json) { sqlite3_result_error_nomem(ctx); return; }
+    char *task_json = da_decode_vec_json(ctx, argv[0],
+        "fractalsql: task_vec must be a CSV/JSON vector");
+    if (!task_json) return;
 
     /* 1. Refine the task vector (fractal_search's "sniper search"). */
     char callsql[160];
@@ -2032,26 +2260,13 @@ static void agent_schedule_workload_fn(sqlite3_context *ctx, int argc,
     if (!refined_json) { da_result_err(ctx, err); return; }
 
     /* 2. Nearest node to the refined task vector. */
-    StrBuf fnsql; sb_init(&fnsql);
-    sb_puts(&fnsql, "fractal_search_telemetry(");
-    sb_sql_lit(&fnsql, node_table);
-    sb_puts(&fnsql, ",");
-    sb_sql_lit(&fnsql, node_emb_col);
-    sb_puts(&fnsql, ",?1,1)");
-    if (sb_failed(&fnsql)) { sb_free(&fnsql); free(refined_json); sqlite3_result_error_nomem(ctx); return; }
-    OneText bind = { refined_json };
     int64_t doc_id = -1; double dist = 0.0;
-    int rc = da_nearest1(st, fnsql.buf, bind_one_text, &bind, "doc_id",
-                         &doc_id, &dist, err, sizeof err);
-    sb_free(&fnsql); free(refined_json);
-    if (rc != 0) { da_result_err(ctx, err); return; }
-    if (doc_id < 0) {
-        char msg[256];
-        snprintf(msg, sizeof msg,
-                 "fractal_agent_schedule_workload: no node rows in %s", node_table);
-        sqlite3_result_error(ctx, msg, -1);
-        return;
-    }
+    int rc = da_nearest_telemetry_row(ctx, st, node_table, node_emb_col,
+                                      refined_json, "doc_id",
+                                      &doc_id, &dist, err, sizeof err,
+                                      "fractal_agent_schedule_workload: no node rows in %s");
+    free(refined_json);
+    if (rc != 0) return;
 
     /* doc_id is the row's real rowid (the telemetry search's row
      * locator), so resolve it with a direct rowid predicate. */
@@ -2152,27 +2367,14 @@ static void agent_rebalance_sibling_fn(sqlite3_context *ctx, int argc,
             "([A-Za-z_][A-Za-z0-9_]*)", -1);
         return;
     }
-    int rows = da_table_has_rows(st, alloc_table, err, sizeof err);
-    if (rows < 0) { da_result_err(ctx, err); return; }
-    if (rows == 0) {
-        char msg[256];
-        snprintf(msg, sizeof msg,
-                 "fractal_agent_rebalance_sibling: no allocation rows in %s", alloc_table);
-        sqlite3_result_error(ctx, msg, -1);
+    if (!da_table_rows_ok(ctx, st, alloc_table, err, sizeof err,
+                         "fractal_agent_rebalance_sibling: no allocation rows in %s"))
         return;
-    }
 
-    int mu_dim = 0, cov_dim = 0;
-    double *mu = da_decode_vec(argv[0], &mu_dim);
-    double *cov = da_decode_vec(argv[1], &cov_dim);
-    if (!mu || !cov) {
-        free(mu); free(cov);
-        sqlite3_result_error(ctx, "fractalsql: mu/cov must be CSV/JSON vectors", -1);
+    char *mu_json = NULL;
+    char *cov_json = NULL;
+    if (da_mu_cov_json(ctx, argv[0], argv[1], &mu_json, &cov_json) != 0)
         return;
-    }
-    char *mu_json = da_vec_json(mu, mu_dim);
-    char *cov_json = da_vec_json(cov, cov_dim);
-    free(mu); free(cov);
 
     char callsql[160];
     if (have_seed)
@@ -2202,31 +2404,13 @@ static void agent_rebalance_sibling_fn(sqlite3_context *ctx, int argc,
     char *bv_json = da_vec_json(bv, bdim);
     free(bv);
 
-    StrBuf trajsql; sb_init(&trajsql);
-    sb_puts(&trajsql, "fractal_search_trajectory(");
-    sb_sql_lit(&trajsql, alloc_table);
-    sb_puts(&trajsql, ",");
-    sb_sql_lit(&trajsql, alloc_emb_col);
-    sb_puts(&trajsql, ",?1,?2,1)");
-    if (sb_failed(&trajsql) || !bv_json) {
-        sb_free(&trajsql); free(bv_json); free(opt); free(weights_vec_json);
-        sqlite3_result_error_nomem(ctx);
-        return;
-    }
-    TwoText tbind = { bv_json, weights_vec_json };
     int64_t nearest_doc = -1; double nearest_dist = 0.0;
-    int rc = da_nearest1(st, trajsql.buf, bind_two_text, &tbind, "doc_id",
-                         &nearest_doc, &nearest_dist, err, sizeof err);
-    sb_free(&trajsql); free(bv_json);
-    if (rc != 0) { free(opt); free(weights_vec_json); da_result_err(ctx, err); return; }
-    if (nearest_doc < 0) {
-        free(opt); free(weights_vec_json);
-        char msg[256];
-        snprintf(msg, sizeof msg,
-                 "fractal_agent_rebalance_sibling: no allocation rows in %s", alloc_table);
-        sqlite3_result_error(ctx, msg, -1);
-        return;
-    }
+    int rc = da_nearest_traj_row(ctx, st, alloc_table, alloc_emb_col,
+                                 bv_json, weights_vec_json,
+                                 &nearest_doc, &nearest_dist, err, sizeof err,
+                                 "fractal_agent_rebalance_sibling: no allocation rows in %s");
+    free(bv_json);
+    if (rc != 0) { free(opt); free(weights_vec_json); return; }
 
     char *resolved_id = da_resolve_id(st, alloc_table, id_col, nearest_doc, err, sizeof err);
     if (!resolved_id && err[0]) { free(opt); free(weights_vec_json); da_result_err(ctx, err); return; }
@@ -2328,17 +2512,12 @@ static void agent_detour_classify_fn(sqlite3_context *ctx, int argc,
             "([A-Za-z_][A-Za-z0-9_]*)", -1);
         return;
     }
-    int rows = da_table_has_rows(st, vehicle_table, err, sizeof err);
-    if (rows < 0) { da_result_err(ctx, err); return; }
-    if (rows == 0) {
-        char msg[256];
-        snprintf(msg, sizeof msg,
-                 "fractal_agent_detour_classify: no vehicle rows in %s", vehicle_table);
-        sqlite3_result_error(ctx, msg, -1);
+    if (!da_table_rows_ok(ctx, st, vehicle_table, err, sizeof err,
+                         "fractal_agent_detour_classify: no vehicle rows in %s"))
         return;
-    }
 
-    int bdim = 0, cdim = 0;
+    int bdim = 0;
+    int cdim = 0;
     double *bv = da_decode_vec(argv[2], &bdim);
     double *cv = da_decode_vec(argv[3], &cdim);
     if (!bv || !cv) {
@@ -2350,37 +2529,16 @@ static void agent_detour_classify_fn(sqlite3_context *ctx, int argc,
     char *cv_json = da_vec_json(cv, cdim);
     free(bv); free(cv);
 
-    StrBuf trajsql; sb_init(&trajsql);
-    sb_puts(&trajsql, "fractal_search_trajectory(");
-    sb_sql_lit(&trajsql, vehicle_table);
-    sb_puts(&trajsql, ",");
-    sb_sql_lit(&trajsql, emb_col);
-    sb_puts(&trajsql, ",?1,?2,1)");
-    if (sb_failed(&trajsql) || !bv_json || !cv_json) {
-        sb_free(&trajsql); free(bv_json); free(cv_json);
-        sqlite3_result_error_nomem(ctx);
-        return;
-    }
-    TwoText tbind = { bv_json, cv_json };
     int64_t nearest_doc = -1; double nearest_dist = 0.0;
-    int rc = da_nearest1(st, trajsql.buf, bind_two_text, &tbind, "doc_id",
-                         &nearest_doc, &nearest_dist, err, sizeof err);
-    sb_free(&trajsql); free(bv_json); free(cv_json);
-    if (rc != 0) { da_result_err(ctx, err); return; }
-    if (nearest_doc < 0) {
-        char msg[256];
-        snprintf(msg, sizeof msg,
-                 "fractal_agent_detour_classify: no vehicle rows in %s", vehicle_table);
-        sqlite3_result_error(ctx, msg, -1);
-        return;
-    }
+    int rc = da_nearest_traj_row(ctx, st, vehicle_table, emb_col, bv_json, cv_json,
+                                 &nearest_doc, &nearest_dist, err, sizeof err,
+                                 "fractal_agent_detour_classify: no vehicle rows in %s");
+    free(bv_json); free(cv_json);
+    if (rc != 0) return;
 
-    int gdim = 0;
-    double *gps = da_decode_vec(argv[4], &gdim);
-    if (!gps) { sqlite3_result_error(ctx, "fractalsql: gps_trace must be a CSV/JSON vector", -1); return; }
-    char *gps_json = da_vec_json(gps, gdim);
-    free(gps);
-    if (!gps_json) { sqlite3_result_error_nomem(ctx); return; }
+    char *gps_json = da_decode_vec_json(ctx, argv[4],
+        "fractalsql: gps_trace must be a CSV/JSON vector");
+    if (!gps_json) return;
     char bcsql[128];
     snprintf(bcsql, sizeof bcsql, "SELECT fractal_dimension_boxcount(?1,%d)", boxcount_dim);
     char *bc_text = da_scalar_text(st, bcsql, bind_one_text, &(OneText){ gps_json }, err, sizeof err);
@@ -2488,17 +2646,12 @@ static void agent_track_anomaly_fn(sqlite3_context *ctx, int argc,
             "([A-Za-z_][A-Za-z0-9_]*)", -1);
         return;
     }
-    int rows = da_table_has_rows(st, track_table, err, sizeof err);
-    if (rows < 0) { da_result_err(ctx, err); return; }
-    if (rows == 0) {
-        char msg[256];
-        snprintf(msg, sizeof msg,
-                 "fractal_agent_track_anomaly: no track rows in %s", track_table);
-        sqlite3_result_error(ctx, msg, -1);
+    if (!da_table_rows_ok(ctx, st, track_table, err, sizeof err,
+                         "fractal_agent_track_anomaly: no track rows in %s"))
         return;
-    }
 
-    int bdim = 0, cdim = 0;
+    int bdim = 0;
+    int cdim = 0;
     double *bv = da_decode_vec(argv[2], &bdim);
     double *cv = da_decode_vec(argv[3], &cdim);
     if (!bv || !cv) {
@@ -2510,37 +2663,16 @@ static void agent_track_anomaly_fn(sqlite3_context *ctx, int argc,
     char *cv_json = da_vec_json(cv, cdim);
     free(bv); free(cv);
 
-    StrBuf trajsql; sb_init(&trajsql);
-    sb_puts(&trajsql, "fractal_search_trajectory(");
-    sb_sql_lit(&trajsql, track_table);
-    sb_puts(&trajsql, ",");
-    sb_sql_lit(&trajsql, emb_col);
-    sb_puts(&trajsql, ",?1,?2,1)");
-    if (sb_failed(&trajsql) || !bv_json || !cv_json) {
-        sb_free(&trajsql); free(bv_json); free(cv_json);
-        sqlite3_result_error_nomem(ctx);
-        return;
-    }
-    TwoText tbind = { bv_json, cv_json };
     int64_t nearest_doc = -1; double nearest_dist = 0.0;
-    int rc = da_nearest1(st, trajsql.buf, bind_two_text, &tbind, "doc_id",
-                         &nearest_doc, &nearest_dist, err, sizeof err);
-    sb_free(&trajsql); free(bv_json); free(cv_json);
-    if (rc != 0) { da_result_err(ctx, err); return; }
-    if (nearest_doc < 0) {
-        char msg[256];
-        snprintf(msg, sizeof msg,
-                 "fractal_agent_track_anomaly: no track rows in %s", track_table);
-        sqlite3_result_error(ctx, msg, -1);
-        return;
-    }
+    int rc = da_nearest_traj_row(ctx, st, track_table, emb_col, bv_json, cv_json,
+                                 &nearest_doc, &nearest_dist, err, sizeof err,
+                                 "fractal_agent_track_anomaly: no track rows in %s");
+    free(bv_json); free(cv_json);
+    if (rc != 0) return;
 
-    int hdim = 0;
-    double *heading = da_decode_vec(argv[4], &hdim);
-    if (!heading) { sqlite3_result_error(ctx, "fractalsql: heading_series must be a CSV/JSON vector", -1); return; }
-    char *heading_json = da_vec_json(heading, hdim);
-    free(heading);
-    if (!heading_json) { sqlite3_result_error_nomem(ctx); return; }
+    char *heading_json = da_decode_vec_json(ctx, argv[4],
+        "fractalsql: heading_series must be a CSV/JSON vector");
+    if (!heading_json) return;
     char *dfa_text = da_scalar_text(st, "SELECT fractal_dimension_dfa(?1)",
                                     bind_one_text, &(OneText){ heading_json }, err, sizeof err);
     free(heading_json);
@@ -2641,18 +2773,14 @@ static void agent_network_coverage_alert_fn(sqlite3_context *ctx, int argc,
                       ? sqlite3_value_int(argv[2]) : 2;
     int drift_win = (argc >= 4 && sqlite3_value_type(argv[3]) != SQLITE_NULL)
                    ? sqlite3_value_int(argv[3]) : 48;
-    double drift_threshold = (argc >= 5 && sqlite3_value_type(argv[4]) != SQLITE_NULL)
-                            ? sqlite3_value_double(argv[4]) : 0.5;
+    double drift_threshold = da_opt_double(argc, argv, 4, 0.5);
     const char *context = (argc >= 6 && sqlite3_value_type(argv[5]) != SQLITE_NULL)
                          ? (const char *)sqlite3_value_text(argv[5]) : "{}";
     if (!context) context = "{}";
 
-    int pdim = 0;
-    double *points = da_decode_vec(argv[0], &pdim);
-    if (!points) { sqlite3_result_error(ctx, "fractalsql: point_cloud must be a CSV/JSON vector", -1); return; }
-    char *points_json = da_vec_json(points, pdim);
-    free(points);
-    if (!points_json) { sqlite3_result_error_nomem(ctx); return; }
+    char *points_json = da_decode_vec_json(ctx, argv[0],
+        "fractalsql: point_cloud must be a CSV/JSON vector");
+    if (!points_json) return;
     char morphsql[128];
     snprintf(morphsql, sizeof morphsql,
              "SELECT fractal_morphological_complexity(?1,%d)", boxcount_dim);
@@ -2664,12 +2792,9 @@ static void agent_network_coverage_alert_fn(sqlite3_context *ctx, int argc,
     double lac = da_json_num(st, morph, "$.lacunarity");
     free(morph);
 
-    int ddim = 0;
-    double *drift_series = da_decode_vec(argv[1], &ddim);
-    if (!drift_series) { sqlite3_result_error(ctx, "fractalsql: drift_series must be a CSV/JSON vector", -1); return; }
-    char *drift_json_in = da_vec_json(drift_series, ddim);
-    free(drift_series);
-    if (!drift_json_in) { sqlite3_result_error_nomem(ctx); return; }
+    char *drift_json_in = da_decode_vec_json(ctx, argv[1],
+        "fractalsql: drift_series must be a CSV/JSON vector");
+    if (!drift_json_in) return;
     char driftsql[128];
     snprintf(driftsql, sizeof driftsql,
              "SELECT fractal_dimension_drift(?1,%d)", drift_win);
@@ -2754,18 +2879,14 @@ static void agent_regime_triage_fn(sqlite3_context *ctx, int argc,
     }
     int win = (argc >= 2 && sqlite3_value_type(argv[1]) != SQLITE_NULL)
             ? sqlite3_value_int(argv[1]) : 64;
-    double drift_threshold = (argc >= 3 && sqlite3_value_type(argv[2]) != SQLITE_NULL)
-                            ? sqlite3_value_double(argv[2]) : 0.5;
+    double drift_threshold = da_opt_double(argc, argv, 2, 0.5);
     const char *context = (argc >= 4 && sqlite3_value_type(argv[3]) != SQLITE_NULL)
                          ? (const char *)sqlite3_value_text(argv[3]) : "{}";
     if (!context) context = "{}";
 
-    int sdim = 0;
-    double *series = da_decode_vec(argv[0], &sdim);
-    if (!series) { sqlite3_result_error(ctx, "fractalsql: series must be a CSV/JSON vector", -1); return; }
-    char *series_json = da_vec_json(series, sdim);
-    free(series);
-    if (!series_json) { sqlite3_result_error_nomem(ctx); return; }
+    char *series_json = da_decode_vec_json(ctx, argv[0],
+        "fractalsql: series must be a CSV/JSON vector");
+    if (!series_json) return;
 
     char *dfa_text = da_scalar_text(st, "SELECT fractal_dimension_dfa(?1)",
                                     bind_one_text, &(OneText){ series_json }, err, sizeof err);
@@ -2867,10 +2988,8 @@ static void agent_diverse_portfolios_fn(sqlite3_context *ctx, int argc,
     int cardinality = sqlite3_value_int(argv[2]);
     int n_restarts = (argc >= 4 && sqlite3_value_type(argv[3]) != SQLITE_NULL)
                     ? sqlite3_value_int(argv[3]) : 8;
-    double overlap_threshold = (argc >= 5 && sqlite3_value_type(argv[4]) != SQLITE_NULL)
-                              ? sqlite3_value_double(argv[4]) : 0.15;
-    double quality_frac = (argc >= 6 && sqlite3_value_type(argv[5]) != SQLITE_NULL)
-                         ? sqlite3_value_double(argv[5]) : 0.90;
+    double overlap_threshold = da_opt_double(argc, argv, 4, 0.15);
+    double quality_frac = da_opt_double(argc, argv, 5, 0.90);
     const char *context = (argc >= 8 && sqlite3_value_type(argv[7]) != SQLITE_NULL)
                          ? (const char *)sqlite3_value_text(argv[7]) : "{}";
     const char *objective_mode = (argc >= 9 && sqlite3_value_type(argv[8]) != SQLITE_NULL)
@@ -2887,17 +3006,10 @@ static void agent_diverse_portfolios_fn(sqlite3_context *ctx, int argc,
         return;
     }
 
-    int mu_dim = 0, cov_dim = 0;
-    double *mu = da_decode_vec(argv[0], &mu_dim);
-    double *cov = da_decode_vec(argv[1], &cov_dim);
-    if (!mu || !cov) {
-        free(mu); free(cov);
-        sqlite3_result_error(ctx, "fractalsql: mu/cov must be CSV/JSON vectors", -1);
+    char *mu_json = NULL;
+    char *cov_json = NULL;
+    if (da_mu_cov_json(ctx, argv[0], argv[1], &mu_json, &cov_json) != 0)
         return;
-    }
-    char *mu_json = da_vec_json(mu, mu_dim);
-    char *cov_json = da_vec_json(cov, cov_dim);
-    free(mu); free(cov);
     if (!mu_json || !cov_json) {
         free(mu_json); free(cov_json);
         sqlite3_result_error_nomem(ctx);
@@ -3015,32 +3127,7 @@ static void agent_diverse_portfolios_fn(sqlite3_context *ctx, int argc,
     /* Splice the shared rationale into every row (one reasoning call
      * covering all candidates, repeated per row). */
     StrBuf out; sb_init(&out);
-    sb_puts(&out, "[");
-    {
-        sqlite3_stmt *stmt = NULL;
-        if (sqlite3_prepare_v2(st->db,
-                "SELECT key, json_extract(value,'$.candidate_id'), "
-                "json_extract(value,'$.sharpe'), json_extract(value,'$.weights') "
-                "FROM json_each(?1)", -1, &stmt, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(stmt, 1, rows_json, -1, SQLITE_TRANSIENT);
-            int first = 1;
-            while (sqlite3_step(stmt) == SQLITE_ROW) {
-                if (!first) sb_puts(&out, ",");
-                first = 0;
-                int64_t cid = sqlite3_column_int64(stmt, 1);
-                double csh = sqlite3_column_double(stmt, 2);
-                const unsigned char *w = sqlite3_column_text(stmt, 3);
-                sb_printf(&out, "{\"candidate_id\":%lld,\"sharpe\":%.10f,\"weights\":",
-                         (long long)cid, csh);
-                sb_puts(&out, w ? (const char *)w : "null");
-                sb_puts(&out, ",\"rationale\":");
-                sb_json_string(&out, rationale);
-                sb_puts(&out, "}");
-            }
-        }
-        sqlite3_finalize(stmt);
-    }
-    sb_puts(&out, "]");
+    da_splice_rationale(ctx, st, &out, rows_json, rationale);
     free(rows_json); free(rationale);
     if (sb_failed(&out)) { sb_free(&out); sqlite3_result_error_nomem(ctx); return; }
     sqlite3_result_text(ctx, out.buf, (int)out.len, SQLITE_TRANSIENT);

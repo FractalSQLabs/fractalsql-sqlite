@@ -20,6 +20,21 @@
 
 namespace fsqlmcp
 {
+    // SIGHUP: a pending forced-reload request, consumed by whichever
+    // connection thread next calls TokenStore::matches(). The signal
+    // handler itself (onSighup, below) ONLY touches this atomic -- no
+    // malloc/new, no iostream, no filesystem calls -- because those are
+    // not async-signal-safe: if the signal lands while the interrupted
+    // thread is already inside glibc's own (non-reentrant) malloc lock,
+    // a signal handler that also calls malloc can deadlock the whole
+    // process. TSan's "signal-unsafe call inside of a signal" diagnostic
+    // caught the previous version of this (forceReloadFromSighup() ran
+    // reload(true) -- ifstream/filesystem::path/string allocation --
+    // directly from the handler) the first time any test actually sent
+    // a real SIGHUP. A relaxed atomic store/exchange is signal-safe
+    // (lock-free bool) and needs no mutex.
+    static std::atomic<bool> g_sighupReload{ false };
+
     // Bearer-token store: opaque token, mtime-hot-reloaded file form,
     // timing-safe compare, NEVER logged.
     class TokenStore
@@ -35,20 +50,18 @@ namespace fsqlmcp
             // on MSVC and deadlocks forever on glibc; do not restore the
             // maybeReload-then-lock shape.
             std::lock_guard<std::mutex> lk( mu_ );
+#if !defined( _WIN32 )
+            // SIGHUP's forced reload: ignores the mtime check entirely,
+            // consumed here (on whatever ordinary request thread happens
+            // to call matches() next) rather than done on the signal
+            // handler's own stack -- see g_sighupReload's own comment.
+            if( g_sighupReload.exchange( false, std::memory_order_relaxed ) )
+                reload( true );
+#endif
             if( !cfg_.authTokenFile.empty() ) reload( false );
             if( token_.empty() ) return false;
             if( presented.size() != token_.size() ) return false;
             return CRYPTO_memcmp( presented.data(), token_.data(), token_.size() ) == 0;   // timing-safe
-        }
-
-        // SIGHUP: forced reload, and NOTHING else (13.6's fix; the Python
-        // HTTP draft's own handler overcaptured and shut the server down too).
-        // Windows has no SIGHUP; the mtime check still reloads per request.
-        void forceReloadFromSighup()
-        {
-#if !defined( _WIN32 )
-            reload( true );
-#endif
         }
 
         // 13.3.4's per-client fairness key: the token's own prefix when the
@@ -191,7 +204,7 @@ namespace fsqlmcp
             RAND_poll();
             (void) RAND_bytes( rnd, sizeof( rnd ) );
         }
-        static const char* kHex = "0123456789abcdef";
+        static const char* const kHex = "0123456789abcdef";
         std::string out = "sess-";
         for( unsigned char c : rnd )
         {
@@ -204,13 +217,16 @@ namespace fsqlmcp
     static std::atomic<bool> g_httpSignalled{ false };
     static void onHttpTermSignal( int ) { g_httpSignalled.store( true ); }
 #if !defined( _WIN32 )
-    static TokenStore* g_tokenStore = nullptr;
-    static void onSighup( int ) { if( g_tokenStore ) g_tokenStore->forceReloadFromSighup(); }   // reload ONLY
+    // 13.6: forces a reload, and NOTHING else (the Python HTTP draft's own
+    // handler overcaptured and shut the server down too) -- just the
+    // atomic store, consumed by TokenStore::matches() on an ordinary
+    // request thread; see g_sighupReload's own comment for why.
+    static void onSighup( int ) { g_sighupReload.store( true, std::memory_order_relaxed ); }
 #endif
 
     static constexpr std::size_t kMaxHeaderBytes = 64 * 1024;
     static constexpr std::size_t kMaxBodyBytes   = 32 * 1024 * 1024;
-    static const char* kSessionHeader = "Mcp-Session-Id";
+    static const char* const kSessionHeader = "Mcp-Session-Id";
 
     struct HttpRequest
     {
@@ -330,14 +346,153 @@ namespace fsqlmcp
         sendHttp( io, status, body.dump(), "application/json", extra );
     }
 
+    // GET /healthz and /readyz are the ONLY two routes served without
+    // authentication (10.3). Returns true iff the request was fully
+    // handled (i.e. the caller must not do anything else with it).
+    static bool handleUnauthenticatedGet( const ConnIo& io, const std::string& method, const std::string& path,
+                                          const std::function<bool()>& readinessProbe )
+    {
+        if( method != "GET" ) return false;
+        if( path == "/healthz" ) { sendHttpJson( io, 200, Json{ { "ok", true } } ); return true; }
+        if( path == "/readyz" )
+        {
+            const bool ready = readinessProbe ? readinessProbe() : false;
+            sendHttpJson( io, ready ? 200 : 503,
+                          Json{ { "ok", ready }, { "probe", "engine version query" } } );
+            return true;
+        }
+        return false;
+    }
+
+    // Extracts any "Bearer <token>" value from the Authorization header
+    // and checks it against the token store (timing-safe compare lives in
+    // TokenStore::matches). The presented value is returned via presentedOut
+    // but is NEVER logged by any caller.
+    static bool isAuthenticated( const HttpRequest& req, TokenStore& tokens, std::string& presentedOut )
+    {
+        auto authIt = req.headers.find( "authorization" );
+        const std::string authHeader = authIt == req.headers.end() ? std::string() : authIt->second;
+        if( authHeader.rfind( "Bearer ", 0 ) == 0 ) presentedOut = authHeader.substr( 7 );
+        return !presentedOut.empty() && tokens.matches( presentedOut );
+    }
+
+    // GET requests other than /healthz,/readyz, reached only once the
+    // caller has already authenticated: cfg.path replies 405 (GET is not
+    // how this server is used), anything else is 404.
+    static void handleAuthenticatedGet( const ConnIo& io, const std::string& path, const HttpConfig& cfg )
+    {
+        if( path == cfg.path )
+            sendHttpJson( io, 405, Json{ { "error",
+                "GET /mcp is not used by this server; POST JSON-RPC 2.0 messages" } } );
+        else
+            sendHttpJson( io, 404, Json{ { "error", "not found" } } );
+    }
+
+    // DELETE cfg.path with a known Mcp-Session-Id tears the session down
+    // (11.2's closeSession hook) and acks 200; anything else is 404.
+    static void handleDelete( const ConnIo& io, const std::string& path, const std::string& sessionId,
+                             const HttpConfig& cfg, std::mutex& sessionsMu,
+                             std::map<std::string, std::string>& sessions,
+                             const std::function<void( const std::string& )>& closeSession )
+    {
+        if( path == cfg.path && !sessionId.empty() )
+        {
+            std::string storedKey;
+            {
+                std::lock_guard<std::mutex> lk( sessionsMu );
+                auto sit = sessions.find( sessionId );
+                if( sit != sessions.end() ) { storedKey = sit->second; sessions.erase( sit ); }
+            }
+            if( closeSession ) closeSession( storedKey.empty() ? sessionId : storedKey );
+            sendHttpJson( io, 200, Json{ { "ok", true } } );
+        }
+        else
+            sendHttpJson( io, 404, Json{ { "error", "not found" } } );
+    }
+
+    // Looks up sessionId's dispatch/fairness client key. Sends 400 when the
+    // header is missing, 404 when it names an unknown/deleted session, and
+    // returns false in both cases so the caller returns without dispatching.
+    static bool resolveSession( const ConnIo& io, const std::string& sessionId, std::mutex& sessionsMu,
+                                std::map<std::string, std::string>& sessions, std::string& clientKeyOut )
+    {
+        if( sessionId.empty() )
+        {
+            sendHttpJson( io, 400, Json{ { "error", "missing Mcp-Session-Id (initialize first)" } } );
+            return false;
+        }
+        std::lock_guard<std::mutex> lk( sessionsMu );
+        auto sit = sessions.find( sessionId );
+        if( sit == sessions.end() )
+        {
+            sendHttpJson( io, 404, Json{ { "error", "unknown session (deleted or never initialized)" } } );
+            return false;
+        }
+        clientKeyOut = sit->second;
+        return true;
+    }
+
+    // initialize must not carry a session id; mints one, registers its
+    // fairness/dispatch client key, and dispatches. 200 w/ Mcp-Session-Id
+    // header + body on a substantive response, 202 (same header) otherwise.
+    static void handleInitialize( const ConnIo& io, const HttpRequest& req, const std::string& sessionId,
+                                  const std::string& presented, const HttpConfig& cfg, JsonRpcServer& server,
+                                  std::mutex& sessionsMu, std::map<std::string, std::string>& sessions )
+    {
+        if( !sessionId.empty() )
+        {
+            sendHttpJson( io, 400, Json{ { "error", "initialize must not carry a session id" } } );
+            return;
+        }
+        const std::string minted = randomSessionId();
+        const std::string clientKey = TokenStore::clientKeyFor( cfg, presented, minted );
+        { std::lock_guard<std::mutex> lk( sessionsMu ); sessions[ minted ] = clientKey; }
+        auto resp = server.handleLine( req.body, clientKey );
+        std::map<std::string, std::string> extra;
+        extra[ kSessionHeader ] = minted;
+        if( resp ) sendHttp( io, 200, *resp, "application/json", extra );
+        else sendHttp( io, 202, "", "text/plain", extra );
+    }
+
+    // Cancel notifications ride the already-authenticated session and
+    // never produce a substantive response (202 ack only), per 1.1.
+    static void handleCancelNotification( const ConnIo& io, const HttpRequest& req, const std::string& sessionId,
+                                          JsonRpcServer& server, std::mutex& sessionsMu,
+                                          std::map<std::string, std::string>& sessions )
+    {
+        std::string clientKey;
+        if( !resolveSession( io, sessionId, sessionsMu, sessions, clientKey ) ) return;
+        server.handleLine( req.body, clientKey );   // notification: nullopt by design
+        sendHttp( io, 202, "", "text/plain" );
+    }
+
+    // Ordinary JSON-RPC call/notification on an already-initialized session.
+    static void handleDispatch( const ConnIo& io, const HttpRequest& req, const std::string& sessionId,
+                               bool isRequest, JsonRpcServer& server, std::mutex& sessionsMu,
+                               std::map<std::string, std::string>& sessions )
+    {
+        std::string clientKey;
+        if( !resolveSession( io, sessionId, sessionsMu, sessions, clientKey ) ) return;
+        auto resp = server.handleLine( req.body, clientKey );
+        if( resp )
+            sendHttp( io, 200, *resp, "application/json" );
+        else
+            // notification, or a cancelled request whose result is
+            // discarded: per 1.1, nothing of substance is delivered.
+            sendHttp( io, isRequest ? 200 : 202, "", "text/plain" );
+    }
+
     int runHttpTransport( JsonRpcServer& server, const HttpConfig& cfg,
                           std::function<bool()> readinessProbe,
                           std::function<void( const std::string& sessionId )> closeSession )
     {
         net::init();
-        TokenStore tokens( cfg );
+        // Detached connection threads capture these by reference and may
+        // outlive the bounded drain/grace waits below (a slow in-flight
+        // call), so they must never be destroyed while the process lives:
+        // intentionally leaked, reclaimed by process exit.
+        TokenStore& tokens = *new TokenStore( cfg );
 #if !defined( _WIN32 )
-        g_tokenStore = &tokens;
         std::signal( SIGHUP, onSighup );   // 13.6: forces reload, never shutdown
 #endif
         std::signal( SIGTERM, onHttpTermSignal );
@@ -377,9 +532,9 @@ namespace fsqlmcp
                   : "TLS must terminate in front of this server; "
                     "this process speaks plaintext HTTP only behind that proxy" } } );
 
-        std::mutex sessionsMu;
-        std::map<std::string, std::string> sessions;   // sessionId -> its fairness/dispatch client key
-        std::atomic<int> liveConnections{ 0 };         // for the bounded post-drain grace below
+        std::mutex& sessionsMu = *new std::mutex;
+        auto& sessions = *new std::map<std::string, std::string>;   // sessionId -> its fairness/dispatch client key
+        std::atomic<int>& liveConnections = *new std::atomic<int>{ 0 };   // for the bounded post-drain grace below
 
         while( !g_httpSignalled.load() )
         {
@@ -426,29 +581,21 @@ namespace fsqlmcp
                 }
                 const ConnIo io( conn, ssl );
 
+                // One request per connection: every response below is sent
+                // with "Connection: close" and the socket closes right
+                // after the handler, so the request body runs at most once
+                // per connection — an if, not a loop. The body lives in a
+                // lambda so its per-path early exits (return) keep the
+                // shape of the loop this used to be.
                 HttpRequest req;
-                while( !g_httpSignalled.load() && readHttpRequest( io, req ) )
+                auto handleRequest = [ & ]() -> void
                 {
                     const std::string path = req.target.substr( 0, req.target.find( '?' ) );
-                    auto authIt = req.headers.find( "authorization" );
-                    const std::string authHeader = authIt == req.headers.end() ? std::string() : authIt->second;
                     std::string presented;
-                    if( authHeader.rfind( "Bearer ", 0 ) == 0 ) presented = authHeader.substr( 7 );
+                    const bool authenticated = isAuthenticated( req, tokens, presented );
 
-                    const bool authenticated = !presented.empty() && tokens.matches( presented );
-
-                    if( req.method == "GET" )
-                    {
-                        // The ONLY two unauthenticated paths (10.3).
-                        if( path == "/healthz" ) { sendHttpJson( io, 200, Json{ { "ok", true } } ); break; }
-                        if( path == "/readyz" )
-                        {
-                            const bool ready = readinessProbe ? readinessProbe() : false;
-                            sendHttpJson( io, ready ? 200 : 503,
-                                          Json{ { "ok", ready }, { "probe", "engine version query" } } );
-                            break;
-                        }
-                    }
+                    // The ONLY two unauthenticated paths (10.3).
+                    if( handleUnauthenticatedGet( io, req.method, path, readinessProbe ) ) return;
 
                     if( !authenticated )
                     {
@@ -456,18 +603,10 @@ namespace fsqlmcp
                         // never log the presented value.
                         sendHttpJson( io, 401, Json{ { "error",
                             presented.empty() ? "missing bearer token" : "invalid bearer token" } } );
-                        break;
+                        return;
                     }
 
-                    if( req.method == "GET" )
-                    {
-                        if( path == cfg.path )
-                            sendHttpJson( io, 405, Json{ { "error",
-                                "GET /mcp is not used by this server; POST JSON-RPC 2.0 messages" } } );
-                        else
-                            sendHttpJson( io, 404, Json{ { "error", "not found" } } );
-                        break;
-                    }
+                    if( req.method == "GET" ) { handleAuthenticatedGet( io, path, cfg ); return; }
 
                     auto sidIt = req.headers.find( "mcp-session-id" );
                     const std::string sessionId = sidIt == req.headers.end() ? std::string() : sidIt->second;
@@ -481,111 +620,49 @@ namespace fsqlmcp
 
                     if( req.method == "DELETE" )
                     {
-                        if( path == cfg.path && !sessionId.empty() )
-                        {
-                            std::string storedKey;
-                            {
-                                std::lock_guard<std::mutex> lk( sessionsMu );
-                                auto sit = sessions.find( sessionId );
-                                if( sit != sessions.end() ) { storedKey = sit->second; sessions.erase( sit ); }
-                            }
-                            if( closeSession ) closeSession( storedKey.empty() ? sessionId : storedKey );
-                            sendHttpJson( io, 200, Json{ { "ok", true } } );
-                        }
-                        else
-                            sendHttpJson( io, 404, Json{ { "error", "not found" } } );
-                        break;
+                        handleDelete( io, path, sessionId, cfg, sessionsMu, sessions, closeSession );
+                        return;
                     }
 
                     if( req.method != "POST" || path != cfg.path )
                     {
                         sendHttpJson( io, req.method == "POST" ? 404 : 405,
                                       Json{ { "error", req.method == "POST" ? "not found" : "method not allowed" } } );
-                        break;
+                        return;
                     }
 
                     if( server.isShuttingDown() )
                     {
                         sendHttpJson( io, 503, Json{ { "error", "server shutting down (retry after restart)" } } );
-                        break;
+                        return;
                     }
 
                     if( !parsed || req.body.empty() || req.body.size() > kMaxBodyBytes )
                     {
                         sendHttpJson( io, 400,
                                       Json{ { "error", "body is not valid JSON or missing/oversized" } } );
-                        break;
+                        return;
                     }
 
                     // Session isolation: initialize mints the session id
                     // (and must not arrive with one); every other request
                     // presents a valid one (400 missing, 404 unknown).
-                    std::string clientKey;
                     if( isInitialize )
                     {
-                        if( !sessionId.empty() )
-                        {
-                            sendHttpJson( io, 400, Json{ { "error", "initialize must not carry a session id" } } );
-                            break;
-                        }
-                        const std::string minted = randomSessionId();
-                        clientKey = TokenStore::clientKeyFor( cfg, presented, minted );
-                        { std::lock_guard<std::mutex> lk( sessionsMu ); sessions[ minted ] = clientKey; }
-                        auto resp = server.handleLine( req.body, clientKey );
-                        std::map<std::string, std::string> extra;
-                        extra[ kSessionHeader ] = minted;
-                        if( resp ) sendHttp( io, 200, *resp, "application/json", extra );
-                        else sendHttp( io, 202, "", "text/plain", extra );
-                        break;
+                        handleInitialize( io, req, sessionId, presented, cfg, server, sessionsMu, sessions );
+                        return;
                     }
 
                     if( isCancel && !isRequest )
                     {
-                        // Cancel notifications ride the authenticated session.
-                        if( sessionId.empty() )
-                        {
-                            sendHttpJson( io, 400, Json{ { "error", "missing Mcp-Session-Id (initialize first)" } } );
-                            break;
-                        }
-                        {
-                            std::lock_guard<std::mutex> lk( sessionsMu );
-                            auto sit = sessions.find( sessionId );
-                            if( sit == sessions.end() )
-                            {
-                                sendHttpJson( io, 404, Json{ { "error", "unknown session (deleted or never initialized)" } } );
-                                break;
-                            }
-                            clientKey = sit->second;
-                        }
-                        server.handleLine( req.body, clientKey );   // notification: nullopt by design
-                        sendHttp( io, 202, "", "text/plain" );
-                        break;
+                        handleCancelNotification( io, req, sessionId, server, sessionsMu, sessions );
+                        return;
                     }
 
-                    if( sessionId.empty() )
-                    {
-                        sendHttpJson( io, 400, Json{ { "error", "missing Mcp-Session-Id (initialize first)" } } );
-                        break;
-                    }
-                    {
-                        std::lock_guard<std::mutex> lk( sessionsMu );
-                        auto sit = sessions.find( sessionId );
-                        if( sit == sessions.end() )
-                        {
-                            sendHttpJson( io, 404, Json{ { "error", "unknown session (deleted or never initialized)" } } );
-                            break;
-                        }
-                        clientKey = sit->second;
-                    }
-                    auto resp = server.handleLine( req.body, clientKey );
-                    if( resp )
-                        sendHttp( io, 200, *resp, "application/json" );
-                    else
-                        // notification, or a cancelled request whose result is
-                        // discarded: per 1.1, nothing of substance is delivered.
-                        sendHttp( io, isRequest ? 200 : 202, "", "text/plain" );
-                    break;
-                }
+                    handleDispatch( io, req, sessionId, isRequest, server, sessionsMu, sessions );
+                };
+                if( !g_httpSignalled.load() && readHttpRequest( io, req ) )
+                    handleRequest();
                 closeConn();
                 liveConnections.fetch_sub( 1 );
                 }

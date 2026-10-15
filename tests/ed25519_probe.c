@@ -62,7 +62,8 @@ static void hex_decode(const char *hex, unsigned char *out, size_t outlen) {
 int main(void) {
     /* RFC 8032 Section 7.1, TEST 1: empty message. */
     {
-        unsigned char pk[32], sig[64];
+        unsigned char pk[32];
+        unsigned char sig[64];
         hex_decode("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
                    pk, 32);
         hex_decode(
@@ -75,7 +76,9 @@ int main(void) {
 
     /* RFC 8032 Section 7.1, TEST 2: 1-byte message 0x72. */
     {
-        unsigned char pk[32], sig[64], msg[1] = { 0x72 };
+        unsigned char pk[32];
+        unsigned char sig[64];
+        unsigned char msg[1] = { 0x72 };
         hex_decode("3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
                    pk, 32);
         hex_decode(
@@ -90,7 +93,8 @@ int main(void) {
      * an arbitrary message, to prove this isn't somehow special-cased
      * to only the two RFC constants above. */
     {
-        unsigned char pk[32], sig[64];
+        unsigned char pk[32];
+        unsigned char sig[64];
         const unsigned char msg[] = "fractalsql ed25519 probe test message";
         hex_decode("6039fdbde399bd5c9cdc64ee81d808c71271261d1be4c4e8bceecc2bd53bcd02",
                    pk, 32);

@@ -129,6 +129,11 @@ script's own `json()` call — SQLite's JSON parser raises on malformed
 input, so a successful result is proof the plugin's own extraction and
 validation actually worked, not just "looks like JSON."
 
+In the [Docker demo](../docs/docker-demo.md#docker-demo-the-learning-path), skip
+the manual three-pass dance above: `run_demo.sh --include-response-modes`
+runs each mode as its own process with the right environment set,
+matching this procedure exactly.
+
 ## Enterprise Tier — QTL & CISO Audit
 
 `enterprise-qtl-audit.sql` exercises the enterprise-tier **Quantized Ternary
@@ -253,7 +258,9 @@ raw-primitive showcases and run with no reasoning endpoint at all. Same
 prerequisites as `demo.sql` (extension loaded; the final reasoning
 section in each needs [reasoning configured](../docs/reasoning-setup.md)
 — every earlier section runs without it). All thirteen are also wired
-into the Docker demo — see [the Learning Path](../docs/docker-demo.md#the-learning-path).
+into the Docker demo — see [the Learning Path](../docs/docker-demo.md#docker-demo-the-learning-path),
+including `run_demo.sh` to run all thirteen (plus every other demo in
+this directory) in one pass instead of one `.read` per file.
 Five (MedTech, Maritime, Fleet, Cybersecurity, Biotech/Genomics) store their vector
 columns as the native **`fractal_vector`** BLOB type instead of
 CSV-TEXT — see

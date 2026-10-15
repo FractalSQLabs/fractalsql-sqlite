@@ -91,7 +91,35 @@ def main() -> int:
                     help="print only the final averages line (for sweep drivers)")
     args = ap.parse_args()
 
-    conn = sqlite3.connect(args.db)
+    # --db arrives as raw CLI text and feeds both a filesystem path and
+    # the connection string, so pin it to the current working directory
+    # (symlinks resolved via realpath) before anything opens it. A
+    # traversal-style argument can then neither redirect where the
+    # database is read (path traversal) nor what is connected to
+    # (connection-string injection).
+    root = os.path.realpath(os.getcwd())
+    db = os.path.realpath(args.db)
+    try:
+        contained = os.path.commonpath([root, db]) == root
+    except ValueError:  # different drives on Windows
+        contained = False
+    if not contained:
+        print(f"head_to_head.py: --db must resolve inside {root} "
+              f"(got: {args.db})", file=sys.stderr)
+        return 2
+
+    # Explicit membership check at the point of use: vector_col is
+    # CLI-supplied text interpolated into SQL below, so pin it to the two
+    # known column names right here (argparse's choices= already enforces
+    # this; this use-site check is the guard the SQL string actually relies
+    # on).
+    if args.vector_col not in ("emb_arr", "emb_fv"):
+        print(f"head_to_head.py: unsupported vector column "
+              f"{args.vector_col!r}", file=sys.stderr)
+        return 2
+    vector_col = args.vector_col
+
+    conn = sqlite3.connect(db)
     conn.enable_load_extension(True)
     conn.load_extension(os.path.abspath(args.ext))
     sqlite_vec.load(conn)
@@ -154,7 +182,7 @@ def main() -> int:
         })
         with timed() as clk:
             result = conn.execute(
-                f"SELECT fractal_search_explore({args.vector_col}, ?, ?) "
+                f"SELECT fractal_search_explore({vector_col}, ?, ?) "
                 f"FROM bench_vectors",
                 (q_json, opts)
             ).fetchone()[0]
