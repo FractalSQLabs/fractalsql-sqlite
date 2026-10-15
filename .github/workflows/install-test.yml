@@ -27,9 +27,27 @@ jobs:
   build-artifacts:
     name: Build .so + .deb + .rpm + .zip (amd64)
     runs-on: ubuntu-24.04
+    env:
+      SQLITE_YEAR: "2024"
+      SQLITE_VERSION: "3460000"    # SQLite 3.46.0
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      - name: SQLite amalgamation (for the bundled MCP server)
+        run: |
+          set -euo pipefail
+          # docker/Dockerfile COPYs deps/sqlite/sqlite3.{c,h} into the MCP
+          # build stages (mcp/Makefile compiles the amalgamation directly
+          # rather than linking system libsqlite3) -- without this the
+          # Docker build fails on "COPY failed: file not found" the
+          # moment it reaches those stages. Same fetch release.yml and
+          # build-test.yml's POSIX jobs use.
+          zip_name="sqlite-amalgamation-${SQLITE_VERSION}.zip"
+          url="https://www.sqlite.org/${SQLITE_YEAR}/${zip_name}"
+          mkdir -p deps
+          curl -fsSL -o deps/sqlite.zip "$url"
+          unzip -q deps/sqlite.zip -d deps
+          mv "deps/sqlite-amalgamation-${SQLITE_VERSION}" deps/sqlite
       - name: Build fractalsql.so
         run: |
           chmod +x build.sh
