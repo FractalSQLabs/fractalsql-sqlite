@@ -40,7 +40,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-VERSION="2.0.5"
+# Single-source-of-truth: derive from FSQL_SQLITE_VERSION_STR, same
+# pattern as package-darwin.sh, rather than a hardcoded copy that can
+# (and did) drift out of sync with what fractalsql_version() returns.
+VERSION="$(sed -n 's/^#define FSQL_SQLITE_VERSION_STR   "\(.*\)"$/\1/p' src/fsql_sqlite_internal.h)"
+[[ -n "${VERSION}" ]] || { echo "could not determine VERSION (FSQL_SQLITE_VERSION_STR not found in src/fsql_sqlite_internal.h)" >&2; exit 1; }
 ITERATION="1"
 DIST_DIR="dist/packages"
 mkdir -p "${DIST_DIR}"
@@ -131,7 +135,7 @@ Quick start:
       -cmd "SELECT fractalsql_edition();"      -- 'Community'
   sqlite3 mydb.sqlite \\
       -cmd ".load ./fractalsql" \\
-      -cmd "SELECT fractalsql_version();"      -- '2.0.5'
+      -cmd "SELECT fractalsql_version();"      -- '${VERSION}'
 
 SQL surface (2.0):
   fractalsql_edition()               TEXT

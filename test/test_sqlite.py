@@ -5,7 +5,8 @@ Exercises the three assertions every release must pass:
 
     1. The extension loads.
     2. fractalsql_edition() returns 'Community'.
-       fractalsql_version() returns '2.0.5'.
+       fractalsql_version() matches src/fsql_sqlite_internal.h's
+       FSQL_SQLITE_VERSION_STR.
     3. fractal_search(vector, query) returns a sensible distance
        ordering: the vector literally equal to the query scores a
        small distance; random far-away vectors score a larger one
@@ -46,7 +47,26 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 EXPECTED_EDITION = "Community"
-EXPECTED_VERSION = "2.0.5"
+
+
+def _expected_version() -> str:
+    # Single-source-of-truth: derive from FSQL_SQLITE_VERSION_STR, same
+    # pattern scripts/package.sh and scripts/package-darwin.sh use,
+    # rather than a hardcoded copy that can (and did) drift out of
+    # sync with what fractalsql_version() actually returns.
+    import re
+    header = Path(__file__).resolve().parent.parent / "src" / "fsql_sqlite_internal.h"
+    text = header.read_text(encoding="utf-8")
+    m = re.search(r'^#define FSQL_SQLITE_VERSION_STR\s+"([^"]*)"', text, re.MULTILINE)
+    if not m:
+        raise SystemExit(
+            "could not determine EXPECTED_VERSION "
+            "(FSQL_SQLITE_VERSION_STR not found in %s)" % header
+        )
+    return m.group(1)
+
+
+EXPECTED_VERSION = _expected_version()
 
 
 def find_extension() -> Path:
