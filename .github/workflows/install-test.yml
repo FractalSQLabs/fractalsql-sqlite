@@ -23,13 +23,17 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  # Pinned so CI is reproducible — same pin as release.yml and
+  # build-test.yml. Several jobs below fetch this amalgamation so
+  # mcp/Makefile has deps/sqlite/sqlite3.{c,h} to compile against.
+  SQLITE_YEAR: "2024"
+  SQLITE_VERSION: "3460000"    # SQLite 3.46.0
+
 jobs:
   build-artifacts:
     name: Build .so + .deb + .rpm + .zip (amd64)
     runs-on: ubuntu-24.04
-    env:
-      SQLITE_YEAR: "2024"
-      SQLITE_VERSION: "3460000"    # SQLite 3.46.0
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
@@ -283,6 +287,25 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
+      - name: SQLite amalgamation (for the bundled MCP server)
+        run: |
+          set -euo pipefail
+          # mcp/Makefile compiles the vendored sqlite3 amalgamation
+          # directly (deps/sqlite/sqlite3.c) rather than linking system
+          # libsqlite3 -- Homebrew's sqlite formula only ships
+          # headers/lib, not sqlite3.c, so package-darwin.sh's
+          # `make -C mcp` has nothing to compile without this, and its
+          # #include <sqlite3.h> falls back to the macOS SDK's header
+          # (built with SQLITE_OMIT_LOAD_EXTENSION, so
+          # sqlite3_enable_load_extension/sqlite3_load_extension don't
+          # even declare). Same fetch release.yml's build-macos job uses.
+          zip_name="sqlite-amalgamation-${SQLITE_VERSION}.zip"
+          url="https://www.sqlite.org/${SQLITE_YEAR}/${zip_name}"
+          mkdir -p deps
+          curl -fsSL -o deps/sqlite.zip "$url"
+          unzip -q deps/sqlite.zip -d deps
+          mv "deps/sqlite-amalgamation-${SQLITE_VERSION}" deps/sqlite
+
       - name: Build + install the dylib (bare install, not the wizard)
         run: |
           set -euo pipefail
@@ -415,6 +438,16 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
+      - name: SQLite amalgamation (for the bundled MCP server)
+        run: |
+          set -euo pipefail
+          zip_name="sqlite-amalgamation-${SQLITE_VERSION}.zip"
+          url="https://www.sqlite.org/${SQLITE_YEAR}/${zip_name}"
+          mkdir -p deps
+          curl -fsSL -o deps/sqlite.zip "$url"
+          unzip -q deps/sqlite.zip -d deps
+          mv "deps/sqlite-amalgamation-${SQLITE_VERSION}" deps/sqlite
+
       - name: Build + install the dylib (stands in for the release tarball)
         run: |
           set -euo pipefail
@@ -489,6 +522,24 @@ jobs:
           set OUT_DIR=%CD%\dist\windows
           call scripts\windows\build.bat
           if errorlevel 1 exit /b 1
+
+      # The windows-2022 runner image ships vcpkg preinstalled at
+      # %VCPKG_INSTALLATION_ROOT%; mcp\scripts\windows\build.bat looks
+      # for VCPKG_ROOT specifically. Same step release.yml's Windows
+      # leg uses.
+      - name: Install OpenSSL (vcpkg, for the MCP server)
+        shell: cmd
+        run: |
+          echo VCPKG_ROOT=%VCPKG_INSTALLATION_ROOT%>>%GITHUB_ENV%
+          "%VCPKG_INSTALLATION_ROOT%\vcpkg" install openssl:x64-windows-static
+          if errorlevel 1 exit /b 1
+
+      - name: Build fractalsql-sqlite-mcp.exe
+        shell: cmd
+        run: |
+          call mcp\scripts\windows\build.bat
+          if errorlevel 1 exit /b 1
+          dir mcp\dist\windows-mcp\fractalsql-sqlite-mcp.exe
 
       - name: Install WiX Toolset (provides candle.exe + light.exe)
         shell: pwsh
