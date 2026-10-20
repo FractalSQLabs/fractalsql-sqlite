@@ -261,7 +261,10 @@ function Select-ReasoningProvider {
     Write-Host "  2) Cloud / OpenAI-compatible endpoint"
     Write-Host "  3) Skip: search-only install, configure reasoning later"
     $choice = Prompt-Value "Choice" "1"
-    return switch ($choice) { '1' { 'ollama' } '2' { 'openai-compatible' } default { 'skip' } }
+    # switch is a statement, not an expression: `return switch ...` is a
+    # ParserError, so assign its output first.
+    $provider = switch ($choice) { '1' { 'ollama' } '2' { 'openai-compatible' } default { 'skip' } }
+    return $provider
 }
 
 # Resolves the reasoning-provider config, prompting for any missing
