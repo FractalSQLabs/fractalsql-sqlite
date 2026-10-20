@@ -11,7 +11,7 @@
 
 namespace fsqlmcp
 {
-    static const char* kEnterprise =
+    static const char* const kEnterprise =
         " Enterprise tier: returns a clean 'enterprise tier not loaded' error on a Community install.";
 
     std::vector<ToolSpec> buildEnterpriseTools( Db& db )

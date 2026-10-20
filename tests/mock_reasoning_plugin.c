@@ -25,7 +25,7 @@
 #include <string.h>
 
 #ifdef _WIN32
-#include <windows.h>
+#include <Windows.h>
 #endif
 
 #define MOCK_SQL_FILE "/tmp/fractalsql_bt_sql.txt"
@@ -70,7 +70,7 @@ mock_format(void *u, const char *q, size_t ql, const char *c, size_t cl,
 static void
 mock_free(void *opaque)
 {
-    fsql_ai_response_t *r = (fsql_ai_response_t *) opaque;
+    const fsql_ai_response_t *r = (const fsql_ai_response_t *) opaque;
     if (r != NULL && r->summary != NULL)
         free(r->summary);
 }
@@ -109,6 +109,21 @@ mock_generate(void *u, const char *p, size_t pl,
      * a real chat-mode response would look before any extraction. */
     const char *response_mode = mock_getenv_response_mode();
     int         code_mode = response_mode != NULL && strcmp(response_mode, "code") == 0;
+
+    /* Test-only escape hatch: flips the fence-wrapping decision this
+     * mock would otherwise make from RESPONSE_MODE alone. Harness-set
+     * directly on the child process's own environment (not written via
+     * fsql_setenv like RESPONSE_MODE is), so the plain getenv() here is
+     * fine -- no MinGW/MSVC CRT view mismatch to work around, unlike
+     * mock_getenv_response_mode() above. Lets a test reach the
+     * "opposite" of a tier's normal fencing: GENERATE's own fence-
+     * stripping code (normally dead, since T2S forces code_mode =
+     * never-fenced) can be exercised by flipping GENERATE's call INTO
+     * fenced mode; REVIEW's critique_pass() "PASS" branch (normally
+     * dead, since REVIEW forces non-code_mode = always-fenced) can be
+     * exercised by flipping REVIEW's call OUT of fenced mode. */
+    const char *flip = getenv("FSQL_MOCK_FLIP_FENCE");
+    if (flip != NULL && flip[0] != '\0') code_mode = !code_mode;
 
     FILE *dump = fopen(MOCK_RESPONSE_MODE_DUMP_FILE, "w");
     if (dump != NULL)

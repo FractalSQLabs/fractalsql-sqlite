@@ -82,7 +82,6 @@
  */
 
 #include <sqlite3ext.h>
-SQLITE_EXTENSION_INIT3
 
 #include <ctype.h>
 #include <stdio.h>
@@ -90,6 +89,8 @@ SQLITE_EXTENSION_INIT3
 #include <string.h>
 
 #include "fsql_sqlite_internal.h"
+
+SQLITE_EXTENSION_INIT3
 
 /* ------------------------------------------------------------------ */
 /* Small helpers                                                       */
@@ -205,7 +206,7 @@ static void sb_putn(StrBuf *b, const char *s, size_t n) {
     if (b->failed || n == 0) return;
     if (b->len + n + 1 > b->cap) {
         size_t nc = b->cap * 2;
-        while (nc < b->len + n + 1) nc *= 2;
+        for (; nc < b->len + n + 1; nc *= 2);
         char *nb = (char *)realloc(b->buf, nc);
         if (!nb) {
             b->failed = 1;
@@ -309,7 +310,7 @@ typedef struct FkRow {
     char *match;
 } FkRow;
 
-static void fk_rows_free(FkRow *rows, int n) {
+static void fk_rows_free(const FkRow *rows, int n) {
     for (int i = 0; i < n; i++) {
         free(rows[i].rtable);
         free(rows[i].from);
@@ -320,7 +321,97 @@ static void fk_rows_free(FkRow *rows, int n) {
     }
 }
 
-static int emit_foreign_keys(FsqlState *st, StrBuf *out, const char *name,
+/* Step every foreign_key_list row into the flat FkRow array (bounded by
+ * FK_ROW_MAX), freeing everything collected so far on any failure.
+ * Returns 0 with *out_n set, or -1 with `err` filled (the caller
+ * finalizes the statement; the rows are already released). */
+static int fk_rows_collect(const FsqlState *st, sqlite3_stmt *fs,
+                           const char *name, FkRow *rows, int *out_n,
+                           char *err, size_t err_cap) {
+    int n = 0;
+    for (;;) {
+        int rc = sqlite3_step(fs);
+        if (rc == SQLITE_DONE) break;
+        if (rc != SQLITE_ROW) {
+            set_err(err, err_cap,
+                    "fractal_schema_context: FK introspection failed for %s: %s",
+                    name, sqlite3_errmsg(st->db));
+            fk_rows_free(rows, n);
+            return -1;
+        }
+        if (n >= FK_ROW_MAX) {
+            set_err(err, err_cap,
+                    "fractal_schema_context: more than %d foreign-key "
+                    "column mappings on %s", FK_ROW_MAX, name);
+            fk_rows_free(rows, n);
+            return -1;
+        }
+        rows[n].id     = sqlite3_column_int(fs, 0);
+        rows[n].rtable = dup_str((const char *)sqlite3_column_text(fs, 2));
+        rows[n].from   = dup_str((const char *)sqlite3_column_text(fs, 3));
+        rows[n].to     = dup_str((const char *)sqlite3_column_text(fs, 4));
+        rows[n].on_update = dup_str((const char *)sqlite3_column_text(fs, 5));
+        rows[n].on_delete = dup_str((const char *)sqlite3_column_text(fs, 6));
+        rows[n].match  = dup_str((const char *)sqlite3_column_text(fs, 7));
+        if (!rows[n].rtable || !rows[n].from) {
+            set_err(err, err_cap, "fractalsql: out of memory");
+            fk_rows_free(rows, n + 1);
+            return -1;
+        }
+        n++;
+    }
+    *out_n = n;
+    return 0;
+}
+
+/* Append the FROM/TO column lists for constraint rows [i, j) -- all
+ * sharing one constraint id -- into the scratch buffers. */
+static void fk_put_col_lists(StrBuf *fcol, StrBuf *tcol, const FkRow *rows,
+                             int i, int j) {
+    sb_reset(fcol);
+    sb_reset(tcol);
+    for (int k = i; k < j; k++) {
+        if (k > i) sb_put(fcol, ", ");
+        sb_put(fcol, rows[k].from);
+        if (rows[k].to) {
+            if (k > i) sb_put(tcol, ", ");
+            sb_put(tcol, rows[k].to);
+        }
+    }
+}
+
+/* Append one foreign-key constraint line for the group whose rows start
+ * at index i (the FROM/TO lists were just built into fcol/tcol). */
+static void fk_put_constraint_line(StrBuf *out, const char *name,
+                                   const FkRow *rows, int i,
+                                   const StrBuf *fcol, const StrBuf *tcol) {
+    sb_put(out, "    ");
+    sb_put(out, name);
+    sb_put(out, ": FOREIGN KEY (");
+    sb_put(out, fcol->buf ? fcol->buf : "");
+    sb_put(out, ") REFERENCES ");
+    sb_put(out, rows[i].rtable);
+    if (tcol->len > 0) {
+        sb_put(out, "(");
+        sb_put(out, tcol->buf);
+        sb_put(out, ")");
+    }
+    if (rows[i].on_update && strcmp(rows[i].on_update, "NO ACTION") != 0) {
+        sb_put(out, " ON UPDATE ");
+        sb_put(out, rows[i].on_update);
+    }
+    if (rows[i].on_delete && strcmp(rows[i].on_delete, "NO ACTION") != 0) {
+        sb_put(out, " ON DELETE ");
+        sb_put(out, rows[i].on_delete);
+    }
+    if (rows[i].match && strcmp(rows[i].match, "NONE") != 0) {
+        sb_put(out, " MATCH ");
+        sb_put(out, rows[i].match);
+    }
+    sb_putc(out, '\n');
+}
+
+static int emit_foreign_keys(const FsqlState *st, StrBuf *out, const char *name,
                              char *err, size_t err_cap) {
     sqlite3_stmt *fs = NULL;
     PragmaRc prc = prepare_pragma(st->db, "PRAGMA foreign_key_list(?1)",
@@ -335,41 +426,9 @@ static int emit_foreign_keys(FsqlState *st, StrBuf *out, const char *name,
 
     FkRow rows[FK_ROW_MAX];
     int n = 0;
-    for (;;) {
-        int rc = sqlite3_step(fs);
-        if (rc == SQLITE_DONE) break;
-        if (rc != SQLITE_ROW) {
-            set_err(err, err_cap,
-                    "fractal_schema_context: FK introspection failed for %s: %s",
-                    name, sqlite3_errmsg(st->db));
-            sqlite3_finalize(fs);
-            fk_rows_free(rows, n);
-            return -1;
-        }
-        if (n >= FK_ROW_MAX) {
-            set_err(err, err_cap,
-                    "fractal_schema_context: more than %d foreign-key "
-                    "column mappings on %s", FK_ROW_MAX, name);
-            sqlite3_finalize(fs);
-            fk_rows_free(rows, n);
-            return -1;
-        }
-        rows[n].id     = sqlite3_column_int(fs, 0);
-        rows[n].rtable = dup_str((const char *)sqlite3_column_text(fs, 2));
-        rows[n].from   = dup_str((const char *)sqlite3_column_text(fs, 3));
-        rows[n].to     = dup_str((const char *)sqlite3_column_text(fs, 4));
-        rows[n].on_update = dup_str((const char *)sqlite3_column_text(fs, 5));
-        rows[n].on_delete = dup_str((const char *)sqlite3_column_text(fs, 6));
-        rows[n].match  = dup_str((const char *)sqlite3_column_text(fs, 7));
-        if (!rows[n].rtable || !rows[n].from) {
-            set_err(err, err_cap, "fractalsql: out of memory");
-            sqlite3_finalize(fs);
-            fk_rows_free(rows, n + 1);
-            return -1;
-        }
-        n++;
-    }
+    int crc = fk_rows_collect(st, fs, name, rows, &n, err, err_cap);
     sqlite3_finalize(fs);
+    if (crc != 0) return -1;   /* the collector already freed the rows */
 
     if (n > 0) sb_put(out, "  Foreign keys:\n");
 
@@ -377,48 +436,16 @@ static int emit_foreign_keys(FsqlState *st, StrBuf *out, const char *name,
      * handed out per constraint); group on id changes. sqlite3's own
      * constraintdef rendering has no analog here, so rebuild a
      * DDL-shaped line the way pg_get_constraintdef would. */
-    StrBuf fcol, tcol;
+    StrBuf fcol;
+    StrBuf tcol;
     sb_init(&fcol);
     sb_init(&tcol);
-    int i = 0;
-    while (i < n && !out->failed && !fcol.failed && !tcol.failed) {
+    for (int i = 0; i < n && !out->failed && !fcol.failed &&
+                      !tcol.failed;) {
         int j = i;
-        sb_reset(&fcol);
-        sb_reset(&tcol);
-        while (j < n && rows[j].id == rows[i].id) {
-            if (j > i) sb_put(&fcol, ", ");
-            sb_put(&fcol, rows[j].from);
-            if (rows[j].to) {
-                if (j > i) sb_put(&tcol, ", ");
-                sb_put(&tcol, rows[j].to);
-            }
-            j++;
-        }
-
-        sb_put(out, "    ");
-        sb_put(out, name);
-        sb_put(out, ": FOREIGN KEY (");
-        sb_put(out, fcol.buf ? fcol.buf : "");
-        sb_put(out, ") REFERENCES ");
-        sb_put(out, rows[i].rtable);
-        if (tcol.len > 0) {
-            sb_put(out, "(");
-            sb_put(out, tcol.buf);
-            sb_put(out, ")");
-        }
-        if (rows[i].on_update && strcmp(rows[i].on_update, "NO ACTION") != 0) {
-            sb_put(out, " ON UPDATE ");
-            sb_put(out, rows[i].on_update);
-        }
-        if (rows[i].on_delete && strcmp(rows[i].on_delete, "NO ACTION") != 0) {
-            sb_put(out, " ON DELETE ");
-            sb_put(out, rows[i].on_delete);
-        }
-        if (rows[i].match && strcmp(rows[i].match, "NONE") != 0) {
-            sb_put(out, " MATCH ");
-            sb_put(out, rows[i].match);
-        }
-        sb_putc(out, '\n');
+        for (; j < n && rows[j].id == rows[i].id; j++) { /* group scan */ }
+        fk_put_col_lists(&fcol, &tcol, rows, i, j);
+        fk_put_constraint_line(out, name, rows, i, &fcol, &tcol);
         i = j;
     }
 
@@ -431,7 +458,7 @@ static int emit_foreign_keys(FsqlState *st, StrBuf *out, const char *name,
 /* Resolve `name` (from sqlite_master) and append its structure/FK
  * context to `out`. Returns 0 on success (table emitted or skipped),
  * -1 on hard error with `err` filled. */
-static int append_table_context(FsqlState *st, StrBuf *out,
+static int append_table_context(const FsqlState *st, StrBuf *out,
                                 const char *name, int is_view,
                                 char *err, size_t err_cap) {
     sqlite3_stmt *cs = NULL;
@@ -495,7 +522,57 @@ static int append_table_context(FsqlState *st, StrBuf *out,
  * fractal_text_to_sql() can build context directly in C. Returns a
  * malloc'd NUL-terminated schema description (caller frees), or NULL
  * with `err` filled. Bounded by FSQL_MAX_INPUT_BYTES. */
-static char *build_schema_context(FsqlState *st, char *err, size_t err_cap) {
+
+/* Walk the discovery statement, appending each relation's structure
+ * through append_table_context (sqlite_* internals and NULL-named rows
+ * are filtered at the SQL/step level). Bounded by FSQL_T2S_MAX_TABLES
+ * relations and FSQL_MAX_INPUT_BYTES mid-build. Returns 0 with the
+ * table count in *out_n_tables, or -1 with `err` filled (the caller
+ * finalizes the statement / frees the buffer). */
+static int t2s_append_discovered_tables(const FsqlState *st, StrBuf *out,
+                                        sqlite3_stmt *disc, int *out_n_tables,
+                                        char *err, size_t err_cap) {
+    int n_tables = 0;
+    for (;;) {
+        int rc = sqlite3_step(disc);
+        if (rc == SQLITE_DONE) break;
+        if (rc != SQLITE_ROW) {
+            set_err(err, err_cap,
+                    "fractal_schema_context: table discovery failed: %s",
+                    sqlite3_errmsg(st->db));
+            return -1;
+        }
+        const char *name = (const char *)sqlite3_column_text(disc, 0);
+        const char *type = (const char *)sqlite3_column_text(disc, 1);
+        if (!name || !type) continue;
+        if (n_tables >= FSQL_T2S_MAX_TABLES) {
+            set_err(err, err_cap,
+                    "fractal_schema_context: more than %d tables/views "
+                    "found, exceeds the limit -- scope the schema before "
+                    "calling", FSQL_T2S_MAX_TABLES);
+            return -1;
+        }
+        if (append_table_context(st, out, name,
+                                 strcmp(type, "view") == 0,
+                                 err, err_cap) != 0) {
+            return -1;
+        }
+        n_tables++;
+        /* Abort mid-build once the description can no longer serve as
+         * a prompt component: don't accumulate an unbounded buffer
+         * just to fail the final size check. */
+        if (out->failed || out->len > (size_t)FSQL_MAX_INPUT_BYTES) {
+            set_err(err, err_cap,
+                    "fractal_schema_context: schema description exceeds "
+                    "the %d-byte input cap -- scope the schema before "
+                    "calling", FSQL_MAX_INPUT_BYTES);
+            return -1;
+        }
+    }
+    *out_n_tables = n_tables;
+    return 0;
+}
+static char *build_schema_context(const FsqlState *st, char *err, size_t err_cap) {
     StrBuf out;
     sb_init(&out);
     if (out.failed) {
@@ -521,49 +598,11 @@ static char *build_schema_context(FsqlState *st, char *err, size_t err_cap) {
     }
 
     int n_tables = 0;
-    for (;;) {
-        int rc = sqlite3_step(disc);
-        if (rc == SQLITE_DONE) break;
-        if (rc != SQLITE_ROW) {
-            set_err(err, err_cap,
-                    "fractal_schema_context: table discovery failed: %s",
-                    sqlite3_errmsg(st->db));
-            sqlite3_finalize(disc);
-            sb_free(&out);
-            return NULL;
-        }
-        const char *name = (const char *)sqlite3_column_text(disc, 0);
-        const char *type = (const char *)sqlite3_column_text(disc, 1);
-        if (!name || !type) continue;
-        if (n_tables >= FSQL_T2S_MAX_TABLES) {
-            set_err(err, err_cap,
-                    "fractal_schema_context: more than %d tables/views "
-                    "found, exceeds the limit -- scope the schema before "
-                    "calling", FSQL_T2S_MAX_TABLES);
-            sqlite3_finalize(disc);
-            sb_free(&out);
-            return NULL;
-        }
-        if (append_table_context(st, &out, name,
-                                 strcmp(type, "view") == 0,
-                                 err, err_cap) != 0) {
-            sqlite3_finalize(disc);
-            sb_free(&out);
-            return NULL;
-        }
-        n_tables++;
-        /* Abort mid-build once the description can no longer serve as
-         * a prompt component: don't accumulate an unbounded buffer
-         * just to fail the final size check. */
-        if (out.failed || out.len > (size_t)FSQL_MAX_INPUT_BYTES) {
-            set_err(err, err_cap,
-                    "fractal_schema_context: schema description exceeds "
-                    "the %d-byte input cap -- scope the schema before "
-                    "calling", FSQL_MAX_INPUT_BYTES);
-            sqlite3_finalize(disc);
-            sb_free(&out);
-            return NULL;
-        }
+    if (t2s_append_discovered_tables(st, &out, disc, &n_tables,
+                                     err, err_cap) != 0) {
+        sqlite3_finalize(disc);
+        sb_free(&out);
+        return NULL;
     }
     sqlite3_finalize(disc);
 
@@ -666,6 +705,55 @@ static int stmt_isexplain(sqlite3_stmt *stmt) {
  * Returns 0 if `sql` passes, else -1 with a human-readable reason in
  * `reason` suitable for feeding straight back into the next GENERATE
  * retry. */
+
+/* Parse-only walk of `sql`'s statement chain (preparing a statement
+ * never executes it, so this is safe for every first keyword that got
+ * past the pre-check above). Stops after the second statement or the
+ * chain's end. Returns 0 with *out_first (the caller finalizes it) and
+ * *out_n = statements walked (1, or 2 once more than one was seen), or
+ * -1 with the rejection reason filled and every handle released. */
+static int t2s_walk_statements(sqlite3 *db, const char *sql,
+                               sqlite3_stmt **out_first, int *out_n,
+                               char *reason, size_t rcap) {
+    const char *tail = sql;
+    sqlite3_stmt *first = NULL;
+    int n = 0;
+    for (;;) {
+        sqlite3_stmt *s = NULL;
+        const char *next = tail;
+        int rc = sqlite3_prepare_v2(db, tail, -1, &s, &next);
+        if (rc != SQLITE_OK) {
+            sqlite3_finalize(s);
+            sqlite3_finalize(first);
+            set_err(reason, rcap, "SQL does not parse: %s",
+                    sqlite3_errmsg(db));
+            return -1;
+        }
+        if (!s) {   /* trailing whitespace/comments: nothing left */
+            *out_first = first;
+            *out_n = n;
+            return 0;
+        }
+        if (next == tail) {   /* paranoia: never loop without progress */
+            sqlite3_finalize(s);
+            sqlite3_finalize(first);
+            set_err(reason, rcap, "could not walk statement chain");
+            return -1;
+        }
+        tail = next;
+        if (n == 0) {
+            first = s;
+            n = 1;
+            continue;
+        }
+        /* More than one statement: count is all the caller needs; stop
+         * walking, free the extra handle. */
+        sqlite3_finalize(s);
+        *out_first = first;
+        *out_n = 2;
+        return 0;
+    }
+}
 static int t2s_validate(sqlite3 *db, const char *sql, int allow_dml,
                         char *reason, size_t rcap) {
     char word[32];
@@ -687,41 +775,10 @@ static int t2s_validate(sqlite3 *db, const char *sql, int allow_dml,
         return -1;
     }
 
-    /* Parse-only walk of the statement chain. Preparing a statement
-     * never executes it, so this is safe for every first keyword that
-     * got past the pre-check above. */
-    const char *tail = sql;
     sqlite3_stmt *first = NULL;
     int n = 0;
-    for (;;) {
-        sqlite3_stmt *s = NULL;
-        const char *next = tail;
-        int rc = sqlite3_prepare_v2(db, tail, -1, &s, &next);
-        if (rc != SQLITE_OK) {
-            sqlite3_finalize(s);
-            sqlite3_finalize(first);
-            set_err(reason, rcap, "SQL does not parse: %s",
-                    sqlite3_errmsg(db));
-            return -1;
-        }
-        if (!s) break;   /* trailing whitespace/comments: nothing left */
-        if (next == tail) {   /* paranoia: never loop without progress */
-            sqlite3_finalize(s);
-            sqlite3_finalize(first);
-            set_err(reason, rcap, "could not walk statement chain");
-            return -1;
-        }
-        tail = next;
-        n++;
-        if (n == 1) {
-            first = s;
-        } else {
-            /* More than one statement: count is all the caller needs;
-             * stop walking, free the extra handle. */
-            sqlite3_finalize(s);
-            break;
-        }
-    }
+    if (t2s_walk_statements(db, sql, &first, &n, reason, rcap) != 0)
+        return -1;
 
     if (n == 0) {
         set_err(reason, rcap, "no SQL statement found");
@@ -858,6 +915,34 @@ static char *t2s_feedback_copy(const char *s) {
     return copy_bounded(s, T2S_FEEDBACK_MAX);
 }
 
+/* One review round against the current candidate. Returns:
+ *    0  the critique PASSes -- the candidate stands;
+ *    1  it FAILs -- *feedback now holds the critique for the next
+ *       GENERATE (the previous feedback was already released);
+ *   -1  dispatch failure, or OOM copying the critique (err filled;
+ *       the retry state is untouched on dispatch failure). */
+static int t2s_review_attempt(FsqlState *st, const char *question,
+                              const char *candidate, char **feedback,
+                              char *err, size_t err_cap) {
+    char *critique = NULL;
+    if (t2s_review(st, question, candidate, &critique, err, err_cap) != 0)
+        return -1;
+
+    if (critique_pass(critique)) {
+        free(critique);
+        return 0;
+    }
+
+    free(*feedback);
+    *feedback = t2s_feedback_copy(critique);
+    free(critique);
+    if (!*feedback) {
+        set_err(err, err_cap, "fractalsql: out of memory");
+        return -1;
+    }
+    return 1;
+}
+
 /* Append `s` as a quoted, escaped JSON string literal (RFC 8259: the two
  * mandatory escapes plus the short control-character forms). Duplicated
  * per-TU rather than shared via a header, matching this codebase's
@@ -897,7 +982,7 @@ static void t2s_json_string(StrBuf *b, const char *s) {
  * the audit record is a bonus when licensed, not a requirement. Any
  * failure (no license, OOM, ledger I/O) is discarded, same pattern as
  * da_audit_log_best_effort in fsql_domain_agents.c. */
-static void t2s_audit_log_best_effort(FsqlState *st, const char *question,
+static void t2s_audit_log_best_effort(const FsqlState *st, const char *question,
                                       const char *sql, int attempt) {
     StrBuf js;
     sb_init(&js);
@@ -975,6 +1060,77 @@ static char *t2s_generate_once(FsqlState *st, const char *question,
     return candidate;
 }
 
+/* Empty GENERATE response (no SQL found in the fenced block or bare
+ * body): stash feedback for the next GENERATE retry, or format the
+ * final failure message once attempts are exhausted. Returns 0 to
+ * continue retrying, -1 with `err` filled (feedback OOM, or attempts
+ * exhausted) -- the caller frees {schema,feedback} itself. */
+static int t2s_handle_empty_candidate(char **feedback, int attempt, int attempts,
+                                      char *err, size_t err_cap) {
+    free(*feedback);
+    *feedback = t2s_feedback_copy(
+        "the model response contained no SQL (no ```sql fenced "
+        "block and no bare statement)");
+    if (!*feedback) {
+        set_err(err, err_cap, "fractalsql: out of memory");
+        return -1;
+    }
+    if (attempt == attempts) {
+        set_err(err, err_cap,
+                "fractal_text_to_sql: exhausted %d attempt(s), "
+                "last rejection: %s", attempts, *feedback);
+        return -1;
+    }
+    return 0;
+}
+
+/* ALLOWLIST rejection: stash the validator's reason as feedback for the
+ * next GENERATE retry, or format the final failure (with the rejected
+ * candidate's prefix) once attempts are exhausted. Returns 0 to
+ * continue retrying, -1 with `err` filled -- the caller frees
+ * {last_sql,schema,feedback} itself. */
+static int t2s_handle_validate_failure(char **feedback, const char *reason,
+                                       const char *candidate,
+                                       int attempt, int attempts,
+                                       char *err, size_t err_cap) {
+    free(*feedback);
+    *feedback = t2s_feedback_copy(reason);
+    if (!*feedback) {
+        set_err(err, err_cap, "fractalsql: out of memory");
+        return -1;
+    }
+    if (attempt == attempts) {
+        set_err(err, err_cap,
+                "fractal_text_to_sql: exhausted %d attempt(s), "
+                "last rejection: %s -- Last candidate SQL: %.200s",
+                attempts, *feedback, candidate);
+        return -1;
+    }
+    return 0;
+}
+
+/* REVIEW round (optional, default off): delegates the critique dispatch
+ * to t2s_review_attempt, then decides the loop's next step from its
+ * verdict. Returns 0 when the candidate stands (PASS), 1 to continue
+ * retrying (FAIL, attempts remain), -1 with `err` filled on dispatch
+ * failure or attempts exhausted -- the caller frees
+ * {last_sql,schema,feedback} itself. */
+static int t2s_handle_review(FsqlState *st, const char *question,
+                             const char *candidate, char **feedback,
+                             int attempt, int attempts,
+                             char *err, size_t err_cap) {
+    int verdict = t2s_review_attempt(st, question, candidate, feedback,
+                                     err, err_cap);
+    if (verdict == -1) return -1;
+    if (verdict == 1 && attempt == attempts) {
+        set_err(err, err_cap,
+                "fractal_text_to_sql: exhausted %d attempt(s), "
+                "last review verdict: %s", attempts, *feedback);
+        return -1;
+    }
+    return verdict;   /* 0 = PASS (stand), 1 = FAIL (retry) */
+}
+
 /* Full pipeline. Returns a malloc'd validated SQL statement (caller
  * frees with free()), or NULL with `err` filled. Never executes the
  * candidate. */
@@ -1018,19 +1174,8 @@ static char *t2s_run(FsqlState *st, const char *question,
             /* last_sql aliases candidate here; clear it first. */
             free(candidate);
             last_sql = NULL;
-            free(feedback);
-            feedback = t2s_feedback_copy(
-                "the model response contained no SQL (no ```sql fenced "
-                "block and no bare statement)");
-            if (!feedback) {
-                set_err(err, err_cap, "fractalsql: out of memory");
-                free(schema);
-                return NULL;
-            }
-            if (attempt == attempts) {
-                set_err(err, err_cap,
-                        "fractal_text_to_sql: exhausted %d attempt(s), "
-                        "last rejection: %s", attempts, feedback);
+            if (t2s_handle_empty_candidate(&feedback, attempt, attempts,
+                                           err, err_cap) != 0) {
                 free(schema);
                 free(feedback);
                 return NULL;
@@ -1042,19 +1187,9 @@ static char *t2s_run(FsqlState *st, const char *question,
         char reason[512] = "";
         if (t2s_validate(st->db, candidate, allow_dml,
                          reason, sizeof reason) != 0) {
-            free(feedback);
-            feedback = t2s_feedback_copy(reason);
-            if (!feedback) {
-                set_err(err, err_cap, "fractalsql: out of memory");
-                free(last_sql);
-                free(schema);
-                return NULL;
-            }
-            if (attempt == attempts) {
-                set_err(err, err_cap,
-                        "fractal_text_to_sql: exhausted %d attempt(s), "
-                        "last rejection: %s -- Last candidate SQL: %.200s",
-                        attempts, feedback, candidate);
+            if (t2s_handle_validate_failure(&feedback, reason, candidate,
+                                            attempt, attempts,
+                                            err, err_cap) != 0) {
                 free(last_sql);
                 free(feedback);
                 free(schema);
@@ -1065,36 +1200,19 @@ static char *t2s_run(FsqlState *st, const char *question,
 
         /* ---- REVIEW (optional, default off) ---- */
         if (use_review) {
-            char *critique = NULL;
-            if (t2s_review(st, question, candidate, &critique,
-                           err, err_cap) != 0) {
+            int verdict = t2s_handle_review(st, question, candidate,
+                                            &feedback, attempt, attempts,
+                                            err, err_cap);
+            if (verdict == -1) {
+                /* Dispatch failure, OOM copying the critique, or
+                 * attempts exhausted; err is already set. */
                 free(last_sql);
                 free(feedback);
                 free(schema);
                 return NULL;
             }
-            if (!critique_pass(critique)) {
-                free(feedback);
-                feedback = t2s_feedback_copy(critique);
-                free(critique);
-                if (!feedback) {
-                    set_err(err, err_cap, "fractalsql: out of memory");
-                    free(last_sql);
-                    free(schema);
-                    return NULL;
-                }
-                if (attempt == attempts) {
-                    set_err(err, err_cap,
-                            "fractal_text_to_sql: exhausted %d attempt(s), "
-                            "last review verdict: %s", attempts, feedback);
-                    free(last_sql);
-                    free(feedback);
-                    free(schema);
-                    return NULL;
-                }
+            if (verdict == 1)
                 continue;
-            }
-            free(critique);
         }
 
         /* ---- RETURN. Never auto-executed. ---- */
@@ -1128,7 +1246,7 @@ static void schema_ctx_fn(sqlite3_context *ctx, int argc,
     (void)argc;
     (void)argv;
 
-    FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
+    const FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
     if (!st || !st->db) {
         sqlite3_result_error(ctx, "fractalsql: not initialized", -1);
         return;

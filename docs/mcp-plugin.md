@@ -543,4 +543,4 @@ catalog mirrors: [api-discovery.md](api-discovery.md),
 [api-analytics.md](api-analytics.md), [vectorizer-setup.md](vectorizer-setup.md),
 [enterprise.md](enterprise.md). The turnkey demo of the MCP round trip
 without installing a client lives in
-[docker-demo.md § Try the MCP server](docker-demo.md#-try-the-mcp-server).
+[docker-demo.md § Try the MCP server](docker-demo.md#4-try-the-mcp-server).

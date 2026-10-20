@@ -70,7 +70,15 @@ namespace fsqlmcp
         std::mutex inflightMu_;
         std::unordered_map<std::string, std::string> inflightSessions_; // request id -> client key
         std::unordered_set<std::string> cancelledIds_;
-        bool shuttingDown_ = false;
+        // Written by the main thread (beginShutdown(), once, at shutdown)
+        // and read by every per-connection thread's own isShuttingDown()
+        // check on each request -- a plain bool here is a genuine data
+        // race (confirmed by TSan against a fully -fsanitize=thread-
+        // instrumented build of this binary, not just the default LD_
+        // PRELOAD-only runtime-interception setup gate 37 normally uses,
+        // which can miss races expressed through inline atomic/plain
+        // loads in code it never compiled with instrumentation).
+        std::atomic<bool> shuttingDown_{ false };
         std::atomic<std::size_t> active_{ 0 };
     };
 }

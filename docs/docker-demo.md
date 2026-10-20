@@ -60,7 +60,7 @@ Confirm the extension is alive and which edition it is:
 ```bash
 docker compose exec demo sqlite3 fractalsql_demo.sqlite \
   -init demo_init.sql "SELECT fractalsql_edition(), fractalsql_version();"
-# expect: Community|2.0.7
+# expect: Community|2.0.8
 ```
 
 Run any demo (re-runnable; each recreates its own fixture tables):
@@ -68,6 +68,21 @@ Run any demo (re-runnable; each recreates its own fixture tables):
 docker compose exec demo sqlite3 fractalsql_demo.sqlite \
   -init demo_init.sql ".read /demo/<demo>.sql"
 ```
+
+Or run every demo in `demo/` in one pass:
+```bash
+docker compose exec demo /demo/run_demo.sh
+```
+Logs each file to `/tmp/fractalsql_demo_run/` inside the container and
+prints a final `N ok, M non-zero exit` tally. A non-zero exit from one
+file is a "go read its log" signal, not proof of a bug — several demos
+intentionally trigger a runtime error as their own point (a deliberate
+CHECK-constraint failure, an unknown-metric rejection, the enterprise-
+tier-gated demos on this Community build); `run_demo.sh --help` lists
+the known ones plus `--only`/`--skip`/`--quiet` flags and how to also
+exercise `response-modes.sql` (skipped by default — see
+[Response modes](../demo/README.md#response-modes) for why it needs
+separate treatment).
 
 Or open an interactive `sqlite3` shell with reasoning pre-configured:
 ```bash
@@ -152,7 +167,7 @@ new container, nothing new to install beyond what's already in the image.
 One-liner real tool call round-trip (search needs no model):
 
 ```bash
-docker compose exec demo demo/mcp/call-tool.sh fractal_search \
+docker compose exec demo /demo/mcp/call-tool.sh fractal_search \
   '{"vector":[0.1,0.9],"query":[0.6,0.8]}'
 ```
 
@@ -160,7 +175,7 @@ docker compose exec demo demo/mcp/call-tool.sh fractal_search \
 step 2; run `.read /demo/demo.sql` first so its fixture tables exist):
 
 ```bash
-docker compose exec demo demo/mcp/call-tool.sh fractal_agent_data_analyst \
+docker compose exec demo /demo/mcp/call-tool.sh fractal_agent_data_analyst \
   '{"question":"how many rows are in demo_embeddings"}'
 ```
 
@@ -168,7 +183,7 @@ docker compose exec demo demo/mcp/call-tool.sh fractal_agent_data_analyst \
 Community-only install (this is part of the demo, not a bug):
 
 ```bash
-docker compose exec demo demo/mcp/call-tool.sh fractal_agent_diverse_portfolios \
+docker compose exec demo /demo/mcp/call-tool.sh fractal_agent_diverse_portfolios \
   '{"mu":[0.05,0.1],"cov":[1.0,0.0,0.0,1.0],"cardinality":1}'
 # TOOL ERROR: fractalsql: enterprise tier not loaded (...)
 ```

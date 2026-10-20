@@ -62,8 +62,8 @@ FROM ${BASE_IMAGE} AS builder
 # loop below catches the rare case that still slips through, rather
 # than hoping a particular dnf incantation never hits it again.
 RUN if command -v apk >/dev/null 2>&1; then \
-        apk add --no-cache build-base musl-dev binutils file \
-            sqlite-dev python3 openssl-dev ; \
+        apk add --no-cache binutils build-base file musl-dev openssl-dev \
+            python3 sqlite-dev ; \
     elif command -v dnf >/dev/null 2>&1; then \
         dnf update -y --setopt=install_weak_deps=False --allowerasing --nobest \
         && dnf install -y --setopt=install_weak_deps=False --allowerasing --nobest \
@@ -76,11 +76,13 @@ RUN if command -v apk >/dev/null 2>&1; then \
                    break; \
                fi; \
                if [ "${attempt}" = "3" ]; then \
-                   echo "ERROR: glibc/glibc-devel self-test still fails after ${attempt} dnf distro-sync attempts:" >&2; \
+                   echo "ERROR: glibc/glibc-devel self-test still fails " \
+                       "after ${attempt} dnf distro-sync attempts:" >&2; \
                    cat /tmp/glibc_check.err >&2; \
                    exit 1; \
                fi; \
-               echo "glibc/glibc-devel mismatch detected (attempt ${attempt}); forcing dnf distro-sync and retrying" >&2; \
+               echo "glibc/glibc-devel mismatch detected (attempt ${attempt}); " \
+                   "forcing dnf distro-sync and retrying" >&2; \
                dnf distro-sync -y --allowerasing --nobest glibc glibc-common glibc-devel glibc-headers; \
            done ; \
     else \
@@ -103,10 +105,11 @@ RUN case "${TARGETARCH}" in \
         *) echo "ERROR: unsupported TARGETARCH '${TARGETARCH}'" >&2; exit 1 ;; \
     esac
 
-RUN test -f /build/include/$(cat /platform.txt)/libfractalsql-${CORE_VARIANT}.a \
+RUN test -f "/build/include/$(cat /platform.txt)/libfractalsql-${CORE_VARIANT}.a" \
     || (echo "ERROR: vendored core archive missing for $(cat /platform.txt): libfractalsql-${CORE_VARIANT}.a" >&2 \
         && echo "  Refresh from foundry:" >&2 \
-        && echo "    cd ../fractalsql-core && make validated-drop-native && ./scripts/deploy.sh --git fractalsql-sqlite" >&2 \
+        && echo "    cd ../fractalsql-core && make validated-drop-native" \
+           "&& ./scripts/deploy.sh --git fractalsql-sqlite" >&2 \
         && exit 1)
 
 # Sovereign variant -> compile the sovereign surface in (mirrors the
@@ -138,17 +141,17 @@ RUN set -eux; \
         -ffunction-sections -fdata-sections \
         -Iinclude -Isrc \
         $(cat /sovereign.txt) \
-        -shared -o /fractalsql${OUTPUT_SUFFIX}.so \
+        -shared -o "/fractalsql${OUTPUT_SUFFIX}.so" \
         ${SRC} \
-        /build/include/$(cat /platform.txt)/libfractalsql-${CORE_VARIANT}.a \
+        "/build/include/$(cat /platform.txt)/libfractalsql-${CORE_VARIANT}.a" \
         -lm -ldl -lpthread \
         -Wl,--gc-sections -Wl,--strip-all -Wl,--exclude-libs,ALL; \
-    SIZE=$(stat -c%s /fractalsql${OUTPUT_SUFFIX}.so); \
+    SIZE=$(stat -c%s "/fractalsql${OUTPUT_SUFFIX}.so"); \
     if [ "${SIZE}" -gt "${SIZE_CEILING_BYTES}" ]; then \
         echo "ERROR: .so is ${SIZE} bytes, ceiling is ${SIZE_CEILING_BYTES}" >&2; \
         exit 1; \
     fi; \
-    file /fractalsql${OUTPUT_SUFFIX}.so
+    file "/fractalsql${OUTPUT_SUFFIX}.so"
 
 # In-image smoke gate: load the freshly built extension into this
 # image's Python sqlite3 and exercise the smoke surface. Replaces the
@@ -160,7 +163,7 @@ RUN set -eux; \
 # (Unquoted heredoc so the shell expands OUTPUT_SUFFIX for the copy.)
 RUN set -eux; \
     mkdir -p /smoke; \
-    cp /fractalsql${OUTPUT_SUFFIX}.so /smoke/fractalsql.so; \
+    cp "/fractalsql${OUTPUT_SUFFIX}.so" /smoke/fractalsql.so; \
     python3 - <<EOF
 import ctypes
 import sqlite3
@@ -207,12 +210,13 @@ COPY mcp/src/              /build/mcp/src/
 # "undefined reference to __isoc23_*" link failures in development
 # (a host-built mcp/src/*.o riding along into a Rocky 9 build). Strip
 # any object/binary that COPY might have carried over before building.
-RUN find /build/mcp -name '*.o' -delete
+# (Merged into the make RUN below — same layer, same invalidation inputs.)
 RUN set -eux; \
+    find /build/mcp -name '*.o' -delete; \
     make -C /build/mcp; \
     strip /build/mcp/fractalsql-sqlite-mcp; \
     /build/mcp/fractalsql-sqlite-mcp --version; \
-    mv /build/mcp/fractalsql-sqlite-mcp /fractalsql-sqlite-mcp${OUTPUT_SUFFIX}
+    mv /build/mcp/fractalsql-sqlite-mcp "/fractalsql-sqlite-mcp${OUTPUT_SUFFIX}"
 
 # --------------------------------------------------------------------
 # Export stage — scratch, so `buildx --output=local` drops the .so
@@ -299,7 +303,7 @@ RUN dnf install -y --setopt=install_weak_deps=False --allowerasing \
 # pointer of whatever host it loads into.
 RUN set -eux; \
     SQLITE_VER=3450100; \
-    curl -fsSL "https://www.sqlite.org/2024/sqlite-autoconf-${SQLITE_VER}.tar.gz" \
+    curl -fsSL --proto '=https' "https://www.sqlite.org/2024/sqlite-autoconf-${SQLITE_VER}.tar.gz" \
         -o /tmp/sqlite-autoconf.tgz; \
     tar -xzf /tmp/sqlite-autoconf.tgz -C /tmp; \
     cd "/tmp/sqlite-autoconf-${SQLITE_VER}"; \
@@ -329,8 +333,9 @@ COPY mcp/src/              /mcpbuild/mcp/src/
 # See the builder stage's identical step for why: a locally make'd .o
 # riding along in the COPY looks up to date to `make` and gets linked
 # in unrebuilt, mixing the host's glibc into this image's binary.
-RUN find /mcpbuild/mcp -name '*.o' -delete
+# (Merged into the make RUN below — same layer, same invalidation inputs.)
 RUN set -eux; \
+    find /mcpbuild/mcp -name '*.o' -delete; \
     make -C /mcpbuild/mcp; \
     strip /mcpbuild/mcp/fractalsql-sqlite-mcp; \
     mv /mcpbuild/mcp/fractalsql-sqlite-mcp /usr/local/bin/; \

@@ -10,7 +10,7 @@ namespace fsqlmcp
     static const std::unordered_set<std::string> kSupportedProtocolVersions{
         "2024-11-05", "2025-03-26", "2025-06-18"
     };
-    static const char* kDefaultProtocolVersion = "2025-06-18";
+    static const char* const kDefaultProtocolVersion = "2025-06-18";
 
     JsonRpcServer::JsonRpcServer( ServerConfig cfg, std::vector<ToolSpec> tools, ConcurrencyConfig concCfg )
         : cfg_( std::move( cfg ) ), tools_( std::move( tools ) ), conc_( concCfg )

@@ -54,7 +54,6 @@
  */
 
 #include <sqlite3ext.h>
-SQLITE_EXTENSION_INIT3
 
 #include <stdarg.h>
 #include <stdint.h>
@@ -64,6 +63,8 @@ SQLITE_EXTENSION_INIT3
 
 #include "fsql_sqlite_internal.h"
 #include "fractalsql_parse.h"
+
+SQLITE_EXTENSION_INIT3
 
 /* ------------------------------------------------------------------ */
 /* Constants                                                           */
@@ -121,6 +122,16 @@ static int fsqlv_exec(sqlite3 *db, const char *sql,
 /* Identifier validation + quoting                                     */
 /* ------------------------------------------------------------------ */
 
+/* One identifier character's class check: a segment's first character
+ * may not be a digit. Returns 1 when allowed. */
+static int fsqlv_seg_char_ok(char c, int first) {
+    if (first)
+        return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+    return c == '_' ||
+           (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9');
+}
+
 /* Accept [A-Za-z_][A-Za-z0-9_]* segments joined by '.': schema-
  * qualified table names allowed, everything else rejected. `dots`
  * permits the internal dot (table names); column identifiers pass 0.
@@ -131,7 +142,8 @@ static int fsqlv_exec(sqlite3 *db, const char *sql,
 static int fsqlv_ident_ok(const char *s, int dots) {
     if (!s || !*s) return 0;
     size_t total = 0;
-    int seg_len = 0, nseg = 1;
+    int seg_len = 0;
+    int nseg = 1;
     for (const char *p = s; *p; p++) {
         if (*p == '.') {
             if (dots <= 0 || seg_len == 0) return 0;
@@ -140,14 +152,7 @@ static int fsqlv_ident_ok(const char *s, int dots) {
             seg_len = 0;
             continue;
         }
-        if (seg_len == 0) {
-            if (*p != '_' && !((*p >= 'a' && *p <= 'z') ||
-                               (*p >= 'A' && *p <= 'Z'))) return 0;
-        } else {
-            if (*p != '_' &&
-                !((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
-                  (*p >= '0' && *p <= '9'))) return 0;
-        }
+        if (!fsqlv_seg_char_ok(*p, seg_len == 0)) return 0;
         seg_len++;
         total++;
         if (seg_len > 63 || total > 256) return 0;   /* NAMEDATALEN-ish */
@@ -171,10 +176,14 @@ static int fsqlv_quote_ident(char *out, size_t cap, const char *ident,
     size_t used = 0;
     const char *p = ident;
     while (*p) {
+        char raw[64];   /* fsqlv_ident_ok already caps each segment at 63 */
         char seg[80];
         size_t seglen = 0;
-        while (p[seglen] && p[seglen] != '.') seglen++;
-        size_t n = fsqlv_qseg(seg, sizeof seg, p);  /* seg <= 63 chars */
+        for (; p[seglen] && p[seglen] != '.'; seglen++);
+        if (seglen >= sizeof raw) return -1;
+        memcpy(raw, p, seglen);
+        raw[seglen] = '\0';
+        size_t n = fsqlv_qseg(seg, sizeof seg, raw);
         if (n == 0) return -1;
         if (used + n + 2 >= cap) return -1;
         if (used > 0) out[used++] = '.';
@@ -252,7 +261,7 @@ static const char *FSQLV_SCHEMA_SQL =
     "GROUP BY v.id, v.source_table, v.text_col, v.embedding_col, "
     "         v.enabled, q.status;";
 
-static int fsqlv_ensure_schema(FsqlState *st, char *err, size_t err_cap) {
+static int fsqlv_ensure_schema(const FsqlState *st, char *err, size_t err_cap) {
     return fsqlv_exec(st->db, FSQLV_SCHEMA_SQL, err, err_cap);
 }
 
@@ -390,7 +399,7 @@ static void fsqlv_embed_fn(sqlite3_context *ctx, int argc,
  * same enqueue body; the NOT EXISTS dedupe inside it makes the
  * doubled firings cheap no-ops. The 'u' suffix keeps the names
  * distinct. */
-static int fsqlv_drop_triggers(FsqlState *st, sqlite3_int64 vid,
+static int fsqlv_drop_triggers(const FsqlState *st, sqlite3_int64 vid,
                                char *err, size_t err_cap) {
     char sql[FSQLV_SQL_MAX];
     snprintf(sql, sizeof sql,
@@ -405,7 +414,7 @@ static int fsqlv_drop_triggers(FsqlState *st, sqlite3_int64 vid,
 
 /* Builds and executes one enqueue trigger (`event` is the full
  * "AFTER ..." header text; `suffix` disambiguates the trigger name). */
-static int fsqlv_create_trigger(FsqlState *st, sqlite3_int64 vid,
+static int fsqlv_create_trigger(const FsqlState *st, sqlite3_int64 vid,
                                 const char *suffix, const char *event,
                                 const char *qtbl, const char *qpk,
                                 char *err, size_t err_cap) {
@@ -435,7 +444,7 @@ static int fsqlv_create_trigger(FsqlState *st, sqlite3_int64 vid,
 
 /* Shared cleanup for mid-flight failures so a failed create never
  * leaves a half-registered vectorizer behind. */
-static void fsqlv_create_cleanup(FsqlState *st, sqlite3_int64 vid) {
+static void fsqlv_create_cleanup(const FsqlState *st, sqlite3_int64 vid) {
     fsqlv_drop_triggers(st, vid, NULL, 0);
     char sql[FSQLV_SQL_MAX];
     snprintf(sql, sizeof sql,
@@ -452,47 +461,99 @@ static void fsqlv_create_cleanup(FsqlState *st, sqlite3_int64 vid) {
     sqlite3_exec(st->db, sql, NULL, NULL, NULL);
 }
 
+/* Builds the `PRAGMA <schema>.table_info(<table>)` statement for
+ * src_ident (PRAGMA's schema prefix and table name are two separate
+ * slots; a dotted source_table splits into "schema".table_info
+ * ("table")). qtbl is `"schema"."table"` as produced by
+ * fsqlv_quote_ident(…, dots=1). Returns 0, or -1 with
+ * "fractalsql: invalid identifier" in err. */
+static int fsqlv_pragma_table_info_sql(const char *src_ident,
+                                       const char *qtbl,
+                                       char *sql, size_t sql_cap,
+                                       char *err, size_t err_cap) {
+    const char *dot = strrchr(src_ident, '.');
+    if (!dot) {
+        snprintf(sql, sql_cap, "PRAGMA main.table_info(%s)", qtbl);
+        return 0;
+    }
+    /* Schema-qualified: qtbl is "schema"."table"; take the quoted
+     * table (last quoted segment) and prefix the quoted schema. */
+    const char *last = strrchr(qtbl, '"');       /* closing quote  */
+    const char *first = strrchr(qtbl, '.');      /* before "table" */
+    if (!last || !first || first >= last || last - first < 3) {
+        fsqlv_set_err(err, err_cap, "fractalsql: invalid identifier");
+        return -1;
+    }
+    char qschema[80];
+    size_t slen = (size_t)(dot - src_ident);
+    if (slen >= sizeof qschema - 2) {
+        fsqlv_set_err(err, err_cap, "fractalsql: invalid identifier");
+        return -1;
+    }
+    qschema[0] = '"';
+    memcpy(qschema + 1, src_ident, slen);   /* validated: no quotes */
+    qschema[1 + slen] = '"';
+    qschema[2 + slen] = '\0';
+    snprintf(sql, sql_cap, "PRAGMA %s.table_info(%s)",
+             qschema, first + 1);
+    return 0;
+}
+
+/* Steps the table_info result, counting PK columns (pk column 1-based
+ * position within the PK, 0 = not part of it) and capturing the name
+ * of the last first-position PK column. Returns 0 on success
+ * (pk_col filled), -1 with a message in err for a too-long PK name or
+ * an engine error. */
+static int fsqlv_scan_pk(sqlite3 *db, sqlite3_stmt *stmt,
+                         char *pk_col, size_t pk_cap,
+                         char *err, size_t err_cap) {
+    int npk = 0;
+    int rc;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        int is_pk = sqlite3_column_int(stmt, 5);
+        if (is_pk <= 0) continue;
+        npk++;
+        if (is_pk != 1) continue;
+        const char *name = (const char *)sqlite3_column_text(stmt, 1);
+        if (!name) continue;
+        int pn = snprintf(pk_col, pk_cap, "%s", name);
+        if (pn < 0 || (size_t)pn >= pk_cap) {
+            sqlite3_finalize(stmt);
+            fsqlv_set_err(err, err_cap,
+                "fractal_vectorizer_create: primary key column "
+                "name is longer than %d characters",
+                (int)pk_cap - 1);
+            return -1;
+        }
+    }
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        fsqlv_set_err(err, err_cap, "fractal_vectorizer_create: %s",
+                      sqlite3_errmsg(db));
+        return -1;
+    }
+    return npk;
+}
+
 /* Find the source table's single-column PRIMARY KEY via PRAGMA
  * table_info's pk column (1-based position within the PK, 0 = not
  * part of it). Returns 0 on success (pk_col filled), -1 with a
  * message in err for a missing table, composite PK, or no PK:
  * composite and missing-PK tables have no single generic value to
  * key the queue on, and there is no rowid fallback. */
-static int fsqlv_find_pk(FsqlState *st, const char *src_ident,
+static int fsqlv_find_pk(const FsqlState *st, const char *src_ident,
                          char *pk_col, size_t pk_cap,
                          char *err, size_t err_cap) {
-    /* PRAGMA's schema prefix and table name are two separate slots;
-     * a dotted source_table splits into "schema".table_info("table"). */
-    char qtbl[600], sql[768];
+    char qtbl[600];
     if (fsqlv_quote_ident(qtbl, sizeof qtbl, src_ident, 1) != 0) {
         fsqlv_set_err(err, err_cap, "fractalsql: invalid identifier");
         return -1;
     }
 
-    const char *dot = strrchr(src_ident, '.');
-    if (dot) {
-        /* Schema-qualified: qtbl is "schema"."table"; take the quoted
-         * table (last quoted segment) and prefix the quoted schema. */
-        const char *last = strrchr(qtbl, '"');       /* closing quote  */
-        const char *first = strrchr(qtbl, '.');      /* before "table" */
-        if (!last || !first || first >= last || last - first < 3) {
-            fsqlv_set_err(err, err_cap, "fractalsql: invalid identifier");
-            return -1;
-        }
-        char qschema[80];
-        size_t slen = (size_t)(dot - src_ident);
-        if (slen >= sizeof qschema - 2) {
-            fsqlv_set_err(err, err_cap, "fractalsql: invalid identifier");
-            return -1;
-        }
-        qschema[0] = '"';
-        memcpy(qschema + 1, src_ident, slen);   /* validated: no quotes */
-        qschema[1 + slen] = '"';
-        qschema[2 + slen] = '\0';
-        snprintf(sql, sizeof sql, "PRAGMA %s.table_info(%s)",
-                 qschema, first + 1);
-    } else {
-        snprintf(sql, sizeof sql, "PRAGMA main.table_info(%s)", qtbl);
+    char sql[768];
+    if (fsqlv_pragma_table_info_sql(src_ident, qtbl, sql, sizeof sql,
+                                    err, err_cap) != 0) {
+        return -1;
     }
 
     sqlite3_stmt *stmt = NULL;
@@ -503,34 +564,8 @@ static int fsqlv_find_pk(FsqlState *st, const char *src_ident,
         return -1;
     }
 
-    int npk = 0;
-    int rc;
-    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-        int is_pk = sqlite3_column_int(stmt, 5);
-        if (is_pk > 0) {
-            npk++;
-            if (is_pk == 1) {
-                const char *name = (const char *)sqlite3_column_text(stmt, 1);
-                if (name) {
-                    int pn = snprintf(pk_col, pk_cap, "%s", name);
-                    if (pn < 0 || (size_t)pn >= pk_cap) {
-                        sqlite3_finalize(stmt);
-                        fsqlv_set_err(err, err_cap,
-                            "fractal_vectorizer_create: primary key column "
-                            "name is longer than %d characters",
-                            (int)pk_cap - 1);
-                        return -1;
-                    }
-                }
-            }
-        }
-    }
-    sqlite3_finalize(stmt);
-    if (rc != SQLITE_DONE) {
-        fsqlv_set_err(err, err_cap, "fractal_vectorizer_create: %s",
-                      sqlite3_errmsg(st->db));
-        return -1;
-    }
+    int npk = fsqlv_scan_pk(st->db, stmt, pk_col, pk_cap, err, err_cap);
+    if (npk < 0) return -1;
 
     if (npk != 1) {
         /* A plain rowid table deliberately does NOT fall back to
@@ -545,26 +580,159 @@ static int fsqlv_find_pk(FsqlState *st, const char *src_ident,
     return 0;
 }
 
+/* A vectorizer's caller-supplied columns and their validated, quoted
+ * forms, shared by the create path and the per-row queue processor
+ * (the two buffers a dotted table name needs plus the two column
+ * names). */
+typedef struct FsqlvCols {
+    const char *src;
+    const char *tcol;
+    const char *ecol;
+} FsqlvCols;
+
+typedef struct FsqlvQuoted {
+    char src[600];   /* quoted table, possibly schema-qualified    */
+    char tcol[80];
+    char ecol[80];
+    char pk[80];
+} FsqlvQuoted;
+
+/* An optional SQL argument as text (NULL when the argument is absent
+ * or SQL NULL, `dflt` otherwise). */
+static const char *fsqlv_arg(int argc, sqlite3_value **argv, int i,
+                             const char *dflt) {
+    return (argc > i && sqlite3_value_type(argv[i]) != SQLITE_NULL)
+         ? (const char *)sqlite3_value_text(argv[i]) : dflt;
+}
+
+/* Validates and quotes the source table and both column names.
+ * Returns 0, or -1 with q untouched on an invalid identifier (the
+ * caller owns the error message). */
+static int fsqlv_quote_cols(const FsqlvCols *c, FsqlvQuoted *q) {
+    if (fsqlv_quote_ident(q->src, sizeof q->src, c->src, 1) != 0 ||
+        fsqlv_quote_ident(q->tcol, sizeof q->tcol, c->tcol, 0) != 0 ||
+        fsqlv_quote_ident(q->ecol, sizeof q->ecol, c->ecol, 0) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/* Duplicate-vectorizer lookup: returns 1 with *existing set when the
+ * same (source_table, text_col, embedding_col) triple is registered,
+ * 0 when none is, -1 when the lookup itself failed (TEMP tables are
+ * connection-private, so there is no TOCTOU window either way). */
+static int fsqlv_find_dup(const FsqlState *st, const FsqlvCols *c,
+                          sqlite3_int64 *existing) {
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(st->db,
+            "SELECT id FROM fractal_vectorizers "
+            "WHERE source_table=?1 AND text_col=?2 AND embedding_col=?3",
+            -1, &stmt, NULL) != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(stmt, 1, c->src, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, c->tcol, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, c->ecol, -1, SQLITE_TRANSIENT);
+    int found = (sqlite3_step(stmt) == SQLITE_ROW) ? 1 : 0;
+    if (found) *existing = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+/* Inserts the registry row (the raw, already-validated pk_col is
+ * stored, not the quoted form). Returns 0 with *vid_out set, or -1
+ * with a message in err. */
+static int fsqlv_insert_registry(const FsqlState *st, const FsqlvCols *c,
+                                 const char *pk_col, const char *opts,
+                                 sqlite3_int64 *vid_out,
+                                 char *err, size_t err_cap) {
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(st->db,
+            "INSERT INTO fractal_vectorizers "
+            "(source_table, source_pk_col, text_col, embedding_col, options) "
+            "VALUES (?1, ?2, ?3, ?4, ?5)",
+            -1, &stmt, NULL) != SQLITE_OK) {
+        fsqlv_set_err(err, err_cap, "fractal_vectorizer_create: %s",
+                      sqlite3_errmsg(st->db));
+        return -1;
+    }
+    sqlite3_bind_text(stmt, 1, c->src, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, pk_col, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, c->tcol, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, c->ecol, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, opts, -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        fsqlv_set_err(err, err_cap, "fractal_vectorizer_create: %s",
+                      sqlite3_errmsg(st->db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+    sqlite3_finalize(stmt);
+    *vid_out = sqlite3_last_insert_rowid(st->db);
+    return 0;
+}
+
+/* Installs the registry row's two AFTER triggers: INSERT plus UPDATE
+ * OF text_col (see fsqlv_drop_triggers above for why it isn't one
+ * combined trigger). The enabled-check in the SELECT makes a paused
+ * (or deleted) registry row a no-op rather than an error. Returns 0,
+ * or -1 with a message in err. */
+static int fsqlv_create_triggers(const FsqlState *st, sqlite3_int64 vid,
+                                 const char *qtbl, const char *qtcol,
+                                 const char *qpk,
+                                 char *err, size_t err_cap) {
+    char upd_event[100];
+    snprintf(upd_event, sizeof upd_event, "AFTER UPDATE OF %s", qtcol);
+    if (fsqlv_create_trigger(st, vid, "", "AFTER INSERT", qtbl, qpk,
+                             err, err_cap) != 0 ||
+        fsqlv_create_trigger(st, vid, "u", upd_event, qtbl, qpk,
+                             err, err_cap) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/* Backfill: queue existing rows that don't have an embedding yet,
+ * not the whole table; a vectorizer retrofitted onto a table that
+ * already has some embeddings shouldn't redo them (ON CONFLICT ...
+ * DO NOTHING against the partial unique index). Returns 0, or -1 with
+ * a message in err. */
+static int fsqlv_backfill(const FsqlState *st, sqlite3_int64 vid,
+                          const FsqlvQuoted *q,
+                          char *err, size_t err_cap) {
+    char sql[FSQLV_SQL_MAX];
+    int n = snprintf(sql, sizeof sql,
+        "INSERT INTO fractal_vectorizer_queue (vectorizer_id, source_pk_value) "
+        "SELECT %lld, CAST(%s AS TEXT) FROM %s "
+        "WHERE %s IS NULL AND %s IS NOT NULL "
+        "ON CONFLICT (vectorizer_id, source_pk_value) "
+        "  WHERE status IN ('pending','processing') DO NOTHING",
+        (long long)vid, q->pk, q->src, q->ecol, q->tcol);
+    if (n <= 0 || (size_t)n >= sizeof sql) {
+        fsqlv_set_err(err, err_cap,
+            "fractalsql: internal error building backfill SQL");
+        return -1;
+    }
+    return fsqlv_exec(st->db, sql, err, err_cap);
+}
+
 /* fractal_vectorizer_create(source_table, text_col, embedding_col
  *                           [, options_json]) -> vectorizer id.
  * The options default is an optional TEXT argument defaulting to
  * '{}'. */
 static void fsqlv_create_fn(sqlite3_context *ctx, int argc,
                             sqlite3_value **argv) {
-    FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
+    const FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
     char err[FSQLV_ERR_MAX];
     err[0] = '\0';
 
-    const char *src = (argc >= 1 && sqlite3_value_type(argv[0]) != SQLITE_NULL)
-                    ? (const char *)sqlite3_value_text(argv[0]) : NULL;
-    const char *tcol = (argc >= 2 && sqlite3_value_type(argv[1]) != SQLITE_NULL)
-                     ? (const char *)sqlite3_value_text(argv[1]) : NULL;
-    const char *ecol = (argc >= 3 && sqlite3_value_type(argv[2]) != SQLITE_NULL)
-                     ? (const char *)sqlite3_value_text(argv[2]) : NULL;
-    const char *opts = (argc >= 4 && sqlite3_value_type(argv[3]) != SQLITE_NULL)
-                     ? (const char *)sqlite3_value_text(argv[3]) : "{}";
+    FsqlvCols c;
+    c.src  = fsqlv_arg(argc, argv, 0, NULL);
+    c.tcol = fsqlv_arg(argc, argv, 1, NULL);
+    c.ecol = fsqlv_arg(argc, argv, 2, NULL);
+    const char *opts = fsqlv_arg(argc, argv, 3, "{}");
 
-    if (!src || !tcol || !ecol) {
+    if (!c.src || !c.tcol || !c.ecol) {
         sqlite3_result_error(ctx,
             "fractal_vectorizer_create: source_table, text_col and "
             "embedding_col must not be NULL", -1);
@@ -572,10 +740,8 @@ static void fsqlv_create_fn(sqlite3_context *ctx, int argc,
     }
 
     /* Validate + quote BEFORE any string-built SQL sees the text. */
-    char qtbl[600], qtcol[80], qecol[80];
-    if (fsqlv_quote_ident(qtbl, sizeof qtbl, src, 1) != 0 ||
-        fsqlv_quote_ident(qtcol, sizeof qtcol, tcol, 0) != 0 ||
-        fsqlv_quote_ident(qecol, sizeof qecol, ecol, 0) != 0) {
+    FsqlvQuoted q;
+    if (fsqlv_quote_cols(&c, &q) != 0) {
         sqlite3_result_error(ctx, "fractalsql: invalid identifier", -1);
         return;
     }
@@ -587,101 +753,44 @@ static void fsqlv_create_fn(sqlite3_context *ctx, int argc,
 
     /* Single-column PK introspection. */
     char pk_col[80];
-    if (fsqlv_find_pk(st, src, pk_col, sizeof pk_col, err, sizeof err) != 0) {
+    if (fsqlv_find_pk(st, c.src, pk_col, sizeof pk_col, err, sizeof err) != 0) {
         sqlite3_result_error(ctx, err, -1);
         return;
     }
-    char qpk[80];
-    if (fsqlv_quote_ident(qpk, sizeof qpk, pk_col, 0) != 0) {
+    if (fsqlv_quote_ident(q.pk, sizeof q.pk, pk_col, 0) != 0) {
         sqlite3_result_error(ctx, "fractalsql: invalid identifier", -1);
         return;
     }
 
     /* Duplicate-vectorizer check up front, naming the existing id in
-     * the error (TEMP tables are connection-private, so there is no
-     * TOCTOU window). */
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(st->db,
-            "SELECT id FROM fractal_vectorizers "
-            "WHERE source_table=?1 AND text_col=?2 AND embedding_col=?3",
-            -1, &stmt, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, src, -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, tcol, -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 3, ecol, -1, SQLITE_TRANSIENT);
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            sqlite3_int64 existing = sqlite3_column_int64(stmt, 0);
-            sqlite3_finalize(stmt);
-            char msg[FSQLV_ERR_MAX];
-            snprintf(msg, sizeof msg,
-                     "fractal_vectorizer_create: a vectorizer for %.64s.%.64s "
-                     "-> %.64s already exists (id=%lld)",
-                     qtbl, qtcol, qecol, (long long)existing);
-            sqlite3_result_error(ctx, msg, -1);
-            return;
-        }
+     * the error. */
+    sqlite3_int64 existing = 0;
+    if (fsqlv_find_dup(st, &c, &existing) == 1) {
+        char msg[FSQLV_ERR_MAX];
+        snprintf(msg, sizeof msg,
+                 "fractal_vectorizer_create: a vectorizer for %.64s.%.64s "
+                 "-> %.64s already exists (id=%lld)",
+                 q.src, q.tcol, q.ecol, (long long)existing);
+        sqlite3_result_error(ctx, msg, -1);
+        return;
     }
-    if (stmt) { sqlite3_finalize(stmt); stmt = NULL; }
 
     /* Registry row. */
-    if (sqlite3_prepare_v2(st->db,
-            "INSERT INTO fractal_vectorizers "
-            "(source_table, source_pk_col, text_col, embedding_col, options) "
-            "VALUES (?1, ?2, ?3, ?4, ?5)",
-            -1, &stmt, NULL) != SQLITE_OK) {
-        fsqlv_set_err(err, sizeof err, "fractal_vectorizer_create: %s",
-                      sqlite3_errmsg(st->db));
+    sqlite3_int64 vid = 0;
+    if (fsqlv_insert_registry(st, &c, pk_col, opts, &vid,
+                              err, sizeof err) != 0) {
         sqlite3_result_error(ctx, err, -1);
         return;
     }
-    sqlite3_bind_text(stmt, 1, src, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, pk_col, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 3, tcol, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 4, ecol, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 5, opts, -1, SQLITE_TRANSIENT);
-    if (sqlite3_step(stmt) != SQLITE_DONE) {
-        fsqlv_set_err(err, sizeof err, "fractal_vectorizer_create: %s",
-                      sqlite3_errmsg(st->db));
-        sqlite3_finalize(stmt);
-        sqlite3_result_error(ctx, err, -1);
-        return;
-    }
-    sqlite3_finalize(stmt);
-    sqlite3_int64 vid = sqlite3_last_insert_rowid(st->db);
 
-    /* Two AFTER triggers: INSERT plus UPDATE OF text_col (see
-     * fsqlv_drop_triggers above for why it isn't one combined trigger).
-     * The enabled-check in the SELECT makes a paused (or deleted)
-     * registry row a no-op rather than an error. */
-    char upd_event[100];
-    snprintf(upd_event, sizeof upd_event, "AFTER UPDATE OF %s", qtcol);
-    if (fsqlv_create_trigger(st, vid, "", "AFTER INSERT", qtbl, qpk,
-                             err, sizeof err) != 0 ||
-        fsqlv_create_trigger(st, vid, "u", upd_event, qtbl, qpk,
-                             err, sizeof err) != 0) {
+    if (fsqlv_create_triggers(st, vid, q.src, q.tcol, q.pk,
+                              err, sizeof err) != 0) {
         fsqlv_create_cleanup(st, vid);
         sqlite3_result_error(ctx, err, -1);
         return;
     }
 
-    /* Backfill: queue existing rows that don't have an embedding yet,
-     * not the whole table; a vectorizer retrofitted onto a table that
-     * already has some embeddings shouldn't redo them (ON CONFLICT ...
-     * DO NOTHING against the partial unique index). */
-    char sql[FSQLV_SQL_MAX];
-    int n = snprintf(sql, sizeof sql,
-        "INSERT INTO fractal_vectorizer_queue (vectorizer_id, source_pk_value) "
-        "SELECT %lld, CAST(%s AS TEXT) FROM %s "
-        "WHERE %s IS NULL AND %s IS NOT NULL "
-        "ON CONFLICT (vectorizer_id, source_pk_value) "
-        "  WHERE status IN ('pending','processing') DO NOTHING",
-        (long long)vid, qpk, qtbl, qecol, qtcol);
-    if (n <= 0 || (size_t)n >= sizeof sql) {
-        fsqlv_create_cleanup(st, vid);
-        sqlite3_result_error(ctx,
-            "fractalsql: internal error building backfill SQL", -1);
-        return;
-    }
-    if (fsqlv_exec(st->db, sql, err, sizeof err) != 0) {
+    if (fsqlv_backfill(st, vid, &q, err, sizeof err) != 0) {
         fsqlv_create_cleanup(st, vid);
         sqlite3_result_error(ctx, err, -1);
         return;
@@ -702,7 +811,7 @@ static void fsqlv_create_fn(sqlite3_context *ctx, int argc,
 static void fsqlv_pause_resume_impl(sqlite3_context *ctx,
                                     sqlite3_value *id_arg,
                                     int enabled, const char *fn_name) {
-    FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
+    const FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
 
     if (sqlite3_value_type(id_arg) == SQLITE_NULL) {
         sqlite3_result_error(ctx,
@@ -763,7 +872,7 @@ static void fsqlv_resume_fn(sqlite3_context *ctx, int argc,
 static void fsqlv_drop_fn(sqlite3_context *ctx, int argc,
                           sqlite3_value **argv) {
     (void)argc;
-    FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
+    const FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
 
     if (sqlite3_value_type(argv[0]) == SQLITE_NULL) {
         sqlite3_result_error(ctx,
@@ -838,7 +947,7 @@ static void fsqlv_drop_fn(sqlite3_context *ctx, int argc,
  * when the host SQLite ships JSON1; without it the cap is invisible
  * and every row is processed uncapped (the pre-cap behavior).
  * Returns 0 and fills *max_calls (-1 = no cap) / *window_secs. */
-static void fsqlv_read_rate_cap(FsqlState *st, const char *options,
+static void fsqlv_read_rate_cap(const FsqlState *st, const char *options,
                                 int *max_calls, int *window_secs) {
     *max_calls = -1;
     *window_secs = 3600;
@@ -868,7 +977,7 @@ static void fsqlv_read_rate_cap(FsqlState *st, const char *options,
  * proceed (window call consumed), 1 = cap hit; the row goes back to
  * 'pending' and is NOT counted as processed, -1 = window bookkeeping
  * broke (the row is failed, the batch continues). */
-static int fsqlv_rate_gate(FsqlState *st, sqlite3_int64 vid,
+static int fsqlv_rate_gate(const FsqlState *st, sqlite3_int64 vid,
                            sqlite3_int64 qid, int max_calls,
                            int window_secs, char *err, size_t err_cap) {
     char sql[256];
@@ -941,6 +1050,335 @@ static int fsqlv_rate_gate(FsqlState *st, sqlite3_int64 vid,
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* fractal_vectorizer_process_queue                                    */
+/* ------------------------------------------------------------------ */
+
+/* Marks one queue row failed with `msg` (the row goes into 'failed'
+ * status; it counts as processed). */
+static void fsqlv_fail_row(sqlite3_stmt *fail_u, sqlite3_int64 qid,
+                           const char *msg) {
+    sqlite3_reset(fail_u);
+    sqlite3_bind_text(fail_u, 1, msg, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(fail_u, 2, qid);
+    sqlite3_step(fail_u);
+}
+
+/* Marks one queue row done (no error text; it counts as processed). */
+static void fsqlv_done_row(sqlite3_stmt *done_u, sqlite3_int64 qid) {
+    sqlite3_reset(done_u);
+    sqlite3_clear_bindings(done_u);
+    sqlite3_bind_int64(done_u, 1, qid);
+    sqlite3_step(done_u);
+}
+
+/* An optional SQL argument as INT (`dflt` when the argument is absent
+ * or SQL NULL; the text twin lives in the create section). */
+static int fsqlv_arg_int(int argc, sqlite3_value **argv, int i, int dflt) {
+    return (argc > i && sqlite3_value_type(argv[i]) != SQLITE_NULL)
+         ? sqlite3_value_int(argv[i]) : dflt;
+}
+
+/* Stale reclaim: rows stranded in 'processing' by a caller that
+ * crashed or was killed mid-batch: claiming a row only protects
+ * against concurrent callers racing each other, not against a
+ * caller that claimed a row and never came back. Epoch
+ * text/integer coercion is pinned with explicit CASTs so the
+ * comparison is numeric on both sides. Returns 0, or -1 with the
+ * engine's message in err. */
+static int fsqlv_reclaim_stale(FsqlState *st, int stale_secs,
+                               char *err, size_t err_cap) {
+    sqlite3_stmt *u = NULL;
+    if (sqlite3_prepare_v2(st->db,
+            "UPDATE fractal_vectorizer_queue "
+            "SET status='pending', processing_started_at=NULL "
+            "WHERE status='processing' "
+            "  AND processing_started_at IS NOT NULL "
+            "  AND CAST(processing_started_at AS INTEGER) < "
+            "      CAST(strftime('%s','now') AS INTEGER) - ?1",
+            -1, &u, NULL) != SQLITE_OK) {
+        fsqlv_set_err(err, err_cap, "%s", sqlite3_errmsg(st->db));
+        return -1;
+    }
+    sqlite3_bind_int(u, 1, stale_secs);
+    int rc = sqlite3_step(u);
+    sqlite3_finalize(u);
+    if (rc != SQLITE_DONE) {
+        fsqlv_set_err(err, err_cap, "%s", sqlite3_errmsg(st->db));
+        return -1;
+    }
+    return 0;
+}
+
+/* Appends the comma-joined "id1,id2,...,idN" id list for the claimed
+ * batch into sql[0..sql_cap), starting at offset `used` (the UPDATE
+ * prefix already written there). Returns the new `used` length on
+ * success, 0 if any id's rendered text would overflow the scratch
+ * buffer (the caller treats 0 as "bail out, building the claim SQL
+ * failed"). */
+static size_t fsqlv_append_claim_ids(char *sql, size_t sql_cap, size_t used,
+                                     const sqlite3_int64 *ids, int n_claim) {
+    for (int i = 0; i < n_claim; i++) {
+        int n = snprintf(sql + used, sql_cap - used, "%s%lld",
+                         i ? "," : "", (long long)ids[i]);
+        if (n <= 0 || (size_t)n >= sql_cap - used) return 0;  /* truncation */
+        used += (size_t)n;
+    }
+    return used;
+}
+
+/* Builds and executes the claim UPDATE's "id IN (...)" SQL for the
+ * selected ids (plain int64 text, nothing injectable) within the
+ * already-open claim transaction. Returns 0 on success, -1 with err
+ * set (the transaction is left for the caller to COMMIT/ROLLBACK). */
+static int fsqlv_run_claim_update(FsqlState *st, const sqlite3_int64 *ids,
+                                  int n_claim, char *err, size_t err_cap) {
+    char sql[FSQLV_SQL_MAX];
+    int n = snprintf(sql, sizeof sql,
+        "UPDATE fractal_vectorizer_queue "
+        "SET status='processing', "
+        "    processing_started_at="
+        "      CAST(strftime('%%s','now') AS INTEGER), "
+        "    updated_at=CAST(strftime('%%s','now') AS INTEGER) "
+        "WHERE status='pending' AND id IN (");
+    size_t used = (n > 0 && (size_t)n < sizeof sql)
+                ? fsqlv_append_claim_ids(sql, sizeof sql, (size_t)n,
+                                         ids, n_claim)
+                : 0;
+    if (used == 0 || used + 2 >= sizeof sql) {
+        fsqlv_set_err(err, err_cap,
+                      "fractal_vectorizer_process_queue: internal error "
+                      "building claim SQL");
+        return -1;
+    }
+    memcpy(sql + used, ")", 2);
+    return fsqlv_exec(st->db, sql, err, err_cap);
+}
+
+/* Claims n_claim queue rows: BEGIN IMMEDIATE + conditional UPDATE +
+ * COMMIT, the FOR UPDATE SKIP LOCKED analog. busy_timeout is
+ * per-connection, so the 5 s claim window is set here and restored
+ * (to SQLite's stock no-handler default) once the claim transaction
+ * closes; a host-installed busy handler cannot be read back and
+ * reinstalled, which is the one observable cost of the restore. TEMP
+ * tables are connection-private, so contention here is theoretical;
+ * the transaction shape is kept anyway for defense in depth. Returns
+ * 0, or -1 with err set (the transaction was rolled back).
+ *
+ * The claim UPDATE renders each id as <= 20 characters plus a comma
+ * into a fixed FSQLV_SQL_MAX scratch (prefix below is well under
+ * 256 bytes). Keep the claimed batch within what renders without
+ * truncation; a larger batch would otherwise abort the whole run
+ * with "internal error building claim SQL" after a wasted
+ * BEGIN/ROLLBACK round-trip. */
+static int fsqlv_claim_rows(FsqlState *st, const sqlite3_int64 *ids,
+                            int n_claim, char *err, size_t err_cap) {
+    sqlite3_busy_timeout(st->db, FSQLV_CLAIM_BUSY_MS);
+    int failed = 0;
+    if (fsqlv_exec(st->db, "BEGIN IMMEDIATE", err, err_cap) != 0) {
+        failed = 1;
+    } else {
+        if (fsqlv_run_claim_update(st, ids, n_claim, err, err_cap) != 0)
+            failed = 1;
+        if (failed) {
+            sqlite3_exec(st->db, "ROLLBACK", NULL, NULL, NULL);
+        } else if (fsqlv_exec(st->db, "COMMIT", err, err_cap) != 0) {
+            sqlite3_exec(st->db, "ROLLBACK", NULL, NULL, NULL);
+            failed = 1;
+        }
+    }
+    sqlite3_busy_timeout(st->db, 0);       /* restore the stock default */
+    return failed ? -1 : 0;
+}
+
+/* Reads the source row's text. The PK column is cast to text for the
+ * comparison (never the reverse) so this works generically across
+ * int/real/text PKs without a type lookup (a correctness-over-index-
+ * use trade). On the 1 = found path, *txt_q_p stays open -- `*text`
+ * points into that statement's memory until the embed+write step
+ * (fsqlv_embed_and_write) finalizes it. Returns 1 = found (*text
+ * set), 0 = the source row is gone or its text column went NULL since
+ * this queue entry was created (nothing to embed, not a failure; the
+ * statement is finalized), -1 = engine error (rowerr set; the
+ * statement is finalized). */
+static int fsqlv_read_source_text(FsqlState *st, const char *sql,
+                                  const char *qtbl, const char *pk_val,
+                                  sqlite3_stmt **txt_q_p,
+                                  const char **text, char *rowerr) {
+    *txt_q_p = NULL;
+    *text = NULL;
+    if (sqlite3_prepare_v2(st->db, sql, -1, txt_q_p, NULL) != SQLITE_OK) {
+        snprintf(rowerr, FSQLV_ERR_MAX,
+                 "fractal_vectorizer_process_queue: source read failed "
+                 "for %.64s: %.160s", qtbl, sqlite3_errmsg(st->db));
+        return -1;
+    }
+    sqlite3_bind_text(*txt_q_p, 1, pk_val, -1, SQLITE_TRANSIENT);
+    int src_rc = sqlite3_step(*txt_q_p);
+    if (src_rc != SQLITE_ROW && src_rc != SQLITE_DONE) {
+        snprintf(rowerr, FSQLV_ERR_MAX,
+                 "fractal_vectorizer_process_queue: source read failed "
+                 "for %.64s: %.160s", qtbl, sqlite3_errmsg(st->db));
+        sqlite3_finalize(*txt_q_p);
+        *txt_q_p = NULL;
+        return -1;
+    }
+    const char *t = (src_rc == SQLITE_ROW)
+                  ? (const char *)sqlite3_column_text(*txt_q_p, 0) : NULL;
+    if (src_rc == SQLITE_DONE || !t) {
+        sqlite3_finalize(*txt_q_p);
+        *txt_q_p = NULL;
+        return 0;
+    }
+    *text = t;
+    return 1;
+}
+
+/* Embeds `text` and writes the canonical fractal_vector BLOB back to
+ * the source row. `text` points into *txt_q_p's memory; the statement
+ * is finalized (and the handle NULLed) on every path out of here.
+ * Returns 0 on success, -1 with rowerr set on any failure. */
+static int fsqlv_embed_and_write(FsqlState *st, const FsqlvQuoted *q,
+                                 const char *pk_val, const char *text,
+                                 sqlite3_stmt **txt_q_p,
+                                 char *rowerr) {
+    /* Same 4 MiB input bound as fractal_embed above: the reasoning
+     * layer caps the response, not the query. */
+    unsigned char *blob = NULL;
+    int nbytes = 0;
+    int erc;
+    if (strlen(text) > FSQL_MAX_INPUT_BYTES) {
+        snprintf(rowerr, FSQLV_ERR_MAX,
+                 "fractal_vectorizer_process_queue: source text exceeds "
+                 "the 4 MiB embed limit");
+        erc = -1;
+    } else {
+        erc = fsqlv_embed(st, text, &blob, &nbytes, rowerr, FSQLV_ERR_MAX);
+    }
+    if (erc != 0) {
+        sqlite3_finalize(*txt_q_p);
+        *txt_q_p = NULL;
+        return -1;
+    }
+
+    char sql[FSQLV_SQL_MAX];
+    snprintf(sql, sizeof sql,
+             "UPDATE %s SET %s = ?1 WHERE CAST(%s AS TEXT) = ?2",
+             q->src, q->ecol, q->pk);
+    sqlite3_stmt *wr_u = NULL;
+    if (sqlite3_prepare_v2(st->db, sql, -1, &wr_u, NULL) != SQLITE_OK) {
+        snprintf(rowerr, FSQLV_ERR_MAX,
+                 "fractal_vectorizer_process_queue: embed write failed "
+                 "for %.64s: %.160s", q->src, sqlite3_errmsg(st->db));
+        sqlite3_free(blob);
+        sqlite3_finalize(*txt_q_p);
+        *txt_q_p = NULL;
+        return -1;
+    }
+    sqlite3_bind_blob(wr_u, 1, blob, nbytes, SQLITE_TRANSIENT);
+    sqlite3_bind_text(wr_u, 2, pk_val, -1, SQLITE_TRANSIENT);
+    int wrc = sqlite3_step(wr_u);
+    sqlite3_free(blob);
+    sqlite3_finalize(wr_u);
+    sqlite3_finalize(*txt_q_p);
+    *txt_q_p = NULL;
+    if (wrc != SQLITE_DONE) {
+        snprintf(rowerr, FSQLV_ERR_MAX,
+                 "fractal_vectorizer_process_queue: embed write failed "
+                 "for %.64s: %.160s", q->src, sqlite3_errmsg(st->db));
+        return -1;
+    }
+    return 0;
+}
+
+/* Process one claimed queue row: re-read it, re-validate the
+ * registry's identifiers (the registry values were validated at
+ * create() time; the re-validation before EVERY interpolation is
+ * defense in depth -- they live in a mutable temp table), apply the
+ * rate cap, read the source row's text, embed it and write the
+ * canonical BLOB back; then mark the queue row done or failed.
+ * Returns 1 when the row counts as processed (done or failed), 0 when
+ * it does not (it vanished from the queue, or the rate cap deferred
+ * it: it goes back to 'pending' and is NOT counted). `rowerr` is
+ * FSQLV_ERR_MAX bytes. */
+static int fsqlv_process_one_row(FsqlState *st, sqlite3_stmt *row_q,
+                                 sqlite3_stmt *done_u, sqlite3_stmt *fail_u,
+                                 sqlite3_int64 qid, char *rowerr) {
+    sqlite3_reset(row_q);
+    sqlite3_clear_bindings(row_q);
+    sqlite3_bind_int64(row_q, 1, qid);
+    if (sqlite3_step(row_q) != SQLITE_ROW) return 0;
+
+    const char *pk_val = (const char *)sqlite3_column_text(row_q, 0);
+    const char *tbl    = (const char *)sqlite3_column_text(row_q, 1);
+    const char *pkcol  = (const char *)sqlite3_column_text(row_q, 2);
+    const char *tcol   = (const char *)sqlite3_column_text(row_q, 3);
+    const char *ecol   = (const char *)sqlite3_column_text(row_q, 4);
+    const char *opts   = (const char *)sqlite3_column_text(row_q, 5);
+    sqlite3_int64 reg_id = sqlite3_column_int64(row_q, 6);
+    if (!pk_val) pk_val = "";
+    if (!opts || !*opts) opts = "{}";
+
+    FsqlvQuoted q;
+    if (fsqlv_quote_ident(q.src, sizeof q.src, tbl, 1) != 0 ||
+        fsqlv_quote_ident(q.pk, sizeof q.pk, pkcol, 0) != 0 ||
+        fsqlv_quote_ident(q.tcol, sizeof q.tcol, tcol, 0) != 0 ||
+        fsqlv_quote_ident(q.ecol, sizeof q.ecol, ecol, 0) != 0) {
+        snprintf(rowerr, FSQLV_ERR_MAX,
+                 "fractal_vectorizer_process_queue: invalid identifier "
+                 "in registry for vectorizer %lld", (long long)reg_id);
+        fsqlv_fail_row(fail_u, qid, rowerr);
+        return 1;
+    }
+
+    /* Rate cap, read fresh per row so a cap edited mid-batch takes
+     * effect on the very next row, and so a batch mixing rows from
+     * several vectorizers applies each one's own cap correctly. */
+    int max_calls = -1;
+    int window_secs = 3600;
+    fsqlv_read_rate_cap(st, opts, &max_calls, &window_secs);
+    if (max_calls >= 0) {
+        int grc = fsqlv_rate_gate(st, reg_id, qid, max_calls,
+                                  window_secs, rowerr, FSQLV_ERR_MAX);
+        if (grc < 0) {
+            /* Window bookkeeping broke: fail this row, not the
+             * whole batch. */
+            fsqlv_fail_row(fail_u, qid, rowerr);
+            return 1;
+        }
+        if (grc > 0) return 0;   /* deferred: stays pending, uncounted */
+    }
+
+    /* Read the source row's text. */
+    char sql[FSQLV_SQL_MAX];
+    snprintf(sql, sizeof sql,
+             "SELECT %s FROM %s WHERE CAST(%s AS TEXT) = ?1",
+             q.tcol, q.src, q.pk);
+    sqlite3_stmt *txt_q = NULL;
+    const char *text = NULL;
+    int got = fsqlv_read_source_text(st, sql, q.src, pk_val,
+                                     &txt_q, &text, rowerr);
+    if (got < 0) {
+        fsqlv_fail_row(fail_u, qid, rowerr);
+        return 1;
+    }
+    if (got == 0) {
+        /* Source row deleted, or its text column went NULL, since
+         * this queue entry was created; nothing to embed, not a
+         * failure. */
+        fsqlv_done_row(done_u, qid);
+        return 1;
+    }
+
+    /* Embed + write the canonical BLOB back to the source row. */
+    if (fsqlv_embed_and_write(st, &q, pk_val, text, &txt_q, rowerr) != 0) {
+        fsqlv_fail_row(fail_u, qid, rowerr);
+        return 1;
+    }
+    fsqlv_done_row(done_u, qid);
+    return 1;
+}
+
 /* fractal_vectorizer_process_queue([batch_size [, stale_after_secs]])
  * -> number of rows actually processed (done + failed); a row
  * deferred by the rate cap or belonging to a paused vectorizer isn't
@@ -951,12 +1389,8 @@ static void fsqlv_process_fn(sqlite3_context *ctx, int argc,
     char err[FSQLV_ERR_MAX];
     err[0] = '\0';
 
-    int batch = FSQLV_DEFAULT_BATCH;
-    if (argc >= 1 && sqlite3_value_type(argv[0]) != SQLITE_NULL)
-        batch = sqlite3_value_int(argv[0]);
-    int stale_secs = FSQLV_DEFAULT_STALE_SECS;
-    if (argc >= 2 && sqlite3_value_type(argv[1]) != SQLITE_NULL)
-        stale_secs = sqlite3_value_int(argv[1]);
+    int batch = fsqlv_arg_int(argc, argv, 0, FSQLV_DEFAULT_BATCH);
+    int stale_secs = fsqlv_arg_int(argc, argv, 1, FSQLV_DEFAULT_STALE_SECS);
 
     if (batch < 1 || batch > FSQLV_MAX_BATCH) {
         char msg[128];
@@ -977,33 +1411,9 @@ static void fsqlv_process_fn(sqlite3_context *ctx, int argc,
         sqlite3_result_error(ctx, err, -1);
         return;
     }
-
-    /* Stale reclaim: rows stranded in 'processing' by a caller that
-     * crashed or was killed mid-batch: claiming a row only protects
-     * against concurrent callers racing each other, not against a
-     * caller that claimed a row and never came back. Epoch
-     * text/integer coercion is pinned with explicit CASTs so the
-     * comparison is numeric on both sides. */
-    {
-        sqlite3_stmt *u = NULL;
-        if (sqlite3_prepare_v2(st->db,
-                "UPDATE fractal_vectorizer_queue "
-                "SET status='pending', processing_started_at=NULL "
-                "WHERE status='processing' "
-                "  AND processing_started_at IS NOT NULL "
-                "  AND CAST(processing_started_at AS INTEGER) < "
-                "      CAST(strftime('%s','now') AS INTEGER) - ?1",
-                -1, &u, NULL) != SQLITE_OK) {
-            sqlite3_result_error(ctx, sqlite3_errmsg(st->db), -1);
-            return;
-        }
-        sqlite3_bind_int(u, 1, stale_secs);
-        int rc = sqlite3_step(u);
-        sqlite3_finalize(u);
-        if (rc != SQLITE_DONE) {
-            sqlite3_result_error(ctx, sqlite3_errmsg(st->db), -1);
-            return;
-        }
+    if (fsqlv_reclaim_stale(st, stale_secs, err, sizeof err) != 0) {
+        sqlite3_result_error(ctx, err, -1);
+        return;
     }
 
     /* Candidate selection: oldest created_at first, enabled
@@ -1040,73 +1450,15 @@ static void fsqlv_process_fn(sqlite3_context *ctx, int argc,
         return;
     }
 
-    /* The claim UPDATE renders each id as <= 20 characters plus a comma
-     * into a fixed FSQLV_SQL_MAX scratch (prefix below is well under
-     * 256 bytes). Keep the claimed batch within what renders without
-     * truncation; a larger batch would otherwise abort the whole run
-     * with "internal error building claim SQL" after a wasted
-     * BEGIN/ROLLBACK round-trip. The loop above caps n_claim at batch,
-     * so this only ever reduces it; remaining rows are picked up by
-     * the next process_queue call. */
+    /* The loop above caps n_claim at batch, so this only ever reduces
+     * it (see fsqlv_claim_rows for why); remaining rows are picked up
+     * by the next process_queue call. */
     {
         int max_claim = (FSQLV_SQL_MAX - 256 - 2) / 21;
         if (n_claim > max_claim) n_claim = max_claim;
     }
 
-    /* Claim: BEGIN IMMEDIATE + conditional UPDATE + COMMIT, the
-     * FOR UPDATE SKIP LOCKED analog. busy_timeout is per-connection,
-     * so the 5 s claim window is set here and restored (to SQLite's
-     * stock no-handler default) once the claim transaction closes; a
-     * host-installed busy handler cannot be read back and reinstalled,
-     * which is the one observable cost of the restore. TEMP tables are
-     * connection-private, so contention here is theoretical; the
-     * transaction shape is kept anyway for defense in depth. */
-    sqlite3_busy_timeout(st->db, FSQLV_CLAIM_BUSY_MS);
-    int failed = 0;
-    if (fsqlv_exec(st->db, "BEGIN IMMEDIATE", err, sizeof err) != 0) {
-        failed = 1;
-    } else {
-        /* Build "id IN (...)" from the selected ids: plain int64
-         * text, nothing injectable. */
-        char sql[FSQLV_SQL_MAX];
-        int n = snprintf(sql, sizeof sql,
-            "UPDATE fractal_vectorizer_queue "
-            "SET status='processing', "
-            "    processing_started_at="
-            "      CAST(strftime('%%s','now') AS INTEGER), "
-            "    updated_at=CAST(strftime('%%s','now') AS INTEGER) "
-            "WHERE status='pending' AND id IN (");
-        size_t used = 0;
-        if (n > 0 && (size_t)n < sizeof sql) {
-            used = (size_t)n;
-            for (int i = 0; i < n_claim; i++) {
-                n = snprintf(sql + used, sizeof sql - used, "%s%lld",
-                             i ? "," : "", (long long)ids[i]);
-                if (n <= 0 || (size_t)n >= sizeof sql - used) {
-                    used = 0;          /* truncation: bail out */
-                    break;
-                }
-                used += (size_t)n;
-            }
-        }
-        if (used == 0 || used + 2 >= sizeof sql) {
-            fsqlv_set_err(err, sizeof err,
-                          "fractal_vectorizer_process_queue: internal error "
-                          "building claim SQL");
-            failed = 1;
-        } else {
-            memcpy(sql + used, ")", 2);
-            if (fsqlv_exec(st->db, sql, err, sizeof err) != 0) failed = 1;
-        }
-        if (failed) {
-            sqlite3_exec(st->db, "ROLLBACK", NULL, NULL, NULL);
-        } else if (fsqlv_exec(st->db, "COMMIT", err, sizeof err) != 0) {
-            sqlite3_exec(st->db, "ROLLBACK", NULL, NULL, NULL);
-            failed = 1;
-        }
-    }
-    sqlite3_busy_timeout(st->db, 0);       /* restore the stock default */
-    if (failed) {
+    if (fsqlv_claim_rows(st, ids, n_claim, err, sizeof err) != 0) {
         free(ids);
         sqlite3_result_error(ctx, err, -1);
         return;
@@ -1114,8 +1466,6 @@ static void fsqlv_process_fn(sqlite3_context *ctx, int argc,
 
     /* Per-row statements, prepared once and reset per row. */
     sqlite3_stmt *row_q = NULL;    /* re-read one claimed queue row     */
-    sqlite3_stmt *txt_q = NULL;    /* read the source row's text col    */
-    sqlite3_stmt *wr_u  = NULL;    /* write the embedding back          */
     sqlite3_stmt *done_u = NULL;   /* mark done                         */
     sqlite3_stmt *fail_u = NULL;   /* mark failed + error text          */
     int ok = sqlite3_prepare_v2(st->db,
@@ -1146,192 +1496,13 @@ static void fsqlv_process_fn(sqlite3_context *ctx, int argc,
 
     int n_processed = 0;
     char rowerr[FSQLV_ERR_MAX];
-    char sql[FSQLV_SQL_MAX];
 
     for (int i = 0; i < n_claim; i++) {
-        sqlite3_int64 qid = ids[i];
-
-        sqlite3_reset(row_q);
-        sqlite3_clear_bindings(row_q);
-        sqlite3_bind_int64(row_q, 1, qid);
-        if (sqlite3_step(row_q) != SQLITE_ROW) continue;
-
-        const char *pk_val = (const char *)sqlite3_column_text(row_q, 0);
-        const char *tbl    = (const char *)sqlite3_column_text(row_q, 1);
-        const char *pkcol  = (const char *)sqlite3_column_text(row_q, 2);
-        const char *tcol   = (const char *)sqlite3_column_text(row_q, 3);
-        const char *ecol   = (const char *)sqlite3_column_text(row_q, 4);
-        const char *opts   = (const char *)sqlite3_column_text(row_q, 5);
-        sqlite3_int64 reg_id = sqlite3_column_int64(row_q, 6);
-        if (!pk_val) pk_val = "";
-        if (!opts || !*opts) opts = "{}";
-
-        /* The registry values were validated at create() time; the
-         * re-validation before EVERY interpolation is defense in depth
-         * (they live in a mutable temp table). */
-        char qtbl[600], qpk[80], qtcol[80], qecol[80];
-        if (fsqlv_quote_ident(qtbl, sizeof qtbl, tbl, 1) != 0 ||
-            fsqlv_quote_ident(qpk, sizeof qpk, pkcol, 0) != 0 ||
-            fsqlv_quote_ident(qtcol, sizeof qtcol, tcol, 0) != 0 ||
-            fsqlv_quote_ident(qecol, sizeof qecol, ecol, 0) != 0) {
-            snprintf(rowerr, sizeof rowerr,
-                     "fractal_vectorizer_process_queue: invalid identifier "
-                     "in registry for vectorizer %lld", (long long)reg_id);
-            sqlite3_reset(fail_u);
-            sqlite3_bind_text(fail_u, 1, rowerr, -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int64(fail_u, 2, qid);
-            sqlite3_step(fail_u);
-            n_processed++;
-            continue;
-        }
-
-        /* Rate cap, read fresh per row so a cap edited mid-batch takes
-         * effect on the very next row, and so a batch mixing rows from
-         * several vectorizers applies each one's own cap correctly. */
-        int max_calls = -1, window_secs = 3600;
-        fsqlv_read_rate_cap(st, opts, &max_calls, &window_secs);
-        if (max_calls >= 0) {
-            int grc = fsqlv_rate_gate(st, reg_id, qid, max_calls,
-                                      window_secs, rowerr, sizeof rowerr);
-            if (grc < 0) {
-                /* Window bookkeeping broke: fail this row, not the
-                 * whole batch. */
-                sqlite3_reset(fail_u);
-                sqlite3_bind_text(fail_u, 1, rowerr, -1, SQLITE_TRANSIENT);
-                sqlite3_bind_int64(fail_u, 2, qid);
-                sqlite3_step(fail_u);
-                n_processed++;
-                continue;
-            }
-            if (grc > 0) continue;   /* deferred: stays pending, uncounted */
-        }
-
-        /* Read the source row's text. The PK column is cast to text
-         * for the comparison (never the reverse) so this works
-         * generically across int/real/text PKs without a type lookup
-         * (a correctness-over-index-use trade). */
-        snprintf(sql, sizeof sql,
-                 "SELECT %s FROM %s WHERE CAST(%s AS TEXT) = ?1",
-                 qtcol, qtbl, qpk);
-        if (txt_q) { sqlite3_finalize(txt_q); txt_q = NULL; }
-        if (sqlite3_prepare_v2(st->db, sql, -1, &txt_q, NULL)
-                != SQLITE_OK) {
-            snprintf(rowerr, sizeof rowerr,
-                     "fractal_vectorizer_process_queue: source read failed "
-                     "for %.64s: %.160s", qtbl, sqlite3_errmsg(st->db));
-            sqlite3_reset(fail_u);
-            sqlite3_bind_text(fail_u, 1, rowerr, -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int64(fail_u, 2, qid);
-            sqlite3_step(fail_u);
-            n_processed++;
-            continue;
-        }
-        sqlite3_bind_text(txt_q, 1, pk_val, -1, SQLITE_TRANSIENT);
-        int src_rc = sqlite3_step(txt_q);
-        if (src_rc != SQLITE_ROW && src_rc != SQLITE_DONE) {
-            snprintf(rowerr, sizeof rowerr,
-                     "fractal_vectorizer_process_queue: source read failed "
-                     "for %.64s: %.160s", qtbl, sqlite3_errmsg(st->db));
-            sqlite3_finalize(txt_q);
-            txt_q = NULL;
-            sqlite3_reset(fail_u);
-            sqlite3_bind_text(fail_u, 1, rowerr, -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int64(fail_u, 2, qid);
-            sqlite3_step(fail_u);
-            n_processed++;
-            continue;
-        }
-        const char *text = (src_rc == SQLITE_ROW)
-                         ? (const char *)sqlite3_column_text(txt_q, 0)
-                         : NULL;
-        if (src_rc == SQLITE_DONE || !text) {
-            /* Source row deleted, or its text column went NULL, since
-             * this queue entry was created; nothing to embed, not a
-             * failure. */
-            sqlite3_finalize(txt_q);
-            txt_q = NULL;
-            sqlite3_reset(done_u);
-            sqlite3_clear_bindings(done_u);
-            sqlite3_bind_int64(done_u, 1, qid);
-            sqlite3_step(done_u);
-            n_processed++;
-            continue;
-        }
-
-        /* Embed + write the canonical BLOB back to the source row.
-         * Same 4 MiB input bound as fractal_embed above: the
-         * reasoning layer caps the response, not the query. */
-        unsigned char *blob = NULL;
-        int nbytes = 0;
-        int erc;
-        if (strlen(text) > FSQL_MAX_INPUT_BYTES) {
-            snprintf(rowerr, sizeof rowerr,
-                     "fractal_vectorizer_process_queue: source text exceeds "
-                     "the 4 MiB embed limit");
-            erc = -1;
-        } else {
-            erc = fsqlv_embed(st, text, &blob, &nbytes,
-                              rowerr, sizeof rowerr);
-        }
-        if (erc != 0) {
-            sqlite3_finalize(txt_q);
-            txt_q = NULL;
-            sqlite3_reset(fail_u);
-            sqlite3_bind_text(fail_u, 1, rowerr, -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int64(fail_u, 2, qid);
-            sqlite3_step(fail_u);
-            n_processed++;
-            continue;
-        }
-
-        snprintf(sql, sizeof sql,
-                 "UPDATE %s SET %s = ?1 WHERE CAST(%s AS TEXT) = ?2",
-                 qtbl, qecol, qpk);
-        if (wr_u) { sqlite3_finalize(wr_u); wr_u = NULL; }
-        if (sqlite3_prepare_v2(st->db, sql, -1, &wr_u, NULL) != SQLITE_OK) {
-            snprintf(rowerr, sizeof rowerr,
-                     "fractal_vectorizer_process_queue: embed write failed "
-                     "for %.64s: %.160s", qtbl, sqlite3_errmsg(st->db));
-            sqlite3_free(blob);
-            sqlite3_finalize(txt_q);
-            txt_q = NULL;
-            sqlite3_reset(fail_u);
-            sqlite3_bind_text(fail_u, 1, rowerr, -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int64(fail_u, 2, qid);
-            sqlite3_step(fail_u);
-            n_processed++;
-            continue;
-        }
-        sqlite3_bind_blob(wr_u, 1, blob, nbytes, SQLITE_TRANSIENT);
-        sqlite3_bind_text(wr_u, 2, pk_val, -1, SQLITE_TRANSIENT);
-        int wrc = sqlite3_step(wr_u);
-        sqlite3_free(blob);
-        sqlite3_finalize(wr_u);
-        wr_u = NULL;
-        sqlite3_finalize(txt_q);
-        txt_q = NULL;
-        if (wrc != SQLITE_DONE) {
-            snprintf(rowerr, sizeof rowerr,
-                     "fractal_vectorizer_process_queue: embed write failed "
-                     "for %.64s: %.160s", qtbl, sqlite3_errmsg(st->db));
-            sqlite3_reset(fail_u);
-            sqlite3_bind_text(fail_u, 1, rowerr, -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int64(fail_u, 2, qid);
-            sqlite3_step(fail_u);
-            n_processed++;
-            continue;
-        }
-
-        sqlite3_reset(done_u);
-        sqlite3_clear_bindings(done_u);
-        sqlite3_bind_int64(done_u, 1, qid);
-        sqlite3_step(done_u);
-        n_processed++;
+        n_processed += fsqlv_process_one_row(st, row_q, done_u, fail_u,
+                                             ids[i], rowerr);
     }
 
     if (row_q) sqlite3_finalize(row_q);
-    if (txt_q) sqlite3_finalize(txt_q);
-    if (wr_u) sqlite3_finalize(wr_u);
     if (done_u) sqlite3_finalize(done_u);
     if (fail_u) sqlite3_finalize(fail_u);
     free(ids);
@@ -1351,12 +1522,12 @@ int fsql_vectorizer_register(sqlite3 *db, FsqlState *st) {
     int rc;
 
     struct { const char *name; int narg; void *fn; } fns[] = {
-        { "fractal_vectorizer_create",       -1, (void *)fsqlv_create_fn  },
-        { "fractal_vectorizer_pause",         1, (void *)fsqlv_pause_fn   },
-        { "fractal_vectorizer_resume",        1, (void *)fsqlv_resume_fn  },
-        { "fractal_vectorizer_drop",          1, (void *)fsqlv_drop_fn    },
-        { "fractal_vectorizer_process_queue", -1, (void *)fsqlv_process_fn },
-        { "fractal_embed",                    1, (void *)fsqlv_embed_fn   },
+        { "fractal_vectorizer_create",       -1, (void *)&fsqlv_create_fn  },
+        { "fractal_vectorizer_pause",         1, (void *)&fsqlv_pause_fn   },
+        { "fractal_vectorizer_resume",        1, (void *)&fsqlv_resume_fn  },
+        { "fractal_vectorizer_drop",          1, (void *)&fsqlv_drop_fn    },
+        { "fractal_vectorizer_process_queue", -1, (void *)&fsqlv_process_fn },
+        { "fractal_embed",                    1, (void *)&fsqlv_embed_fn   },
     };
     for (size_t i = 0; i < sizeof(fns) / sizeof(fns[0]); i++) {
         rc = sqlite3_create_function_v2(db, fns[i].name, fns[i].narg,

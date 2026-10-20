@@ -101,7 +101,6 @@
  */
 
 #include <sqlite3ext.h>
-SQLITE_EXTENSION_INIT3
 
 #include <inttypes.h>
 #include <math.h>
@@ -114,6 +113,8 @@ SQLITE_EXTENSION_INIT3
 #include "fsql_sqlite_internal.h"
 #include "fsql_vector.h"
 #include "fractalsql_parse.h"
+
+SQLITE_EXTENSION_INIT3
 
 /* ------------------------------------------------------------------ */
 /* Limits (DoS guards)                                                  */
@@ -186,7 +187,7 @@ static int sb_reserve(StrBuf *b, size_t need) {
     if (b->oom) return -1;
     if (b->len + need + 1 <= b->cap) return 0;
     size_t nc = b->cap ? b->cap : 256;
-    while (nc < b->len + need + 1) nc *= 2;
+    for (; nc < b->len + need + 1; nc *= 2);
     char *nb = (char *)realloc(b->buf, nc);
     if (!nb) { b->oom = 1; return -1; }
     b->buf = nb;
@@ -206,7 +207,8 @@ static void sb_puts(StrBuf *b, const char *s) {
 }
 
 static void sb_printf(StrBuf *b, const char *fmt, ...) {
-    va_list ap, ap2;
+    va_list ap;
+    va_list ap2;
     va_start(ap, fmt);
     va_copy(ap2, ap);
     int need = vsnprintf(NULL, 0, fmt, ap);
@@ -348,29 +350,77 @@ static int agents_dim_in_arena(int dim) {
     return dim >= 1 && dim <= FSQL_ARENA_MAX_DIM;
 }
 
+/* Parameter bundle for agents_scan_corpus (was 8 positional args):
+ * table/col are the (already agents_ident_ok-validated) identifiers to
+ * scan, dim is the expected per-row vector width, want_rowids asks the
+ * scan to also capture each row's rowid. */
+typedef struct AgentScanSpec {
+    const char *table;
+    const char *col;
+    int         dim;
+    int         want_rowids;
+} AgentScanSpec;
+
+/* Decode one scanned row's vector column into `row` (dim doubles).
+ * Returns 0 on success, -1 with err set (NULL vector, malformed
+ * vector, or a dim mismatch against spec->dim) -- split out of
+ * agents_scan_corpus's per-row loop body to keep that loop short and
+ * flat, without changing any check, order, or error message. */
+static int agents_scan_row_vector(const AgentScanSpec *spec,
+                                  sqlite3_stmt *stmt, int vec_i,
+                                  size_t r, double *row,
+                                  char *err, size_t err_cap) {
+    if (sqlite3_column_type(stmt, vec_i) == SQLITE_NULL) {
+        agents_set_err(err, err_cap,
+                       "fractalsql: NULL vector at row %zu", r);
+        return -1;
+    }
+
+    float *fv = NULL;
+    int    fdim = 0;
+    if (fsql_vec_decode(sqlite3_column_value(stmt, vec_i),
+                        &fv, &fdim) != 0) {
+        agents_set_err(err, err_cap,
+                       "fractalsql: malformed vector at %s.%s row %zu "
+                       "(expect CSV/JSON text or canonical BLOB)",
+                       spec->table, spec->col, r);
+        return -1;
+    }
+    if (fdim != spec->dim) {
+        free(fv);
+        agents_set_err(err, err_cap,
+                       "fractalsql: %s.%s row %zu has dim %d, "
+                       "expected %d (match the query)",
+                       spec->table, spec->col, r, fdim, spec->dim);
+        return -1;
+    }
+    for (int i = 0; i < spec->dim; i++) row[i] = (double)fv[i];
+    free(fv);
+    return 0;
+}
+
 /* Scan table.col into *out. A row whose vector decodes to a different
- * dim than `dim` is a hard error, as is a NULL vector.
+ * dim than `spec->dim` is a hard error, as is a NULL vector.
  * Returns 0 on success (possibly 0 rows), -1 with err set. */
-static int agents_scan_corpus(FsqlState *st, const char *table,
-                              const char *col, int dim, int want_rowids,
+static int agents_scan_corpus(const FsqlState *st, const AgentScanSpec *spec,
                               AgentCorpus *out, char *err, size_t err_cap) {
     memset(out, 0, sizeof(*out));
-    out->dim = dim;
-    if (!agents_dim_in_arena(dim)) {
+    out->dim = spec->dim;
+    if (!agents_dim_in_arena(spec->dim)) {
         agents_set_err(err, err_cap,
                        "fractalsql: query dim %d out of range [1, %d]",
-                       dim, FSQL_ARENA_MAX_DIM);
+                       spec->dim, FSQL_ARENA_MAX_DIM);
         return -1;
     }
 
     StrBuf sql;
     sb_init(&sql);
     sb_puts(&sql, "SELECT ");
-    if (want_rowids) sb_puts(&sql, "rowid, ");
+    if (spec->want_rowids) sb_puts(&sql, "rowid, ");
     sb_puts(&sql, "\"");
-    sb_puts(&sql, col);          /* validated with agents_ident_ok */
+    sb_puts(&sql, spec->col);    /* validated with agents_ident_ok */
     sb_puts(&sql, "\" FROM \"");
-    sb_puts(&sql, table);        /* validated with agents_ident_ok */
+    sb_puts(&sql, spec->table);  /* validated with agents_ident_ok */
     sb_puts(&sql, "\" ORDER BY rowid");
 
     if (sb_failed(&sql)) {
@@ -384,7 +434,7 @@ static int agents_scan_corpus(FsqlState *st, const char *table,
     sb_free(&sql);
     if (rc != SQLITE_OK) {
         agents_set_err(err, err_cap, "fractalsql: scan of %s.%s failed: %s",
-                       table, col, sqlite3_errmsg(st->db));
+                       spec->table, spec->col, sqlite3_errmsg(st->db));
         return -1;
     }
 
@@ -395,46 +445,23 @@ static int agents_scan_corpus(FsqlState *st, const char *table,
         if (rc != SQLITE_ROW) {
             agents_set_err(err, err_cap,
                            "fractalsql: scan of %s.%s failed: %s",
-                           table, col, sqlite3_errmsg(st->db));
+                           spec->table, spec->col, sqlite3_errmsg(st->db));
             goto fail;
         }
 
         size_t r = out->n_rows;
-        int vec_i = want_rowids ? 1 : 0;
-        if (sqlite3_column_type(stmt, vec_i) == SQLITE_NULL) {
-            agents_set_err(err, err_cap,
-                           "fractalsql: NULL vector at row %zu", r);
+        int vec_i = spec->want_rowids ? 1 : 0;
+        if (agents_scan_row_vector(spec, stmt, vec_i, r, row,
+                                  err, err_cap) != 0)
             goto fail;
-        }
-
-        float *fv = NULL;
-        int    fdim = 0;
-        if (fsql_vec_decode(sqlite3_column_value(stmt, vec_i),
-                            &fv, &fdim) != 0) {
-            agents_set_err(err, err_cap,
-                           "fractalsql: malformed vector at %s.%s row %zu "
-                           "(expect CSV/JSON text or canonical BLOB)",
-                           table, col, r);
-            goto fail;
-        }
-        if (fdim != dim) {
-            free(fv);
-            agents_set_err(err, err_cap,
-                           "fractalsql: %s.%s row %zu has dim %d, "
-                           "expected %d (match the query)",
-                           table, col, r, fdim, dim);
-            goto fail;
-        }
-        for (int i = 0; i < dim; i++) row[i] = (double)fv[i];
-        free(fv);
 
         int64_t rowid = 0;
-        if (want_rowids) rowid = sqlite3_column_int64(stmt, 0);
-        if (agents_corpus_append(out, row, rowid, want_rowids) != 0) {
+        if (spec->want_rowids) rowid = sqlite3_column_int64(stmt, 0);
+        if (agents_corpus_append(out, row, rowid, spec->want_rowids) != 0) {
             agents_set_err(err, err_cap,
                            "fractalsql: %s.%s corpus exceeds the row/byte "
                            "cap (or out of memory) at row %zu",
-                           table, col, r);
+                           spec->table, spec->col, r);
             goto fail;
         }
     }
@@ -511,7 +538,7 @@ static int agents_embed_query(FsqlState *st, const char *text,
 /* Reasoning / Scout / top-k composition helpers                       */
 /* ------------------------------------------------------------------ */
 
-static int agents_require_reasoning(FsqlState *st, const char *who,
+static int agents_require_reasoning(const FsqlState *st, const char *who,
                                     char *err, size_t err_cap) {
     if (!st || !st->ctx) {
         agents_set_err(err, err_cap, "fractalsql: extension not initialized");
@@ -527,24 +554,39 @@ static int agents_require_reasoning(FsqlState *st, const char *who,
     return 0;
 }
 
+/* Parameter bundle for agents_scout_search (was 10 positional args). */
+typedef struct AgentScoutReq {
+    const double *query;
+    int           k;
+    int           pop_size;
+    int           iterations;
+} AgentScoutReq;
+
+/* Output bundle for agents_scout_search: the core's result JSON and
+ * its length (owned by st->ctx until its next search, same as every
+ * other fsql_search_ptr caller in this file). */
+typedef struct AgentSearchOut {
+    const char *json;
+    size_t      len;
+} AgentSearchOut;
+
 /* Scout-mode search over a scanned corpus (return_population +
  * walk=0.0 + mmr_lambda=0.5). */
-static int agents_scout_search(FsqlState *st, const AgentCorpus *c,
-                               const double *query, int k,
-                               int pop_size, int iterations,
-                               const char **out_json, size_t *out_len,
+static int agents_scout_search(const FsqlState *st, const AgentCorpus *c,
+                               const AgentScoutReq *req,
+                               AgentSearchOut *out,
                                char *err, size_t err_cap) {
     char params[256];
     snprintf(params, sizeof params,
              "{\"return_population\":true,\"max_generation\":%d,"
              "\"population_size\":%d,\"maximum_diffusion\":2,"
              "\"walk\":0.0,\"bound_clipping\":true,\"mmr_lambda\":0.5}",
-             iterations, pop_size);
+             req->iterations, req->pop_size);
 
     int rc = fsql_search_ptr(st->ctx, c->data, c->n_rows, (size_t)c->dim,
-                             query, (size_t)c->dim, k,
-                             params, strlen(params), out_json, out_len);
-    if (rc != 0 || !*out_json) {
+                             req->query, (size_t)c->dim, req->k,
+                             params, strlen(params), &out->json, &out->len);
+    if (rc != 0 || !out->json) {
         agents_set_err(err, err_cap, "fractalsql: scout SFS failed: %s",
                        agents_core_detail(st));
         return -1;
@@ -566,9 +608,40 @@ static int agents_scout_search(FsqlState *st, const AgentCorpus *c,
  * 0-indexed scan position, unchanged. id_map translates filtered
  * (cohort) scan positions back to per-row ids; NULL means identity.
  * Returns 0 / -1 with err set. */
-static int agents_topk_json(FsqlState *st, const AgentCorpus *c,
-                            const double *query, int k,
-                            const int64_t *id_map, int locator,
+
+/* Parameter bundle for agents_topk_json (was 9 positional args). See
+ * the function comment above for what each field means. */
+typedef struct AgentTopkReq {
+    const double  *query;
+    int            k;
+    const int64_t *id_map;
+    int            locator;
+} AgentTopkReq;
+
+/* Emit one top-k hit ({"doc_id":...,"distance":...[,"scan_pos":...]})
+ * to `out`, in either locator or scan-position doc_id convention (see
+ * the agents_topk_json comment above) -- split out of its result loop
+ * to keep that loop short and flat, without changing the emitted
+ * shape. */
+static void agents_topk_emit_hit(StrBuf *out, const AgentCorpus *c,
+                                 const AgentTopkReq *req,
+                                 int idx_i, double dist_i) {
+    if (req->locator) {
+        /* doc_id is the row's real rowid (rowid_map == corpus.rowids
+         * for an unfiltered telemetry scan, the kept-rowid map for a
+         * cohort scan); scan_pos stays the raw scan position. */
+        int64_t doc_id = req->id_map ? req->id_map[idx_i] : c->rowids[idx_i];
+        sb_printf(out, "{\"doc_id\":%lld,\"distance\":%.17g,\"scan_pos\":%d}",
+                  (long long)doc_id, dist_i, idx_i);
+    } else {
+        int64_t doc_id = req->id_map ? req->id_map[idx_i] : (int64_t)idx_i;
+        sb_printf(out, "{\"doc_id\":%lld,\"distance\":%.17g}",
+                  (long long)doc_id, dist_i);
+    }
+}
+
+static int agents_topk_json(const FsqlState *st, const AgentCorpus *c,
+                            const AgentTopkReq *req,
                             StrBuf *out, char *err, size_t err_cap) {
     if (c->n_rows == 0) {
         agents_set_err(err, err_cap, "fractalsql: no corpus rows to search");
@@ -583,7 +656,7 @@ static int agents_topk_json(FsqlState *st, const AgentCorpus *c,
     const char *result_json = NULL;
     size_t      result_len  = 0;
     int rc = fsql_search_ptr(st->ctx, c->data, c->n_rows, (size_t)c->dim,
-                             query, (size_t)c->dim, k,
+                             req->query, (size_t)c->dim, req->k,
                              params, strlen(params),
                              &result_json, &result_len);
     if (rc != 0 || !result_json) {
@@ -592,14 +665,14 @@ static int agents_topk_json(FsqlState *st, const AgentCorpus *c,
         return -1;
     }
 
-    int  *idx  = (int *)malloc((size_t)k * sizeof(int));
-    double *dist = (double *)malloc((size_t)k * sizeof(double));
+    int  *idx  = (int *)malloc((size_t)req->k * sizeof(int));
+    double *dist = (double *)malloc((size_t)req->k * sizeof(double));
     if (!idx || !dist) {
         free(idx); free(dist);
         agents_set_err(err, err_cap, "fractalsql: out of memory");
         return -1;
     }
-    int n = fsql_extract_topk(result_json, k, idx, dist);
+    int n = fsql_extract_topk(result_json, req->k, idx, dist);
     if (n < 0) {
         free(idx); free(dist);
         agents_set_err(err, err_cap,
@@ -618,18 +691,7 @@ static int agents_topk_json(FsqlState *st, const AgentCorpus *c,
         if (idx[i] < 0 || (size_t)idx[i] >= c->n_rows) continue;
         if (emitted) sb_puts(out, ",");
         emitted = 1;
-        if (locator) {
-            /* doc_id is the row's real rowid (rowid_map == corpus.rowids
-             * for an unfiltered telemetry scan, the kept-rowid map for a
-             * cohort scan); scan_pos stays the raw scan position. */
-            int64_t doc_id = id_map ? id_map[idx[i]] : c->rowids[idx[i]];
-            sb_printf(out, "{\"doc_id\":%lld,\"distance\":%.17g,\"scan_pos\":%d}",
-                      (long long)doc_id, dist[i], idx[i]);
-        } else {
-            int64_t doc_id = id_map ? id_map[idx[i]] : (int64_t)idx[i];
-            sb_printf(out, "{\"doc_id\":%lld,\"distance\":%.17g}",
-                      (long long)doc_id, dist[i]);
-        }
+        agents_topk_emit_hit(out, c, req, idx[i], dist[i]);
     }
     sb_puts(out, "]");
     free(idx);
@@ -696,16 +758,65 @@ static void sb_json_column(StrBuf *b, sqlite3_stmt *stmt, int i) {
     }
 }
 
+/* Parameter bundle for agents_retrieval_context (was 8 positional
+ * args): the top-k's matched corpus positions (idx/got) resolved
+ * against c's captured rowids, table/vector_col naming where (and
+ * what) to fetch. */
+typedef struct AgentRetrievalReq {
+    const char      *table;
+    const char      *vector_col;
+    const AgentCorpus *c;
+    const int       *idx;
+    int              got;
+} AgentRetrievalReq;
+
+/* Collect the distinct, in-range rowids (capped at
+ * FSQL_AGENTS_MAX_CONTEXT_ROWS) for req's matched corpus positions
+ * into `rids`. Returns the count kept -- split out of
+ * agents_retrieval_context without changing the dedup/cap behavior. */
+static int agents_collect_distinct_rowids(const AgentRetrievalReq *req,
+                                          int64_t *rids) {
+    int n_rids = 0;
+    for (int i = 0; i < req->got && n_rids < FSQL_AGENTS_MAX_CONTEXT_ROWS;
+         i++) {
+        int r = req->idx[i];
+        if (r < 0 || (size_t)r >= req->c->n_rows) continue;
+        int64_t rid = req->c->rowids[r];
+        int dup = 0;
+        for (int j = 0; j < n_rids; j++)
+            if (rids[j] == rid) { dup = 1; break; }
+        if (!dup) rids[n_rids++] = rid;
+    }
+    return n_rids;
+}
+
+/* Append one fetched row as a JSON object, all columns except
+ * vector_col -- split out of agents_retrieval_context's row loop to
+ * keep that loop short and flat. */
+static void agents_retrieval_emit_row(StrBuf *out, sqlite3_stmt *stmt,
+                                      int n_cols, const char *vector_col) {
+    sb_puts(out, "{");
+    int emitted = 0;
+    for (int i = 0; i < n_cols; i++) {
+        const char *name = sqlite3_column_name(stmt, i);
+        if (name && strcmp(name, vector_col) == 0) continue;
+        if (emitted) sb_puts(out, ",");
+        sb_json_string(out, name ? name : "?");
+        sb_puts(out, ":");
+        sb_json_column(out, stmt, i);
+        emitted = 1;
+    }
+    sb_puts(out, "}");
+}
+
 /* Fetch the matched rows' content (all columns except the embedding
  * column) as a compact JSON array: the LLM never sees raw embedding
  * vectors (they are large and useless to it). Returns a malloc'd JSON
  * string ("[]" when nothing matches), or NULL with err set. */
-static char *agents_retrieval_context(FsqlState *st, const char *table,
-                                      const char *vector_col,
-                                      const AgentCorpus *c,
-                                      const int *idx, int got,
+static char *agents_retrieval_context(const FsqlState *st,
+                                      const AgentRetrievalReq *req,
                                       char *err, size_t err_cap) {
-    if (got <= 0 || !c->rowids) {
+    if (req->got <= 0 || !req->c->rowids) {
         char *empty = (char *)malloc(3);
         if (empty) memcpy(empty, "[]", 3);
         return empty;
@@ -713,16 +824,7 @@ static char *agents_retrieval_context(FsqlState *st, const char *table,
 
     /* Distinct, in-range rowids for the matched positions, capped. */
     int64_t rids[FSQL_AGENTS_MAX_CONTEXT_ROWS];
-    int n_rids = 0;
-    for (int i = 0; i < got && n_rids < FSQL_AGENTS_MAX_CONTEXT_ROWS; i++) {
-        int r = idx[i];
-        if (r < 0 || (size_t)r >= c->n_rows) continue;
-        int64_t rid = c->rowids[r];
-        int dup = 0;
-        for (int j = 0; j < n_rids; j++)
-            if (rids[j] == rid) { dup = 1; break; }
-        if (!dup) rids[n_rids++] = rid;
-    }
+    int n_rids = agents_collect_distinct_rowids(req, rids);
     if (n_rids == 0) {
         char *empty = (char *)malloc(3);
         if (empty) memcpy(empty, "[]", 3);
@@ -732,7 +834,7 @@ static char *agents_retrieval_context(FsqlState *st, const char *table,
     StrBuf sql;
     sb_init(&sql);
     sb_puts(&sql, "SELECT * FROM ");
-    sb_sql_ident(&sql, table);
+    sb_sql_ident(&sql, req->table);
     sb_puts(&sql, " WHERE rowid IN (?1");
     for (int i = 1; i < n_rids; i++)
         sb_printf(&sql, ",?%d", i + 1);
@@ -763,18 +865,7 @@ static char *agents_retrieval_context(FsqlState *st, const char *table,
     int truncated = 0;      /* size-cap break: truncation, not failure */
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         if (rows) sb_puts(&out, ",");
-        sb_puts(&out, "{");
-        int emitted = 0;
-        for (int i = 0; i < n_cols; i++) {
-            const char *name = sqlite3_column_name(stmt, i);
-            if (name && strcmp(name, vector_col) == 0) continue;
-            if (emitted) sb_puts(&out, ",");
-            sb_json_string(&out, name ? name : "?");
-            sb_puts(&out, ":");
-            sb_json_column(&out, stmt, i);
-            emitted = 1;
-        }
-        sb_puts(&out, "}");
+        agents_retrieval_emit_row(&out, stmt, n_cols, req->vector_col);
         rows++;
         /* Keep the LLM context prompt-sized even when top-k is large. */
         if (out.len > FSQL_MAX_INPUT_BYTES / 2) { truncated = 1; break; }
@@ -803,7 +894,7 @@ static char *agents_retrieval_context(FsqlState *st, const char *table,
 static void fractal_reason_fn(sqlite3_context *ctx, int argc,
                               sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    char err[512] = { 0 };
 
     if (argc < 1 || argc > 2) {
         sqlite3_result_error(ctx,
@@ -857,8 +948,8 @@ static void fractal_reason_fn(sqlite3_context *ctx, int argc,
 
 static void fractal_search_debug_fn(sqlite3_context *ctx, int argc,
                                     sqlite3_value **argv) {
-    FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    const FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
+    char err[512] = { 0 };
 
     if (argc < 1 || argc > 4) {
         sqlite3_result_error(ctx,
@@ -875,7 +966,9 @@ static void fractal_search_debug_fn(sqlite3_context *ctx, int argc,
         return;
     }
 
-    int iterations = 30, pop_size = 50, diff_f = 2;
+    int iterations = 30;
+    int pop_size = 50;
+    int diff_f = 2;
     if (argc >= 2 && sqlite3_value_type(argv[1]) != SQLITE_NULL)
         iterations = sqlite3_value_int(argv[1]);
     if (argc >= 3 && sqlite3_value_type(argv[2]) != SQLITE_NULL)
@@ -941,28 +1034,48 @@ static void fractal_search_debug_fn(sqlite3_context *ctx, int argc,
 /* Shared Search->Synthesize pipeline (search_agent / rag_agent)       */
 /* ------------------------------------------------------------------ */
 
+/* Input bundle for agents_rag_pipeline (was 14 positional args
+ * combined with the output bundle below). `who` is accepted but
+ * unused (kept for call-site self-documentation). */
+typedef struct AgentRagReq {
+    const char *who;
+    const char *query;
+    const char *table;
+    const char *col;
+    int         pop_size;
+    int         iterations;
+} AgentRagReq;
+
+/* Output bundle for agents_rag_pipeline. On a -2 (partial) return,
+ * answer is NULL and reasoning_failed is 1 with idx/dist/got valid;
+ * on 0, answer/idx/dist/got are all valid; on -1, none are. */
+typedef struct AgentRagOut {
+    char   *answer;
+    int    *idx;
+    double *dist;
+    int     got;
+    int     reasoning_failed;
+} AgentRagOut;
+
 /* embed query -> scan corpus (with rowids) -> Scout search -> content
- * retrieval -> LLM synthesis. On success `answer` holds the LLM's
- * response and idx/dist/got carry the top-k (search_agent's
+ * retrieval -> LLM synthesis. On success out->answer holds the LLM's
+ * response and out->idx/dist/got carry the top-k (search_agent's
  * source_doc_ids). */
-static int agents_rag_pipeline(FsqlState *st, const char *who,
-                               const char *query, const char *table,
-                               const char *col, int pop_size, int iterations,
-                               char **out_answer,
-                               int **out_idx, double **out_dist, int *out_got,
-                               int *reasoning_failed,
+static int agents_rag_pipeline(FsqlState *st, const AgentRagReq *req,
+                               AgentRagOut *out,
                                char *err, size_t err_cap) {
-    *out_answer = NULL;
-    *out_idx = NULL;
-    *out_dist = NULL;
-    *out_got = 0;
-    if (reasoning_failed) *reasoning_failed = 0;
+    out->answer = NULL;
+    out->idx = NULL;
+    out->dist = NULL;
+    out->got = 0;
+    out->reasoning_failed = 0;
 
     /* 1. Embed the natural-language query (embed tier; errors clearly
      * when http_embed_url is unset). */
     double *query_vec = NULL;
     int dim = 0;
-    if (agents_embed_query(st, query, &query_vec, &dim, err, err_cap) != 0)
+    if (agents_embed_query(st, req->query, &query_vec, &dim,
+                           err, err_cap) != 0)
         return -1;
     if (dim > FSQL_ARENA_MAX_DIM) {
         free(query_vec);
@@ -975,7 +1088,8 @@ static int agents_rag_pipeline(FsqlState *st, const char *who,
     /* 2. Diverse Scout search over table.col, capturing each row's
      * rowid so result positions map back to physical rows. */
     AgentCorpus corpus;
-    if (agents_scan_corpus(st, table, col, dim, 1, &corpus,
+    AgentScanSpec scan_spec = { req->table, req->col, dim, 1 };
+    if (agents_scan_corpus(st, &scan_spec, &corpus,
                            err, err_cap) != 0) {
         free(query_vec);
         return -1;
@@ -984,30 +1098,31 @@ static int agents_rag_pipeline(FsqlState *st, const char *who,
         agents_corpus_free(&corpus);
         free(query_vec);
         agents_set_err(err, err_cap, "fractalsql: no rows found in %s.%s",
-                       table, col);
+                       req->table, req->col);
         return -1;
     }
 
-    const char *result_json = NULL;
-    size_t      result_len  = 0;
-    int rc = agents_scout_search(st, &corpus, query_vec, pop_size,
-                                 pop_size, iterations,
-                                 &result_json, &result_len, err, err_cap);
+    AgentScoutReq scout_req = { query_vec, req->pop_size, req->pop_size,
+                                req->iterations };
+    AgentSearchOut scout_out = { NULL, 0 };
+    int rc = agents_scout_search(st, &corpus, &scout_req, &scout_out,
+                                 err, err_cap);
     free(query_vec);
     if (rc != 0) {
         agents_corpus_free(&corpus);
         return -1;
     }
+    const char *result_json = scout_out.json;
 
-    int *idx     = (int *)malloc((size_t)pop_size * sizeof(int));
-    double *dist = (double *)malloc((size_t)pop_size * sizeof(double));
+    int *idx     = (int *)malloc((size_t)req->pop_size * sizeof(int));
+    double *dist = (double *)malloc((size_t)req->pop_size * sizeof(double));
     if (!idx || !dist) {
         free(idx); free(dist);
         agents_corpus_free(&corpus);
         agents_set_err(err, err_cap, "fractalsql: out of memory");
         return -1;
     }
-    int got = fsql_extract_topk(result_json, pop_size, idx, dist);
+    int got = fsql_extract_topk(result_json, req->pop_size, idx, dist);
     if (got < 0) {
         free(idx); free(dist);
         agents_corpus_free(&corpus);
@@ -1017,8 +1132,8 @@ static int agents_rag_pipeline(FsqlState *st, const char *who,
     }
 
     /* 3. Reason over the matched rows' CONTENT, not the raw vectors. */
-    char *ctx_json = agents_retrieval_context(st, table, col, &corpus,
-                                              idx, got, err, err_cap);
+    AgentRetrievalReq retr_req = { req->table, req->col, &corpus, idx, got };
+    char *ctx_json = agents_retrieval_context(st, &retr_req, err, err_cap);
     agents_corpus_free(&corpus);
     if (!ctx_json) {
         free(idx); free(dist);
@@ -1026,7 +1141,7 @@ static int agents_rag_pipeline(FsqlState *st, const char *who,
     }
 
     char *answer = NULL;
-    rc = fsql_reasoning_generate(st, FSQL_REASONING_TIER_CHAT, query,
+    rc = fsql_reasoning_generate(st, FSQL_REASONING_TIER_CHAT, req->query,
                                  ctx_json, &answer, err, err_cap);
     free(ctx_json);
     if (rc != 0) {
@@ -1034,30 +1149,29 @@ static int agents_rag_pipeline(FsqlState *st, const char *who,
          * data half is DONE and idx/dist/got are valid, so hand them
          * back and let the caller emit them plus reasoning_step_failed
          * instead of discarding the retrieval (-2 = partial). */
-        if (reasoning_failed && st->cfg.agent_partial_reasoning_fail) {
-            *reasoning_failed = 1;
-            *out_idx = idx;
-            *out_dist = dist;
-            *out_got = got;
-            *out_answer = NULL;
+        if (st->cfg.agent_partial_reasoning_fail) {
+            out->reasoning_failed = 1;
+            out->idx = idx;
+            out->dist = dist;
+            out->got = got;
+            out->answer = NULL;
             return -2;
         }
         free(idx); free(dist);
         return -1;
     }
 
-    *out_answer = answer;
-    *out_idx = idx;
-    *out_dist = dist;
-    *out_got = got;
-    (void)who;
+    out->answer = answer;
+    out->idx = idx;
+    out->dist = dist;
+    out->got = got;
     return 0;
 }
 
 static void fractal_search_agent_fn(sqlite3_context *ctx, int argc,
                                     sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    char err[512] = { 0 };
 
     if (argc < 3 || argc > 5) {
         sqlite3_result_error(ctx,
@@ -1072,7 +1186,8 @@ static void fractal_search_agent_fn(sqlite3_context *ctx, int argc,
             "fractalsql: query, table_name, and vector_col are required", -1);
         return;
     }
-    int pop_size = 50, iterations = 15;
+    int pop_size = 50;
+    int iterations = 15;
     if (argc >= 4 && sqlite3_value_type(argv[3]) != SQLITE_NULL)
         pop_size = sqlite3_value_int(argv[3]);
     if (argc >= 5 && sqlite3_value_type(argv[4]) != SQLITE_NULL)
@@ -1095,15 +1210,14 @@ static void fractal_search_agent_fn(sqlite3_context *ctx, int argc,
         return;
     }
 
-    char *answer = NULL;
-    int *idx = NULL;
-    double *dist = NULL;
-    int got = 0;
-    int rfailed = 0;
-    int prc = agents_rag_pipeline(st, "fractal_search_agent", query, table, col,
-                                  pop_size, iterations, &answer,
-                                  &idx, &dist, &got, &rfailed,
-                                  err, sizeof err);
+    AgentRagReq rag_req = { "fractal_search_agent", query, table, col,
+                            pop_size, iterations };
+    AgentRagOut rag_out;
+    int prc = agents_rag_pipeline(st, &rag_req, &rag_out, err, sizeof err);
+    char *answer = rag_out.answer;
+    int *idx = rag_out.idx;
+    double *dist = rag_out.dist;
+    int got = rag_out.got;
     if (prc == -2) {
         /* Partial-result mode: the embed + Scout search data half is done; emit
          * it plus reasoning_step_failed instead of raising. */
@@ -1165,7 +1279,7 @@ static void fractal_search_agent_fn(sqlite3_context *ctx, int argc,
 static void fractal_rag_agent_fn(sqlite3_context *ctx, int argc,
                                  sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    char err[512] = { 0 };
 
     if (argc < 3 || argc > 4) {
         sqlite3_result_error(ctx,
@@ -1199,15 +1313,13 @@ static void fractal_rag_agent_fn(sqlite3_context *ctx, int argc,
         return;
     }
 
-    char *answer = NULL;
-    int *idx = NULL;
-    double *dist = NULL;
-    int got = 0;
-    int rfailed = 0;
-    int prc = agents_rag_pipeline(st, "fractal_rag_agent", query, table, col,
-                                  /*pop_size*/ 50, /*iterations*/ 15, &answer,
-                                  &idx, &dist, &got, &rfailed,
-                                  err, sizeof err);
+    AgentRagReq rag_req = { "fractal_rag_agent", query, table, col,
+                            /*pop_size*/ 50, /*iterations*/ 15 };
+    AgentRagOut rag_out;
+    int prc = agents_rag_pipeline(st, &rag_req, &rag_out, err, sizeof err);
+    char *answer = rag_out.answer;
+    int *idx = rag_out.idx;
+    double *dist = rag_out.dist;
     if (prc == -2) {
         /* Partial-result mode: the embed + Scout search data half is done; emit
          * it plus reasoning_step_failed instead of raising. The
@@ -1322,7 +1434,36 @@ static void agents_free_string_array(char **arr, int n) {
  * fractal_schema_context analog for the GENERATE prompt). Named
  * tables are matched with a bound parameter; NULL/empty list means
  * every non-internal table/view. Returns malloc'd text or NULL. */
-static char *agents_schema_context(FsqlState *st, char **tables, int n_tables,
+/* Emit "Table: name\nDDL\n\n" blocks for every row stmt yields (one
+ * table per call in named-table mode, the whole catalog in one call
+ * in auto-discovery mode), bumping *found per row and -- in
+ * auto-discovery mode -- capping the scan at FSQL_T2S_MAX_TABLES.
+ * Returns the sqlite3_step rc that ended the scan (SQLITE_DONE on a
+ * clean finish, SQLITE_ROW only via the auto-discovery cap break) --
+ * split out of agents_schema_context to keep that function short and
+ * flat. */
+static int agents_schema_emit_rows(sqlite3_stmt *stmt, StrBuf *out,
+                                   int auto_discovery, int *found) {
+    int rc;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const unsigned char *name = sqlite3_column_text(stmt, 0);
+        const unsigned char *ddl  = sqlite3_column_text(stmt, 1);
+        sb_puts(out, "Table: ");
+        sb_puts(out, name ? (const char *)name : "?");
+        sb_puts(out, "\n");
+        if (ddl && *ddl) {
+            sb_puts(out, (const char *)ddl);
+            sb_puts(out, "\n");
+        }
+        sb_puts(out, "\n");
+        (*found)++;
+        /* The auto-discovery path is bounded too. */
+        if (auto_discovery && *found >= FSQL_T2S_MAX_TABLES) break;
+    }
+    return rc;
+}
+
+static char *agents_schema_context(const FsqlState *st, char **tables, int n_tables,
                                    char *err, size_t err_cap) {
     StrBuf out;
     sb_init(&out);
@@ -1351,21 +1492,7 @@ static char *agents_schema_context(FsqlState *st, char **tables, int n_tables,
     for (int t = 0; t < n_tables || (t == 0 && n_tables == 0); t++) {
         if (n_tables > 0)
             sqlite3_bind_text(stmt, 1, tables[t], -1, SQLITE_TRANSIENT);
-        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-            const unsigned char *name = sqlite3_column_text(stmt, 0);
-            const unsigned char *ddl  = sqlite3_column_text(stmt, 1);
-            sb_puts(&out, "Table: ");
-            sb_puts(&out, name ? (const char *)name : "?");
-            sb_puts(&out, "\n");
-            if (ddl && *ddl) {
-                sb_puts(&out, (const char *)ddl);
-                sb_puts(&out, "\n");
-            }
-            sb_puts(&out, "\n");
-            found++;
-            /* The auto-discovery path is bounded too. */
-            if (n_tables == 0 && found >= FSQL_T2S_MAX_TABLES) break;
-        }
+        rc = agents_schema_emit_rows(stmt, &out, n_tables == 0, &found);
         if (rc != SQLITE_DONE && rc != SQLITE_ROW) break;
         if (n_tables > 0)
             sqlite3_reset(stmt);
@@ -1431,7 +1558,7 @@ static char *agents_strip_sql_fence(const char *s) {
  * header comment). Returns NULL when the statement passes, else a
  * malloc'd rejection reason to feed back to the next GENERATE attempt
  * (the t2s_check_allowlist contract). */
-static char *agents_check_allowlist(FsqlState *st, const char *sql) {
+static char *agents_check_allowlist(const FsqlState *st, const char *sql) {
     sqlite3_stmt *stmt = NULL;
     const char *tail = NULL;
     int rc = sqlite3_prepare_v2(st->db, sql, -1, &stmt, &tail);
@@ -1483,7 +1610,7 @@ static char *agents_check_allowlist(FsqlState *st, const char *sql) {
 /* Execute a validated read-only SELECT, accumulating up to
  * FSQL_AGENTS_MAX_RESULT_ROWS rows as a JSON array of arrays. 0 on
  * success, -1 with err set. */
-static int agents_exec_select_json(FsqlState *st, const char *sql,
+static int agents_exec_select_json(const FsqlState *st, const char *sql,
                                    StrBuf *rows, int *n_rows,
                                    char *err, size_t err_cap) {
     *n_rows = 0;
@@ -1537,10 +1664,74 @@ static int agents_exec_select_json(FsqlState *st, const char *sql,
  *                   auto_execute])                                    */
 /* ------------------------------------------------------------------ */
 
+/* fractal_sql_agent's retry loop, one GENERATE+allowlist attempt.
+ * Builds the prompt (embedding the previous attempt's rejection
+ * feedback, when any), dispatches it on the T2S tier, strips the
+ * ```sql fence, and checks the result against the allowlist
+ * (parse-only, never executed). On every return, *final_sql and
+ * *feedback are left exactly as the original inline loop body would
+ * have left them -- freed-and-reassigned, including on a rejected
+ * candidate (the caller's "generated_sql" field always reports the
+ * most recent attempt, passed or not). Split out of
+ * fractal_sql_agent_fn to keep its retry loop short and flat. Returns:
+ *   1  -- passed the allowlist; stop retrying.
+ *   0  -- rejected; *feedback holds the reason, caller should retry.
+ *  -1  -- out of memory (building the prompt or stripping the
+ *         fence); caller must sqlite3_result_error_nomem and stop.
+ *  -2  -- the GENERATE dispatch itself failed; `err` is already
+ *         filled, caller must agents_result_err and stop. */
+static int agents_sql_generate_attempt(FsqlState *st, const char *question,
+                                       const char *schema_ctx,
+                                       int allow_writes,
+                                       char **final_sql, char **feedback,
+                                       char *err, size_t err_cap) {
+    StrBuf prompt;
+    sb_init(&prompt);
+    sb_printf(&prompt,
+              "Write a single SQLite %s statement that answers this "
+              "question. Return ONLY the SQL, wrapped in a ```sql "
+              "fenced code block, with no other explanation.\n\n"
+              "Question: %s\n",
+              allow_writes ? "SELECT, INSERT, or UPDATE" : "SELECT",
+              question);
+    if (*feedback) {
+        sb_printf(&prompt,
+                  "\nYour previous attempt was rejected for this "
+                  "reason: %s\n\nWrite a corrected statement.\n",
+                  *feedback);
+    }
+    sb_puts(&prompt, "\nSchema:\n");
+    sb_puts(&prompt, schema_ctx);
+    if (sb_failed(&prompt)) {
+        sb_free(&prompt);
+        return -1;
+    }
+
+    /* Runs on the T2S tier so the T2S env block applies
+     * (RESPONSE_MODE=code, SYSTEM_TAG=sqlite); see the header
+     * comment, fractal_sql_agent bullet. */
+    char *resp = NULL;
+    int grc = fsql_reasoning_generate(st, FSQL_REASONING_TIER_T2S,
+                                      prompt.buf, "{}", &resp,
+                                      err, err_cap);
+    sb_free(&prompt);
+    if (grc != 0) return -2;
+
+    free(*final_sql);
+    *final_sql = agents_strip_sql_fence(resp);
+    free(resp);
+    if (!*final_sql) return -1;
+
+    char *allow_err = agents_check_allowlist(st, *final_sql);
+    free(*feedback);
+    *feedback = allow_err;
+    return allow_err ? 0 : 1;
+}
+
 static void fractal_sql_agent_fn(sqlite3_context *ctx, int argc,
                                  sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    char err[512] = { 0 };
 
     if (argc < 1 || argc > 4) {
         sqlite3_result_error(ctx,
@@ -1608,65 +1799,29 @@ static void fractal_sql_agent_fn(sqlite3_context *ctx, int argc,
     char *feedback   = NULL;
     int   passed     = 0;
     int   attempt    = 0;
-    while (attempt < max_retries) {
+    /* attempt++ stays at the top: on the success-path `break` a header
+     * increment would not run, changing the reported retry_count. */
+    for (; attempt < max_retries;) {
         attempt++;
 
-        StrBuf prompt;
-        sb_init(&prompt);
-        sb_printf(&prompt,
-                  "Write a single SQLite %s statement that answers this "
-                  "question. Return ONLY the SQL, wrapped in a ```sql "
-                  "fenced code block, with no other explanation.\n\n"
-                  "Question: %s\n",
-                  allow_writes ? "SELECT, INSERT, or UPDATE" : "SELECT",
-                  question);
-        if (feedback) {
-            sb_printf(&prompt,
-                      "\nYour previous attempt was rejected for this "
-                      "reason: %s\n\nWrite a corrected statement.\n",
-                      feedback);
-        }
-        sb_puts(&prompt, "\nSchema:\n");
-        sb_puts(&prompt, schema_ctx);
-        if (sb_failed(&prompt)) {
-            sb_free(&prompt);
+        int src = agents_sql_generate_attempt(st, question, schema_ctx,
+                                              allow_writes, &final_sql,
+                                              &feedback, err, sizeof err);
+        if (src == -1) {
             free(final_sql);
             free(feedback);
             free(schema_ctx);
             sqlite3_result_error_nomem(ctx);
             return;
         }
-
-        /* Runs on the T2S tier so the T2S env block applies
-         * (RESPONSE_MODE=code, SYSTEM_TAG=sqlite); see the header
-         * comment, fractal_sql_agent bullet. */
-        char *resp = NULL;
-        int grc = fsql_reasoning_generate(st, FSQL_REASONING_TIER_T2S,
-                                          prompt.buf, "{}", &resp,
-                                          err, sizeof err);
-        sb_free(&prompt);
-        if (grc != 0) {
+        if (src == -2) {
             free(final_sql);
             free(feedback);
             free(schema_ctx);
             agents_result_err(ctx, err);
             return;
         }
-
-        free(final_sql);
-        final_sql = agents_strip_sql_fence(resp);
-        free(resp);
-        if (!final_sql) {
-            free(feedback);
-            free(schema_ctx);
-            sqlite3_result_error_nomem(ctx);
-            return;
-        }
-
-        char *allow_err = agents_check_allowlist(st, final_sql);
-        free(feedback);
-        feedback = allow_err;
-        if (allow_err) continue;   /* retry with the rejection reason */
+        if (src == 0) continue;   /* retry with the rejection reason */
         passed = 1;
         break;
     }
@@ -1742,7 +1897,7 @@ static void fractal_plan_explore_fn(sqlite3_context *ctx, int argc,
                                     sqlite3_value **argv) {
     (void)argc;
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    char err[512] = { 0 };
 
     /* STRICT: NULL in, NULL out. */
     for (int i = 0; i < 4; i++) {
@@ -1790,7 +1945,8 @@ static void fractal_plan_explore_fn(sqlite3_context *ctx, int argc,
     }
 
     AgentCorpus corpus;
-    if (agents_scan_corpus(st, table, col, dim, 0, &corpus,
+    AgentScanSpec scan_spec = { table, col, dim, 0 };
+    if (agents_scan_corpus(st, &scan_spec, &corpus,
                            err, sizeof err) != 0) {
         free(query_vec);
         agents_result_err(ctx, err);
@@ -1805,11 +1961,10 @@ static void fractal_plan_explore_fn(sqlite3_context *ctx, int argc,
 
     /* Full Scout params (max_generation=15, pop=max_branches) so
      * fsql_search_ptr populates top_k. */
-    const char *result_json = NULL;
-    size_t      result_len  = 0;
-    int rc = agents_scout_search(st, &corpus, query_vec, max_branches,
-                                 max_branches, /*iterations*/ 15,
-                                 &result_json, &result_len,
+    AgentScoutReq scout_req = { query_vec, max_branches, max_branches,
+                                /*iterations*/ 15 };
+    AgentSearchOut scout_out = { NULL, 0 };
+    int rc = agents_scout_search(st, &corpus, &scout_req, &scout_out,
                                  err, sizeof err);
     free(query_vec);
     if (rc != 0) {
@@ -1817,6 +1972,7 @@ static void fractal_plan_explore_fn(sqlite3_context *ctx, int argc,
         agents_result_err(ctx, err);
         return;
     }
+    const char *result_json = scout_out.json;
 
     int *idx = (int *)malloc((size_t)max_branches * sizeof(int));
     double *dist = (double *)malloc((size_t)max_branches * sizeof(double));
@@ -1888,8 +2044,8 @@ static int agents_decode_row_vector(sqlite3_stmt *stmt, int col,
 static void fractal_trajectory_predict_fn(sqlite3_context *ctx, int argc,
                                           sqlite3_value **argv) {
     (void)argc;
-    FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    const FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
+    char err[512] = { 0 };
 
     for (int i = 0; i < 4; i++) {
         if (sqlite3_value_type(argv[i]) == SQLITE_NULL) {
@@ -1920,8 +2076,10 @@ static void fractal_trajectory_predict_fn(sqlite3_context *ctx, int argc,
     /* SQLite tables are keyed by rowid (WITHOUT ROWID tables surface a
      * clean prepare error here: "no usable primary key"). */
     sqlite3_stmt *stmt = NULL;
-    double *baseline = NULL, *current = NULL;
-    int b_dim = 0, c_dim = 0;
+    double *baseline = NULL;
+    double *current = NULL;
+    int b_dim = 0;
+    int c_dim = 0;
 
     StrBuf sql;
     sb_init(&sql);
@@ -2029,7 +2187,8 @@ static void fractal_trajectory_predict_fn(sqlite3_context *ctx, int argc,
 
     /* Search the whole corpus for the nearest point to the delta. */
     AgentCorpus corpus;
-    if (agents_scan_corpus(st, table, col, b_dim, 0, &corpus,
+    AgentScanSpec scan_spec = { table, col, b_dim, 0 };
+    if (agents_scan_corpus(st, &scan_spec, &corpus,
                            err, sizeof err) != 0) {
         free(delta);
         agents_result_err(ctx, err);
@@ -2170,10 +2329,67 @@ static int agents_decode_state_log(sqlite3_value *v, double **out_data,
     return 0;
 }
 
+/* Primary cycle-detection signal for fractal_agent_detect_loop:
+ * fingerprint each state (SimHash) and stream the fingerprints
+ * through Brent's cycle detector, stopping at the first closed cycle.
+ * Returns 1 if a cycle closed, 0 if none did, -2 on OOM (caller must
+ * sqlite3_result_error_nomem), or -1 with err set on an internal
+ * fsql_cycle_detect_init / fsql_state_fingerprint /
+ * fsql_cycle_detect_feed failure (caller must agents_result_err) --
+ * split out of fractal_detect_loop_fn to keep its cognitive
+ * complexity down. */
+static int agents_detect_loop_scan(const double *flat, int n_states, int dim,
+                                   int n_bits, double seed,
+                                   int hamming_threshold,
+                                   char *err, size_t err_cap) {
+    size_t n_bytes = ((size_t)n_bits + 7) / 8;
+    uint8_t *fp = (uint8_t *)malloc(n_bytes);
+    if (!fp) return -2;
+
+    fsql_cycle_state_t cs;
+    int rc = fsql_cycle_detect_init(&cs, n_bytes, (size_t)hamming_threshold);
+    if (rc != FSQL_OK) {
+        free(fp);
+        agents_set_err(err, err_cap,
+                       "fractal_agent_detect_loop: fsql_cycle_detect_init rc=%d",
+                       rc);
+        return -1;
+    }
+
+    int loop_found = 0;
+    for (int i = 0; i < n_states; i++) {
+        rc = fsql_state_fingerprint(flat + (size_t)i * dim, (size_t)dim,
+                                    (size_t)n_bits, seed, fp);
+        if (rc != FSQL_OK) {
+            fsql_cycle_detect_free(&cs);
+            free(fp);
+            agents_set_err(err, err_cap,
+                           "fractal_agent_detect_loop: fsql_state_fingerprint "
+                           "rc=%d", rc);
+            return -1;
+        }
+        int detected = 0;
+        size_t cycle_len = 0;
+        rc = fsql_cycle_detect_feed(&cs, fp, &detected, &cycle_len);
+        if (rc != FSQL_OK) {
+            fsql_cycle_detect_free(&cs);
+            free(fp);
+            agents_set_err(err, err_cap,
+                           "fractal_agent_detect_loop: fsql_cycle_detect_feed "
+                           "rc=%d", rc);
+            return -1;
+        }
+        if (detected) { loop_found = 1; break; }
+    }
+    fsql_cycle_detect_free(&cs);
+    free(fp);
+    return loop_found;
+}
+
 static void fractal_detect_loop_fn(sqlite3_context *ctx, int argc,
                                    sqlite3_value **argv) {
-    FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+    const FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
+    char err[512] = { 0 };
 
     if (argc < 3 || sqlite3_value_type(argv[0]) == SQLITE_NULL ||
         sqlite3_value_type(argv[1]) == SQLITE_NULL ||
@@ -2269,54 +2485,18 @@ static void fractal_detect_loop_fn(sqlite3_context *ctx, int argc,
 
     /* Primary signal: fingerprint each state and stream through
      * Brent's cycle detector; stop at the first closed cycle. */
-    size_t n_bytes = ((size_t)n_bits + 7) / 8;
-    uint8_t *fp = (uint8_t *)malloc(n_bytes);
-    if (!fp) {
-        free(flat);
+    int loop_found = agents_detect_loop_scan(flat, n_states, dim, n_bits,
+                                             seed, hamming_threshold,
+                                             err, sizeof err);
+    free(flat);
+    if (loop_found == -2) {
         sqlite3_result_error_nomem(ctx);
         return;
     }
-    fsql_cycle_state_t cs;
-    rc = fsql_cycle_detect_init(&cs, n_bytes, (size_t)hamming_threshold);
-    if (rc != FSQL_OK) {
-        free(flat); free(fp);
-        snprintf(err, sizeof err,
-                 "fractal_agent_detect_loop: fsql_cycle_detect_init rc=%d",
-                 rc);
+    if (loop_found == -1) {
         agents_result_err(ctx, err);
         return;
     }
-
-    int loop_found = 0;
-    for (int i = 0; i < n_states; i++) {
-        rc = fsql_state_fingerprint(flat + (size_t)i * dim, (size_t)dim,
-                                    (size_t)n_bits, seed, fp);
-        if (rc != FSQL_OK) {
-            fsql_cycle_detect_free(&cs);
-            free(flat); free(fp);
-            snprintf(err, sizeof err,
-                     "fractal_agent_detect_loop: fsql_state_fingerprint "
-                     "rc=%d", rc);
-            agents_result_err(ctx, err);
-            return;
-        }
-        int detected = 0;
-        size_t cycle_len = 0;
-        rc = fsql_cycle_detect_feed(&cs, fp, &detected, &cycle_len);
-        if (rc != FSQL_OK) {
-            fsql_cycle_detect_free(&cs);
-            free(flat); free(fp);
-            snprintf(err, sizeof err,
-                     "fractal_agent_detect_loop: fsql_cycle_detect_feed "
-                     "rc=%d", rc);
-            agents_result_err(ctx, err);
-            return;
-        }
-        if (detected) { loop_found = 1; break; }
-    }
-    fsql_cycle_detect_free(&cs);
-    free(flat);
-    free(fp);
 
     /* Flag a loop if EITHER the DFA exponent exceeds 0.9 (drift-to-
      * chaos / random-walk-like cycling the cycle check can miss) OR a
@@ -2347,12 +2527,14 @@ static void fractal_detect_loop_fn(sqlite3_context *ctx, int argc,
 
 /* Binary search in a sorted int64 array. */
 static int agents_i64_cmp(const void *pa, const void *pb) {
-    int64_t a = *(const int64_t *)pa, b = *(const int64_t *)pb;
+    int64_t a = *(const int64_t *)pa;
+    int64_t b = *(const int64_t *)pb;
     return (a > b) - (a < b);
 }
 
 static int agents_i64_sorted_contains(const int64_t *a, int n, int64_t key) {
-    int lo = 0, hi = n - 1;
+    int lo = 0;
+    int hi = n - 1;
     while (lo <= hi) {
         int mid = lo + (hi - lo) / 2;
         if (a[mid] == key) return 1;
@@ -2362,11 +2544,81 @@ static int agents_i64_sorted_contains(const int64_t *a, int n, int64_t key) {
     return 0;
 }
 
+/* Parameter bundle for agents_telemetry_run (was 9 positional args).
+ * See the function comment below for what each field means; cohort is
+ * NULL for no filtering. */
+typedef struct AgentTelemetryReq {
+    const char    *table;
+    const char    *col;
+    const double  *query;
+    int            dim;
+    int64_t       *cohort;
+    int            n_cohort;
+    int            k;
+    int            locator;
+} AgentTelemetryReq;
+
+/* Filter `corpus` down to just the rows whose id (rowid in locator
+ * mode, 0-indexed scan position otherwise) is in req->cohort,
+ * replacing corpus->data/n_rows in place, and hand back a malloc'd
+ * id_map translating each kept row's new position to its original id
+ * (the agents_topk_json id_map convention). *out_id_map is left NULL
+ * when req->cohort is NULL (no filtering: identity mapping).
+ * Returns 0 on success. On failure, the SQLite error/result is
+ * already set on ctx and the caller must return without touching ctx
+ * again (split out of agents_telemetry_run to keep its cognitive
+ * complexity down; behavior, including both error messages, is
+ * unchanged). */
+static int agents_telemetry_filter_cohort(sqlite3_context *ctx,
+                                          AgentCorpus *corpus,
+                                          const AgentTelemetryReq *req,
+                                          int64_t **out_id_map) {
+    *out_id_map = NULL;
+    if (!req->cohort) return 0;
+
+    double *filtered = (double *)malloc(
+        (corpus->n_rows ? corpus->n_rows : 1)
+        * (size_t)req->dim * sizeof(double));
+    int64_t *map = (int64_t *)malloc(
+        (corpus->n_rows ? corpus->n_rows : 1) * sizeof(int64_t));
+    if (!filtered || !map) {
+        free(filtered); free(map);
+        sqlite3_result_error_nomem(ctx);
+        return -1;
+    }
+    size_t kept_n = 0;
+    for (size_t r = 0; r < corpus->n_rows; r++) {
+        /* The cohort holds rowids in locator mode (the same
+         * physical locator the result's doc_id reports) and
+         * 0-indexed scan positions in scan-position mode. */
+        if (!agents_i64_sorted_contains(req->cohort, req->n_cohort,
+                req->locator ? corpus->rowids[r] : (int64_t)r))
+            continue;
+        memcpy(filtered + kept_n * (size_t)req->dim,
+               corpus->data + r * (size_t)req->dim,
+               (size_t)req->dim * sizeof(double));
+        map[kept_n++] = req->locator ? corpus->rowids[r] : (int64_t)r;
+    }
+    if (kept_n == 0) {
+        free(filtered); free(map);
+        sqlite3_result_error(ctx,
+            "fractalsql: doc_ids cohort matched no rows in the corpus",
+            -1);
+        return -1;
+    }
+    free(corpus->data);          /* the filtered copy replaces it */
+    corpus->data = filtered;
+    corpus->n_rows = kept_n;
+    *out_id_map = map;
+    return 0;
+}
+
 /* Shared body for the table-backed top-k searches. Runs the
- * telemetry-shaped top-k over table.col; when `cohort` is non-NULL,
- * only rows whose rowid (locator mode) or 0-indexed scan position
- * (scan-position mode) is in the (sorted) cohort are searched, and the
- * kept-id map translates filtered scan positions back to per-row ids.
+ * telemetry-shaped top-k over table.col; when `req->cohort` is
+ * non-NULL, only rows whose rowid (locator mode) or 0-indexed scan
+ * position (scan-position mode) is in the (sorted) cohort are
+ * searched, and the kept-id map translates filtered scan positions
+ * back to per-row ids.
  * In locator mode (fractal_search_telemetry /
  * fractal_hybrid_clinical_search) the corpus is scanned
  * with its rowids and the result's doc_id is the row's real rowid
@@ -2376,63 +2628,28 @@ static int agents_i64_sorted_contains(const int64_t *a, int n, int64_t key) {
  * fractal_cross_modal_search, and the internal result_handle callers)
  * doc_id stays the 0-indexed scan position. */
 static void agents_telemetry_run(sqlite3_context *ctx,
-                                 const char *table, const char *col,
-                                 const double *query, int dim,
-                                 int64_t *cohort, int n_cohort, int k,
-                                 int locator) {
-    FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
-    char err[512];
+                                 const AgentTelemetryReq *req) {
+    const FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
+    char err[512] = { 0 };
 
     AgentCorpus corpus;
-    if (agents_scan_corpus(st, table, col, dim, locator, &corpus,
+    AgentScanSpec scan_spec = { req->table, req->col, req->dim, req->locator };
+    if (agents_scan_corpus(st, &scan_spec, &corpus,
                            err, sizeof err) != 0) {
         agents_result_err(ctx, err);
         return;
     }
 
     int64_t *id_map = NULL;
-    if (cohort) {
-        double *filtered = (double *)malloc(
-            (corpus.n_rows ? corpus.n_rows : 1)
-            * (size_t)dim * sizeof(double));
-        int64_t *map = (int64_t *)malloc(
-            (corpus.n_rows ? corpus.n_rows : 1) * sizeof(int64_t));
-        if (!filtered || !map) {
-            free(filtered); free(map);
-            agents_corpus_free(&corpus);
-            sqlite3_result_error_nomem(ctx);
-            return;
-        }
-        size_t kept_n = 0;
-        for (size_t r = 0; r < corpus.n_rows; r++) {
-            /* The cohort holds rowids in locator mode (the same
-             * physical locator the result's doc_id reports) and
-             * 0-indexed scan positions in scan-position mode. */
-            if (!agents_i64_sorted_contains(cohort, n_cohort,
-                    locator ? corpus.rowids[r] : (int64_t)r))
-                continue;
-            memcpy(filtered + kept_n * (size_t)dim,
-                   corpus.data + r * (size_t)dim,
-                   (size_t)dim * sizeof(double));
-            map[kept_n++] = locator ? corpus.rowids[r] : (int64_t)r;
-        }
-        if (kept_n == 0) {
-            free(filtered); free(map);
-            agents_corpus_free(&corpus);
-            sqlite3_result_error(ctx,
-                "fractalsql: doc_ids cohort matched no rows in the corpus",
-                -1);
-            return;
-        }
-        free(corpus.data);          /* the filtered copy replaces it */
-        corpus.data = filtered;
-        corpus.n_rows = kept_n;
-        id_map = map;
+    if (agents_telemetry_filter_cohort(ctx, &corpus, req, &id_map) != 0) {
+        agents_corpus_free(&corpus);
+        return;
     }
 
     StrBuf out;
     sb_init(&out);
-    int trc = agents_topk_json(st, &corpus, query, k, id_map, locator, &out,
+    AgentTopkReq topk_req = { req->query, req->k, id_map, req->locator };
+    int trc = agents_topk_json(st, &corpus, &topk_req, &out,
                                err, sizeof err);
     free(id_map);
     agents_corpus_free(&corpus);
@@ -2464,7 +2681,7 @@ static double *agents_decode_query_doubles(sqlite3_value *v, int *out_dim) {
 static void fractal_search_telemetry_fn(sqlite3_context *ctx, int argc,
                                         sqlite3_value **argv) {
     (void)argc;
-    FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
+    const FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
 
     for (int i = 0; i < 4; i++) {
         if (sqlite3_value_type(argv[i]) == SQLITE_NULL) {
@@ -2498,7 +2715,8 @@ static void fractal_search_telemetry_fn(sqlite3_context *ctx, int argc,
             "canonical float32 BLOB)", -1);
         return;
     }
-    agents_telemetry_run(ctx, table, col, query, dim, NULL, 0, k, 1);
+    AgentTelemetryReq treq = { table, col, query, dim, NULL, 0, k, 1 };
+    agents_telemetry_run(ctx, &treq);
     free(query);
 }
 
@@ -2506,7 +2724,7 @@ static void fractal_search_telemetry_fn(sqlite3_context *ctx, int argc,
 static void fractal_hybrid_clinical_search_fn(sqlite3_context *ctx, int argc,
                                               sqlite3_value **argv) {
     (void)argc;
-    FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
+    const FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
 
     for (int i = 0; i < 5; i++) {
         if (sqlite3_value_type(argv[i]) == SQLITE_NULL) {
@@ -2570,7 +2788,8 @@ static void fractal_hybrid_clinical_search_fn(sqlite3_context *ctx, int argc,
             "canonical float32 BLOB)", -1);
         return;
     }
-    agents_telemetry_run(ctx, table, col, query, dim, cohort, n_cohort, k, 1);
+    AgentTelemetryReq treq = { table, col, query, dim, cohort, n_cohort, k, 1 };
+    agents_telemetry_run(ctx, &treq);
     free(query);
     free(cohort);
 }
@@ -2579,7 +2798,7 @@ static void fractal_hybrid_clinical_search_fn(sqlite3_context *ctx, int argc,
 static void fractal_cross_modal_search_fn(sqlite3_context *ctx, int argc,
                                           sqlite3_value **argv) {
     (void)argc;
-    FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
+    const FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
 
     for (int i = 0; i < 6; i++) {
         if (sqlite3_value_type(argv[i]) == SQLITE_NULL) {
@@ -2615,8 +2834,10 @@ static void fractal_cross_modal_search_fn(sqlite3_context *ctx, int argc,
     /* Weighted concatenation in double precision (the CSV/JSON-text
      * form's math; the canonical-BLOB form does the same in float32).
      * The corpus is stored in the same combined shape upstream. */
-    float *mo = NULL, *cl = NULL;
-    int mo_dim = 0, cl_dim = 0;
+    float *mo = NULL;
+    float *cl = NULL;
+    int mo_dim = 0;
+    int cl_dim = 0;
     if (fsql_vec_decode(argv[2], &mo, &mo_dim) != 0 ||
         fsql_vec_decode(argv[3], &cl, &cl_dim) != 0) {
         free(mo); free(cl);
@@ -2637,7 +2858,8 @@ static void fractal_cross_modal_search_fn(sqlite3_context *ctx, int argc,
         query[mo_dim + i] = (double)cl[i] * (1.0 - alpha);
     free(mo); free(cl);
 
-    agents_telemetry_run(ctx, table, col, query, dim, NULL, 0, k, 0);
+    AgentTelemetryReq treq = { table, col, query, dim, NULL, 0, k, 0 };
+    agents_telemetry_run(ctx, &treq);
     free(query);
 }
 
@@ -2659,7 +2881,7 @@ static void fractal_cross_modal_search_fn(sqlite3_context *ctx, int argc,
 static void fractal_search_trajectory_fn(sqlite3_context *ctx, int argc,
                                          sqlite3_value **argv) {
     (void)argc;
-    FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
+    const FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
 
     for (int i = 0; i < 5; i++) {
         if (sqlite3_value_type(argv[i]) == SQLITE_NULL) {
@@ -2686,8 +2908,10 @@ static void fractal_search_trajectory_fn(sqlite3_context *ctx, int argc,
         return;
     }
 
-    float *base_f = NULL, *cur_f = NULL;
-    int base_dim = 0, cur_dim = 0;
+    float *base_f = NULL;
+    float *cur_f = NULL;
+    int base_dim = 0;
+    int cur_dim = 0;
     if (fsql_vec_decode(argv[2], &base_f, &base_dim) != 0 ||
         fsql_vec_decode(argv[3], &cur_f, &cur_dim) != 0) {
         free(base_f); free(cur_f);
@@ -2744,7 +2968,8 @@ static void fractal_search_trajectory_fn(sqlite3_context *ctx, int argc,
     free(base_f);
     free(cur_f);
 
-    agents_telemetry_run(ctx, table, col, delta, base_dim, NULL, 0, k, 0);
+    AgentTelemetryReq treq = { table, col, delta, base_dim, NULL, 0, k, 0 };
+    agents_telemetry_run(ctx, &treq);
     free(delta);
 }
 
@@ -2757,7 +2982,7 @@ static void fractal_search_trajectory_fn(sqlite3_context *ctx, int argc,
 static void fractal_explain_result_fn(sqlite3_context *ctx, int argc,
                                       sqlite3_value **argv) {
     (void)argc; (void)argv;
-    FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
+    const FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
     if (!st || !st->ctx) {
         sqlite3_result_error(ctx, "fractalsql: extension not initialized", -1);
         return;
@@ -2768,7 +2993,8 @@ static void fractal_explain_result_fn(sqlite3_context *ctx, int argc,
     fsql_diversify_params_t dp;
     int enabled = (fsql_diversify_get_params(st->ctx, &dp) == FSQL_OK);
 
-    char dq_s[32], p99_s[32];
+    char dq_s[32];
+    char p99_s[32];
     if (isnan(dq))  strcpy(dq_s, "null");
     else            snprintf(dq_s, sizeof dq_s, "%.6f", dq);
     if (isnan(p99)) strcpy(p99_s, "null");
@@ -2786,7 +3012,7 @@ static void fractal_explain_result_fn(sqlite3_context *ctx, int argc,
 static void fractal_detect_collapse_fn(sqlite3_context *ctx, int argc,
                                        sqlite3_value **argv) {
     (void)argc; (void)argv;
-    FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
+    const FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
     if (!st || !st->ctx) {
         sqlite3_result_error(ctx, "fractalsql: extension not initialized", -1);
         return;
@@ -2829,7 +3055,7 @@ static int feature_store_ensure(sqlite3 *db, char *err, size_t err_cap) {
 static void fractal_store_morphology_fn(sqlite3_context *ctx, int argc,
                                         sqlite3_value **argv) {
     (void)argc;
-    FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
+    const FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
     if (sqlite3_value_type(argv[0]) == SQLITE_NULL ||
         sqlite3_value_type(argv[1]) == SQLITE_NULL) {
         sqlite3_result_null(ctx);
@@ -2855,7 +3081,7 @@ static void fractal_store_morphology_fn(sqlite3_context *ctx, int argc,
         return;
     }
 
-    char err[256];
+    char err[256] = { 0 };
     if (feature_store_ensure(st->db, err, sizeof err) != 0) {
         free(data);
         agents_result_err(ctx, err);
@@ -2917,7 +3143,7 @@ static int topo_cand_cmp(const void *a, const void *b) {
 static void fractal_mine_topology_negatives_fn(sqlite3_context *ctx, int argc,
                                                sqlite3_value **argv) {
     (void)argc;
-    FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
+    const FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
     if (sqlite3_value_type(argv[0]) == SQLITE_NULL ||
         sqlite3_value_type(argv[1]) == SQLITE_NULL) {
         sqlite3_result_null(ctx);
@@ -2941,7 +3167,7 @@ static void fractal_mine_topology_negatives_fn(sqlite3_context *ctx, int argc,
         return;
     }
 
-    char err[256];
+    char err[256] = { 0 };
     if (feature_store_ensure(st->db, err, sizeof err) != 0) {
         free(surrogate);
         agents_result_err(ctx, err);
@@ -2958,7 +3184,8 @@ static void fractal_mine_topology_negatives_fn(sqlite3_context *ctx, int argc,
     }
 
     fsql_topo_cand_t *cands = NULL;
-    size_t cap = 0, kept = 0;
+    size_t cap = 0;
+    size_t kept = 0;
     int    step_rc;
     while ((step_rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         int64_t row_doc_id = sqlite3_column_int64(stmt, 0);

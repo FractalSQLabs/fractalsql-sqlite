@@ -41,7 +41,6 @@
  */
 
 #include <sqlite3ext.h>
-SQLITE_EXTENSION_INIT1
 
 #include <math.h>
 #include <stdint.h>
@@ -52,6 +51,8 @@ SQLITE_EXTENSION_INIT1
 
 #include "fsql_sqlite_internal.h"
 #include "fractalsql_parse.h"
+
+SQLITE_EXTENSION_INIT1
 
 /* -------------------------------------------------------------------
  * State lifecycle.
@@ -167,9 +168,9 @@ int fsql_parse_text_vector(const char *src, int slen, double *out, int cap) {
     memcpy(buf, src, (size_t)slen);
     buf[slen] = '\0';
 
-    char *p = buf;
+    const char *p = buf;
     int n = 0;
-    while (*p && n < cap) {
+    for (; *p && n < cap;) {
         while (*p == ' ' || *p == '\t' || *p == ',' ||
                *p == '[' || *p == ']' || *p == '\n' || *p == '\r')
             p++;
@@ -241,7 +242,9 @@ static uint64_t fnv1a_64(const void *bytes, size_t n) {
 }
 
 static double cosine_distance(const double *a, const double *b, int dim) {
-    double dot = 0.0, na = 0.0, nb = 0.0;
+    double dot = 0.0;
+    double na = 0.0;
+    double nb = 0.0;
     for (int i = 0; i < dim; i++) {
         dot += a[i] * b[i];
         na  += a[i] * a[i];
@@ -371,7 +374,7 @@ typedef struct ScoutAgg {
 static int scout_corpus_append(ScoutAgg *agg, const double *row, int d) {
     if (agg->n_rows * d + d > agg->corpus_cap) {
         int new_cap = agg->corpus_cap ? agg->corpus_cap * 2 : 4096;
-        while (new_cap < agg->n_rows * d + d) new_cap *= 2;
+        for (; new_cap < agg->n_rows * d + d; new_cap *= 2);
         double *nb = (double *)realloc(agg->corpus,
                                        (size_t)new_cap * sizeof(double));
         if (!nb) return -1;
@@ -423,7 +426,7 @@ static void fractal_search_explore_step(sqlite3_context *ctx, int argc,
 
 static void fractal_search_explore_final(sqlite3_context *ctx) {
     ScoutAgg *agg = (ScoutAgg *)sqlite3_aggregate_context(ctx, 0);
-    FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
+    const FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
 
     if (!agg || !agg->corpus || agg->n_rows == 0 || agg->bad) {
         if (agg && agg->corpus) { free(agg->corpus); agg->corpus = NULL; }

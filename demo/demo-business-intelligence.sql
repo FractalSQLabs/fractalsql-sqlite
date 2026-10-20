@@ -161,8 +161,8 @@ SELECT (SELECT count(*) FROM bi_customers) AS customers,
 .print
 .print === 2. Simple fact lookup: generate, then execute ===
 
+DROP TABLE IF EXISTS bi_gen;
 CREATE TEMP TABLE bi_gen (sql_text TEXT);
-DELETE FROM bi_gen;
 -- On generation failure this INSERT is the one thing that errors
 -- (with the clean reason/limit message) and bi_gen stays empty --
 -- every step after reads an empty staging table and spools a no-op.
@@ -202,7 +202,8 @@ SELECT sql_text FROM bi_gen;
 .print
 .print === 3. The full loop: generate, execute, then reason over the real result ===
 
-DELETE FROM bi_gen;
+DROP TABLE IF EXISTS bi_gen;
+CREATE TEMP TABLE bi_gen (sql_text TEXT);
 INSERT INTO bi_gen (sql_text)
 SELECT fractal_text_to_sql('show total revenue for each of the 6 most recent FULLY COMPLETED calendar months, excluding the current in-progress month, oldest first');
 

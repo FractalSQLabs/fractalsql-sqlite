@@ -44,7 +44,8 @@ namespace fsqlmcp
     private:
         std::mutex mu_;
         std::condition_variable cv_;
-        int limit_, inUse_;
+        int limit_;
+        int inUse_;
     };
 
     class ConcurrencyManager
@@ -85,7 +86,8 @@ namespace fsqlmcp
             ConcurrencyManager* mgr_ = nullptr;
             ToolClass   cls_ = ToolClass::Cheap;
             std::string client_;
-            bool heldGlobal_ = false, heldClient_ = false;
+            bool heldGlobal_ = false;
+            bool heldClient_ = false;
         };
 
         Token acquire( ToolClass cls, const std::string& clientKey )

@@ -29,16 +29,24 @@ CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra
 # one plain-C translation unit (sqlite3.o) matches the C++ objects'
 # -arch instead of silently compiling for the host architecture.
 CFLAGS   ?=
-DEFS     := -DFSQL_MCP_VERSION="\"2.0.7\""
+DEFS     := -DFSQL_MCP_VERSION="\"2.0.8\""
 
 # Coverage builds (build_test.sh --coverage): same posture as the
 # top-level Makefile's own COVERAGE block: gcov instrumentation on
 # both compile and link, appended (not replacing the caller's own
 # -arch etc.) to both the C++ and C flags since the final link reuses
 # CXXFLAGS directly and sqlite3.o is its own TU compiled with CFLAGS.
+# -fprofile-update=atomic: unlike the top-level Makefile (whose gate
+# workers are separate sqlite3 CLI processes, never racing on the same
+# counters), this binary spawns a std::thread per HTTP connection
+# in-process (transport_http.cpp) -- concurrent, non-atomic counter
+# increments on shared code (including inherited libstdc++ template
+# instantiations) corrupt gcov's counts, surfacing as geninfo's
+# "Unexpected negative count ... Perhaps you need to compile with
+# '-fprofile-update=atomic'" error during lcov capture.
 ifdef COVERAGE
-  CXXFLAGS := $(CXXFLAGS) -O1 -g --coverage
-  CFLAGS   := $(CFLAGS) -O1 -g --coverage
+  CXXFLAGS := $(CXXFLAGS) -O1 -g --coverage -fprofile-update=atomic
+  CFLAGS   := $(CFLAGS) -O1 -g --coverage -fprofile-update=atomic
 endif
 
 SQLITE_DIR    := ../deps/sqlite

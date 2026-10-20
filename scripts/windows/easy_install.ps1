@@ -255,24 +255,28 @@ function Install-FractalSqlPackage {
 }
 
 # --- Phase C: the wizard -----------------------------------------------
-function Invoke-Wizard {
-    param([string]$SqliteBin)
+function Select-ReasoningProvider {
+    Write-Step "Reasoning provider:"
+    Write-Host "  1) Local Ollama"
+    Write-Host "  2) Cloud / OpenAI-compatible endpoint"
+    Write-Host "  3) Skip: search-only install, configure reasoning later"
+    $choice = Prompt-Value "Choice" "1"
+    return switch ($choice) { '1' { 'ollama' } '2' { 'openai-compatible' } default { 'skip' } }
+}
 
-    # Actual snippet destination, set below (may end up the per-user
-    # fallback when the install dir isn't writable non-elevated).
-    $snippetPath = $Snippet
-
-    if (-not $Provider) {
-        Write-Step "Reasoning provider:"
-        Write-Host "  1) Local Ollama"
-        Write-Host "  2) Cloud / OpenAI-compatible endpoint"
-        Write-Host "  3) Skip: search-only install, configure reasoning later"
-        $choice = Prompt-Value "Choice" "1"
-        $Provider = switch ($choice) { '1' { 'ollama' } '2' { 'openai-compatible' } default { 'skip' } }
-    }
-
-    $pluginDll = Join-Path $InstallDir 'fractalsql-reasoning-http.dll'
-
+# Resolves the reasoning-provider config, prompting for any missing
+# piece exactly as the wizard did inline. Returns an object with the
+# (possibly still unset, if 'skip') Provider plus the built $cfg
+# ordered hashtable -- split out of Invoke-Wizard to keep it short and
+# flat. Prompted values are returned via the
+# Provider/Url/etc. properties too so the caller's own copies stay in
+# sync with anything a prompt just filled in.
+function Resolve-ReasoningConfig {
+    param(
+        [string]$Provider, [string]$Url, [string]$Model, [string]$Token,
+        [string]$EmbedUrl, [string]$EmbedModel, [string]$Think, [string]$ThinkProvider,
+        [string]$PluginDll
+    )
     $cfg = [ordered]@{}
     switch ($Provider) {
         'ollama' {
@@ -282,7 +286,7 @@ function Invoke-Wizard {
             if (-not $EmbedModel) { $EmbedModel = Prompt-Value "Embedding model" "nomic-embed-text" }
             if (-not $Think) { $Think = 'off' }
             if (-not $ThinkProvider) { $ThinkProvider = 'ollama' }
-            $cfg['reasoning_plugin'] = "'$(SqlQuote $pluginDll)'"
+            $cfg['reasoning_plugin'] = "'$(SqlQuote $PluginDll)'"
             $cfg['http_url'] = "'$(SqlQuote $Url)'"
             $cfg['http_allow_plaintext'] = "'on'"
             $cfg['http_model'] = "'$(SqlQuote $Model)'"
@@ -296,7 +300,7 @@ function Invoke-Wizard {
             if (-not $Url) { Write-Die "a URL is required for a cloud/OpenAI-compatible endpoint" }
             if (-not $Model) { $Model = Prompt-Value "Model" "gpt-4o-mini" }
             if (-not $Token) { $Token = Prompt-Secret "API token (masked, never logged)" }
-            $cfg['reasoning_plugin'] = "'$(SqlQuote $pluginDll)'"
+            $cfg['reasoning_plugin'] = "'$(SqlQuote $PluginDll)'"
             $cfg['http_url'] = "'$(SqlQuote $Url)'"
             $cfg['http_token'] = "'$(SqlQuote $Token)'"
             $cfg['http_model'] = "'$(SqlQuote $Model)'"
@@ -308,31 +312,42 @@ function Invoke-Wizard {
             Write-Step "Skipping reasoning config. Search functions like fractal_search and fractal_search_explore work with no model."
         }
     }
+    return [pscustomobject]@{ Provider = $Provider; Config = $cfg }
+}
 
-    if ($Provider -ne 'skip') {
-        Write-Step "About to write configuration to ${Snippet}:"
-        foreach ($k in $cfg.Keys) {
-            if ($k -eq 'http_token') { Write-Host "  fractalsql_set('http_token', '***')" }
-            else { Write-Host "  fractalsql_set('$k', $($cfg[$k]))" }
-        }
-        if (-not (Confirm-Step "Write this configuration?")) { Write-Die "Aborted. Nothing was changed." }
-        # Destination decided up front (the header below names the path
-        # in its usage hint, so it must be known before that's built).
-        # A non-elevated shell can't write under Program Files -- fall
-        # back to a per-user copy: same keys, same .load line, just a
-        # different path, and every later message names $snippetPath.
-        if (-not $DryRun -and -not (Test-DirWritable $InstallDir)) {
-            $snippetPath = $UserSnippet
-            Write-Warn2 "Couldn't write to $Snippet (that path needs an elevated shell). Writing the snippet to $UserSnippet instead - same keys, same .load line."
-        }
-        if ($DryRun) {
-            Write-Step "(-DryRun: snippet not written)"
-        } else {
-            # The bootstrap snippet: .load + one fractalsql_set per key.
-            # SQLite configuration is per-connection state (no GUCs, no
-            # reload), so every session that wants the reasoning tier
-            # reads this snippet via -init or .read.
-            $header = @"
+# Confirms and writes the bootstrap snippet for a non-'skip' provider
+# (the caller only invokes this when $Provider -ne 'skip'). Returns
+# the final snippet path (possibly the per-user fallback) -- split out
+# of Invoke-Wizard to keep it short and flat.
+function Write-ReasoningSnippet {
+    param(
+        [string]$Provider, $Cfg, [string]$Snippet, [string]$UserSnippet,
+        [string]$InstallDir, [string]$ExtLoad, [string]$Version, [switch]$DryRun
+    )
+    $snippetPath = $Snippet
+    Write-Step "About to write configuration to ${Snippet}:"
+    foreach ($k in $Cfg.Keys) {
+        if ($k -eq 'http_token') { Write-Host "  fractalsql_set('http_token', '***')" }
+        else { Write-Host "  fractalsql_set('$k', $($Cfg[$k]))" }
+    }
+    if (-not (Confirm-Step "Write this configuration?")) { Write-Die "Aborted. Nothing was changed." }
+    # Destination decided up front (the header below names the path
+    # in its usage hint, so it must be known before that's built).
+    # A non-elevated shell can't write under Program Files -- fall
+    # back to a per-user copy: same keys, same .load line, just a
+    # different path, and every later message names $snippetPath.
+    if (-not $DryRun -and -not (Test-DirWritable $InstallDir)) {
+        $snippetPath = $UserSnippet
+        Write-Warn2 "Couldn't write to $Snippet (that path needs an elevated shell). Writing the snippet to $UserSnippet instead - same keys, same .load line."
+    }
+    if ($DryRun) {
+        Write-Step "(-DryRun: snippet not written)"
+    } else {
+        # The bootstrap snippet: .load + one fractalsql_set per key.
+        # SQLite configuration is per-connection state (no GUCs, no
+        # reload), so every session that wants the reasoning tier
+        # reads this snippet via -init or .read.
+        $header = @"
 -- load_fractalsql.sql - generated by easy_install.ps1 $Version
 --
 -- Per-session bootstrap for FractalSQL on SQLite. Run it with:
@@ -346,55 +361,88 @@ function Invoke-Wizard {
 
 .load "$ExtLoad"
 "@
-            $lines = @($header)
-            foreach ($k in $cfg.Keys) { $lines += "SELECT fractalsql_set('$k', $($cfg[$k]));" }
-            New-Item -ItemType Directory -Force -Path (Split-Path $snippetPath -Parent) | Out-Null
-            # ASCII file; default encoding fine. Protect the token.
-            [IO.File]::WriteAllLines($snippetPath, $lines)
-            Write-Ok "Reasoning configured in $snippetPath."
-            if ($cfg.Contains('http_token')) {
-                Write-Warn2 "Snippet contains your http_token in plain text - protect it like a credential (ACL restricted below)."
-            }
-            # Braced form: in "$env:USERNAME:R" the parser reads
-            # USERNAME:R as ONE drive-qualified variable name, which
-            # resolves to nothing - icacls then gets an empty /grant:r
-            # argument ("Invalid parameter", exit 87) and the snippet
-            # keeps its inherited ACL.
-            icacls.exe $snippetPath /inheritance:r /grant:r "${env:USERNAME}:R" | Out-Null
-            if ($LASTEXITCODE -ne 0) {
-                Write-Warn2 "couldn't restrict the snippet's ACL (icacls exited $LASTEXITCODE) - the file keeps its inherited ACL."
-            }
+        $lines = @($header)
+        foreach ($k in $Cfg.Keys) { $lines += "SELECT fractalsql_set('$k', $($Cfg[$k]));" }
+        New-Item -ItemType Directory -Force -Path (Split-Path $snippetPath -Parent) | Out-Null
+        # ASCII file; default encoding fine. Protect the token.
+        [IO.File]::WriteAllLines($snippetPath, $lines)
+        Write-Ok "Reasoning configured in $snippetPath."
+        if ($Cfg.Contains('http_token')) {
+            Write-Warn2 "Snippet contains your http_token in plain text - protect it like a credential (ACL restricted below)."
         }
+        # Braced form: in "$env:USERNAME:R" the parser reads
+        # USERNAME:R as ONE drive-qualified variable name, which
+        # resolves to nothing - icacls then gets an empty /grant:r
+        # argument ("Invalid parameter", exit 87) and the snippet
+        # keeps its inherited ACL.
+        icacls.exe $snippetPath /inheritance:r /grant:r "${env:USERNAME}:R" | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn2 "couldn't restrict the snippet's ACL (icacls exited $LASTEXITCODE) - the file keeps its inherited ACL."
+        }
+    }
+    return $snippetPath
+}
+
+# Post-write version check + optional live smoke test -- split out of
+# Invoke-Wizard to keep it short and flat. No return value
+# (pure side effects; nothing downstream reads any state this sets).
+function Test-InstalledVersionAndSmoke {
+    param([string]$SqliteBin, [string]$Version, [string]$Provider, [string]$SnippetPath, [string]$Repo)
+    $ed = Invoke-Sqlite $SqliteBin "SELECT fractalsql_edition();"
+    $ver = Invoke-Sqlite $SqliteBin "SELECT fractalsql_version();"
+    Write-Ok "fractalsql_edition() = $ed, fractalsql_version() = $ver"
+    if ($ver -ne $Version) {
+        Write-Warn2 "That's not $Version, the version this script expected. The installed files themselves are out of date. Reinstall the current .msi from https://github.com/$Repo/releases to actually update fractalsql.dll, then re-run this script."
+    }
+    if ($Provider -ne 'skip' -and (Confirm-Step "Run a live reasoning smoke test (SELECT fractal_reason('say ok'))? A cloud endpoint may incur cost, and a cold local model can take several minutes the first time.")) {
+        try {
+            # .read inside a -cmd, NOT -init: the CLI runs the -init
+            # file on its own open, and the fractalsql_set() state
+            # written there does not reach the connection that
+            # executes the command-line SQL afterwards (fractal_reason
+            # then reports "reasoning plugin not configured"). .read
+            # in the same session as the query is exactly the bash
+            # wizard's form. Forward slashes + single quotes: same
+            # form the snippet's own .load line uses, which the CLI's
+            # dot-command tokenizer accepts with spaces in the path.
+            $readSnippet = ".read '$($SnippetPath.Replace('\', '/'))'"
+            $reply = Invoke-Sqlite $SqliteBin @("-cmd", $readSnippet, "SELECT fractal_reason('say ok');")
+            Write-Host "  $reply"
+        } catch {
+            Write-Warn2 "smoke error: $($_.Exception.Message)"
+            # Include the underlying error so a refusal, timeout, or
+            # plugin load failure is distinguishable on its own.
+            Write-Warn2 "That failed: $($_.Exception.Message). If it looks like a timeout on a slow/cold local model, give the model a minute and retry, or raise the plugin's wait ceiling first (FSQL_REASONING_HTTP_TIMEOUT_MS / FSQL_REASONING_HTTP_LOW_SPEED_SECS in the shell before starting sqlite3), or see docs/reasoning-setup.md's 'Handling Constrained Hardware' section."
+        }
+    }
+}
+
+function Invoke-Wizard {
+    param([string]$SqliteBin)
+
+    # Actual snippet destination, set below (may end up the per-user
+    # fallback when the install dir isn't writable non-elevated).
+    $snippetPath = $Snippet
+
+    if (-not $Provider) { $Provider = Select-ReasoningProvider }
+
+    $pluginDll = Join-Path $InstallDir 'fractalsql-reasoning-http.dll'
+
+    $resolved = Resolve-ReasoningConfig -Provider $Provider -Url $Url -Model $Model `
+        -Token $Token -EmbedUrl $EmbedUrl -EmbedModel $EmbedModel -Think $Think `
+        -ThinkProvider $ThinkProvider -PluginDll $pluginDll
+    $Provider = $resolved.Provider
+    $cfg = $resolved.Config
+
+    if ($Provider -ne 'skip') {
+        $snippetPath = Write-ReasoningSnippet -Provider $Provider -Cfg $cfg -Snippet $Snippet `
+            -UserSnippet $UserSnippet -InstallDir $InstallDir -ExtLoad $ExtLoad `
+            -Version $Version -DryRun:$DryRun
     }
 
     if (-not $DryRun) {
-        $ed = Invoke-Sqlite $SqliteBin "SELECT fractalsql_edition();"
-        $ver = Invoke-Sqlite $SqliteBin "SELECT fractalsql_version();"
-        Write-Ok "fractalsql_edition() = $ed, fractalsql_version() = $ver"
-        if ($ver -ne $Version) {
-            Write-Warn2 "That's not $Version, the version this script expected. The installed files themselves are out of date. Reinstall the current .msi from https://github.com/$Repo/releases to actually update fractalsql.dll, then re-run this script."
-        }
-        if ($Provider -ne 'skip' -and (Confirm-Step "Run a live reasoning smoke test (SELECT fractal_reason('say ok'))? A cloud endpoint may incur cost, and a cold local model can take several minutes the first time.")) {
-            try {
-                # .read inside a -cmd, NOT -init: the CLI runs the -init
-                # file on its own open, and the fractalsql_set() state
-                # written there does not reach the connection that
-                # executes the command-line SQL afterwards (fractal_reason
-                # then reports "reasoning plugin not configured"). .read
-                # in the same session as the query is exactly the bash
-                # wizard's form. Forward slashes + single quotes: same
-                # form the snippet's own .load line uses, which the CLI's
-                # dot-command tokenizer accepts with spaces in the path.
-                $readSnippet = ".read '$($snippetPath.Replace('\', '/'))'"
-                $reply = Invoke-Sqlite $SqliteBin @("-cmd", $readSnippet, "SELECT fractal_reason('say ok');")
-                Write-Host "  $reply"
-            } catch {
-                Write-Warn2 "smoke error: $($_.Exception.Message)"
-                # Include the underlying error so a refusal, timeout, or
-                # plugin load failure is distinguishable on its own.
-                Write-Warn2 "That failed: $($_.Exception.Message). If it looks like a timeout on a slow/cold local model, give the model a minute and retry, or raise the plugin's wait ceiling first (FSQL_REASONING_HTTP_TIMEOUT_MS / FSQL_REASONING_HTTP_LOW_SPEED_SECS in the shell before starting sqlite3), or see docs/reasoning-setup.md's 'Handling Constrained Hardware' section."
-            }
-        }
+        Test-InstalledVersionAndSmoke -SqliteBin $SqliteBin -Version $Version `
+            -Provider $Provider -SnippetPath $snippetPath -Repo $Repo
     }
 
     Write-Host ""
@@ -427,7 +475,7 @@ function Invoke-Uninstall {
             Write-Ok "Files removed. Nothing was registered anywhere else - SQLite extensions leave no other trace."
         }
     }
-    Write-Host "  To remove the package: uninstall 'FractalSQL for SQLite' from Windows Settings > Apps, or msiexec /x <product code>"
+    Write-Output "  To remove the package: uninstall 'FractalSQL for SQLite' from Windows Settings > Apps, or msiexec /x <product code>"
 }
 
 # --- main ------------------------------------------------------------------

@@ -12,7 +12,7 @@
 
 namespace fsqlmcp
 {
-    static const char* kLeastPriv =
+    static const char* const kLeastPriv =
         "SAFETY (FractalSQL MCP spec, sections 6/7/1.8): any tool that "
         "executes generated SQL (fractal_sql_agent with auto_execute=true, "
         "fractal_agent_data_analyst) runs it under whatever account/role "
@@ -282,6 +282,42 @@ namespace fsqlmcp
         return it->is_string() ? it->get_ref<const std::string&>() : it->dump();
     }
 
+    // table_names's special case (the Python reference's own behavior): it
+    // arrives comma-separated and inlines as a full clause, not a bare value.
+    static std::string formatTableNamesValue( const std::string& value )
+    {
+        if( value.empty() || value == "(not supplied; leave that part out or ask the user)" )
+            return " (no explicit table scoping; auto-discover)";
+        std::vector<std::string> names;
+        std::size_t start = 0;
+        while( start < value.size() )
+        {
+            const std::size_t comma = value.find( ',', start );
+            std::string part = value.substr( start,
+                comma == std::string::npos ? std::string::npos : comma - start );
+            const std::size_t nb = part.find_first_not_of( " \t" );
+            if( nb != std::string::npos )
+                names.push_back( part.substr( nb, part.find_last_not_of( " \t" ) - nb + 1 ) );
+            if( comma == std::string::npos ) break;
+            start = comma + 1;
+        }
+        return " and table_names set to " + Json( names ).dump();
+    }
+
+    // Resolves one prompt arg's value (table_names gets its special
+    // comma-separated clause) and substitutes every {name} placeholder
+    // occurrence in text.
+    static void applyPromptArg( std::string& text, const PromptArg& arg, const Json& args )
+    {
+        std::string value = slotValue( args, arg );
+        if( std::string( arg.name ) == "table_names" )
+            value = formatTableNamesValue( value );
+        const std::string placeholder = "{" + std::string( arg.name ) + "}";
+        std::size_t pos;
+        while( ( pos = text.find( placeholder ) ) != std::string::npos )
+            text.replace( pos, placeholder.size(), value );
+    }
+
     Json Prompts::get( const std::string& name, const Json& args )
     {
         const PromptDef* found = nullptr;
@@ -292,37 +328,7 @@ namespace fsqlmcp
 
         std::string text( found->tmpl );
         for( const PromptArg& arg : found->args )
-        {
-            std::string value = slotValue( args, arg );
-            if( std::string( arg.name ) == "table_names" )
-            {
-                // The Python reference's special case: table_names arrives
-                // comma-separated and inlines as a full clause, not a bare value.
-                if( !value.empty() && value != "(not supplied; leave that part out or ask the user)" )
-                {
-                    std::vector<std::string> names;
-                    std::size_t start = 0;
-                    while( start < value.size() )
-                    {
-                        const std::size_t comma = value.find( ',', start );
-                        std::string part = value.substr( start,
-                            comma == std::string::npos ? std::string::npos : comma - start );
-                        const std::size_t nb = part.find_first_not_of( " \t" );
-                        if( nb != std::string::npos )
-                            names.push_back( part.substr( nb, part.find_last_not_of( " \t" ) - nb + 1 ) );
-                        if( comma == std::string::npos ) break;
-                        start = comma + 1;
-                    }
-                    value = " and table_names set to " + Json( names ).dump();
-                }
-                else
-                    value = " (no explicit table scoping; auto-discover)";
-            }
-            const std::string placeholder = "{" + std::string( arg.name ) + "}";
-            std::size_t pos;
-            while( ( pos = text.find( placeholder ) ) != std::string::npos )
-                text.replace( pos, placeholder.size(), value );
-        }
+            applyPromptArg( text, arg, args );
         if( found->leastPrivSuffix )
             text += kLeastPriv;
         return Json{ { "description", found->desc },

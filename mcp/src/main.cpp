@@ -170,6 +170,196 @@ static void usage()
         "Lock/manifest files default next to this binary's repo checkout; see mcp/README.md.\n";
 }
 
+// All of main()'s command-line state, parsed by parseArgs() below.
+struct CliArgs
+{
+    bool writeLock = false, writeSafetyLock = false, writeManifest = false, listTools = false;
+    bool httpMode = false, httpsMode = false;
+    int httpPort = 0;
+    std::string httpHost, httpPath, tlsCertFile, tlsKeyFile, lockPath, safetyLockPath;
+    std::vector<std::string> toolWhitelist, enabledCategories;
+};
+
+// Parses argv into args. Returns true iff the process must exit right
+// now with exitCode (--help, --version, an unknown flag, or a flag
+// missing its value exits via std::exit(2) from inside next()); false
+// means argument parsing succeeded and the caller should keep going.
+static bool parseArgs( int argc, char** argv, CliArgs& args, int& exitCode )
+{
+    for( int i = 1; i < argc; ++i )
+    {
+        const std::string arg( argv[ i ] );
+        auto next = [ & ]( const char* flagName ) -> std::string {
+            if( i + 1 >= argc )
+            {
+                std::cerr << "missing value for " << flagName << "\n";
+                std::exit( 2 );
+            }
+            return std::string( argv[ ++i ] );
+        };
+        if( arg == "--write-schema-lock" ) args.writeLock = true;
+        else if( arg == "--write-safety-annotations-lock" ) args.writeSafetyLock = true;
+        else if( arg == "--write-manifest" ) args.writeManifest = true;
+        else if( arg == "--list-tools" ) args.listTools = true;
+        else if( arg == "--schema-lock-path" ) args.lockPath = next( "--schema-lock-path" );
+        else if( arg == "--safety-lock-path" ) args.safetyLockPath = next( "--safety-lock-path" );
+        else if( arg == "--tool" ) args.toolWhitelist = splitCsv( next( "--tool" ) );
+        else if( arg == "--category" ) args.enabledCategories = splitCsv( next( "--category" ) );
+        else if( arg == "--http" || arg == "--http-transport" )
+        { args.httpMode = true; if( i + 1 < argc && argv[ i + 1 ][ 0 ] != '-' ) args.httpPort = std::atoi( argv[ ++i ] ); }
+        else if( arg == "--https" )
+        { args.httpMode = true; args.httpsMode = true; if( i + 1 < argc && argv[ i + 1 ][ 0 ] != '-' ) args.httpPort = std::atoi( argv[ ++i ] ); }
+        else if( arg == "--host" ) args.httpHost = next( "--host" );
+        else if( arg == "--path" ) args.httpPath = next( "--path" );
+        else if( arg == "--tls-cert" ) args.tlsCertFile = next( "--tls-cert" );
+        else if( arg == "--tls-key" ) args.tlsKeyFile = next( "--tls-key" );
+        else if( arg == "--help" || arg == "-h" ) { usage(); exitCode = 0; return true; }
+        else if( arg == "--version" )
+        {
+            std::cout << kMcpPluginVersion << "\n";
+            exitCode = 0;
+            return true;
+        }
+        else
+        {
+            std::cerr << "unknown argument '" << arg << "' (try --help)\n";
+            exitCode = 2;
+            return true;
+        }
+    }
+    return false;
+}
+
+// FSQL_MCP_AGENT_PARTIAL: 'on' (default) opts each session into the
+// engine's partial-result honesty mode. A reasoning-endpoint failure
+// inside an agent's scalar call returns the computed data half plus
+// "reasoning_step_failed" instead of raising. Anything else (e.g.
+// 'off') keeps the engine's documented raise behavior.
+static bool agentPartialEnabled( const std::string& v )
+{
+    return v.empty() || v == "on" || v == "true" || v == "1";
+}
+
+// Defined further below; forward-declared here so maybeRunOneShot's
+// --write-manifest path (which runs before main's own call site) can
+// use it for the manifest's default path, exactly as the original
+// inline code did.
+static std::string findRepoLockPath( const char* fname );
+
+// The --write-schema-lock / --write-safety-annotations-lock /
+// --write-manifest / --list-tools one-shot paths: at most one applies
+// (checked in this exact order, matching the original inline chain),
+// each prints its own thing and the process exits immediately after.
+// Returns the exit code, or -1 if none of the flags were set (meaning:
+// keep going and actually serve).
+static int maybeRunOneShot( const CliArgs& args, const std::vector<ToolSpec>& tools,
+                            const std::string& hash )
+{
+    if( args.writeLock )
+    {
+        writeSchemaLock( args.lockPath, hash );
+        std::cout << hash << "\n";
+        return 0;
+    }
+    if( args.writeSafetyLock )
+    {
+        writeSafetyAnnotations( args.safetyLockPath, renderSafetyAnnotations( tools ) );
+        std::cout << args.safetyLockPath << " written\n";
+        return 0;
+    }
+    if( args.writeManifest )
+    {
+        Json tools_json = Json::array();
+        for( const ToolSpec& t : tools )
+            tools_json.push_back( Json{ { "name", std::string( t.name ) },
+                                        { "description", std::string( t.description ) } } );
+        Json manifest{
+            { "name", kMcpPluginName }, { "version", kMcpPluginVersion },
+            { "server", { { "type", "binary" }, { "entry_point", kMcpPluginName } } },
+            { "tools", tools_json }
+        };
+        // 15.5: manifests default into mcp/ like the lock files.
+        const std::string manifestPath = envOr( "FSQL_MCP_MANIFEST_PATH", findRepoLockPath( "manifest.json" ) );
+        std::ofstream( manifestPath ) << manifest.dump( 2 ) << "\n";
+        std::cout << manifestPath << " written (" << tools.size() << " tools)\n";
+        return 0;
+    }
+    if( args.listTools )
+    {
+        for( const ToolSpec& t : tools )
+            std::cout << t.name << "\n";
+        return 0;
+    }
+    return -1;
+}
+
+// 15.3: safety-annotation check is a HARD mismatch (exit 3), regardless
+// of FSQL_MCP_STRICT_SCHEMA_HASH. Returns 0 to continue serving, 3 on
+// a hard mismatch.
+static int checkSafetyGate( const std::string& safetyLockPath, const std::vector<ToolSpec>& tools )
+{
+    std::string diffOut;
+    if( !checkSafetyAnnotations( safetyLockPath, renderSafetyAnnotations( tools ), &diffOut ) )
+    {
+        std::cerr << "safety-annotation regression: the registered safety hints differ from "
+                  << safetyLockPath << "\n--- lock file contents ---\n" << diffOut;
+        return 3;
+    }
+    return 0;
+}
+
+// 10.5: schema-lock check, warn by default, hard-fail (exit 2) when
+// strict. Returns 0 to continue serving, 2 on a strict-mode hard fail.
+static int checkSchemaGate( const std::string& lockPath, const std::string& hash,
+                           const std::vector<ToolSpec>& tools )
+{
+    std::string expected;
+    const LockCheckResult lockResult = checkSchemaLock( lockPath, hash, &expected );
+    std::string filtered = ( tools.size() == 81 ) ? std::string() : " (filtered surface)";
+    if( lockResult == LockCheckResult::Warn )
+    {
+        std::cerr << "schema hash mismatch: expected " << expected << " got " << hash << " ("
+                  << tools.size() << " tools" << filtered << "); regenerate via "
+                  "fractalsql-sqlite-mcp --write-schema-lock\n";
+        if( envBool( "FSQL_MCP_STRICT_SCHEMA_HASH", false ) ) return 2;
+    }
+    else if( lockResult == LockCheckResult::Ok )
+        logging::event( "schema_lock_ok", Json{ { "hash", hash } } );
+    return 0;
+}
+
+// Builds the HttpConfig from CliArgs/env, validates it, and runs the
+// HTTP/HTTPS transport (this call does not return until shutdown).
+// Returns 2 on a config error (missing auth token, or --https without
+// a cert/key), matching the original inline behavior exactly.
+static int runHttpMode( JsonRpcServer& server, const CliArgs& args, Db& db )
+{
+    HttpConfig httpCfg;
+    httpCfg.host = args.httpHost;
+    httpCfg.port = args.httpPort;
+    httpCfg.path = args.httpPath;
+    httpCfg.authToken     = envOr( "FSQL_MCP_AUTH_TOKEN", "" );
+    httpCfg.authTokenFile = envOr( "FSQL_MCP_AUTH_TOKEN_FILE", "" );
+    httpCfg.shutdownDrainMs = envIntOr( "FSQL_MCP_SHUTDOWN_DRAIN_MS", 5000 );
+    httpCfg.tlsEnabled  = args.httpsMode || envBool( "FSQL_MCP_HTTPS", false );
+    httpCfg.tlsCertFile = args.tlsCertFile;
+    httpCfg.tlsKeyFile  = args.tlsKeyFile;
+    if( httpCfg.authToken.empty() && httpCfg.authTokenFile.empty() )
+    {
+        std::cerr << "the HTTP transport requires FSQL_MCP_AUTH_TOKEN or "
+                     "FSQL_MCP_AUTH_TOKEN_FILE\n";
+        return 2;
+    }
+    if( httpCfg.tlsEnabled && ( httpCfg.tlsCertFile.empty() || httpCfg.tlsKeyFile.empty() ) )
+    {
+        std::cerr << "--https requires a TLS cert and key: pass --tls-cert/--tls-key or set "
+                     "FSQL_MCP_TLS_CERT_FILE/FSQL_MCP_TLS_KEY_FILE\n";
+        return 2;
+    }
+    return runHttpTransport( server, httpCfg, [ &db ] { return db.probeAlive(); },
+                             [ &db ]( const std::string& key ) { db.closeSession( key ); } );
+}
+
 static std::string findRepoLockPath( const char* fname )
 {
     // Walk up from the CWD to the checkout root (here: a directory
@@ -206,57 +396,17 @@ int main( int argc, char** argv )
     _setmode( _fileno( stdout ), _O_BINARY );
 #endif
 
-    bool writeLock = false, writeSafetyLock = false, writeManifest = false, listTools = false;
-    bool httpMode = false;
-    bool httpsMode = false;
-    int httpPort = envIntOr( "FSQL_MCP_HTTP_PORT", 8765 );
-    std::string httpHost = envOr( "FSQL_MCP_HTTP_HOST", "127.0.0.1" );
-    std::string httpPath = envOr( "FSQL_MCP_HTTP_PATH", "/mcp" );
-    std::string tlsCertFile = envOr( "FSQL_MCP_TLS_CERT_FILE", "" );
-    std::string tlsKeyFile  = envOr( "FSQL_MCP_TLS_KEY_FILE", "" );
-    std::string lockPath = envOr( "FSQL_MCP_SCHEMA_LOCK", "" );
-    std::string safetyLockPath = envOr( "FSQL_MCP_SAFETY_LOCK", "" );
-    std::vector<std::string> toolWhitelist, enabledCategories;
+    CliArgs args;
+    args.httpPort = envIntOr( "FSQL_MCP_HTTP_PORT", 8765 );
+    args.httpHost = envOr( "FSQL_MCP_HTTP_HOST", "127.0.0.1" );
+    args.httpPath = envOr( "FSQL_MCP_HTTP_PATH", "/mcp" );
+    args.tlsCertFile = envOr( "FSQL_MCP_TLS_CERT_FILE", "" );
+    args.tlsKeyFile  = envOr( "FSQL_MCP_TLS_KEY_FILE", "" );
+    args.lockPath = envOr( "FSQL_MCP_SCHEMA_LOCK", "" );
+    args.safetyLockPath = envOr( "FSQL_MCP_SAFETY_LOCK", "" );
 
-    for( int i = 1; i < argc; ++i )
-    {
-        const std::string arg( argv[ i ] );
-        auto next = [&]( const char* flagName ) -> std::string {
-            if( i + 1 >= argc )
-            {
-                std::cerr << "missing value for " << flagName << "\n";
-                std::exit( 2 );
-            }
-            return std::string( argv[ ++i ] );
-        };
-        if( arg == "--write-schema-lock" ) writeLock = true;
-        else if( arg == "--write-safety-annotations-lock" ) writeSafetyLock = true;
-        else if( arg == "--write-manifest" ) writeManifest = true;
-        else if( arg == "--list-tools" ) listTools = true;
-        else if( arg == "--schema-lock-path" ) lockPath = next( "--schema-lock-path" );
-        else if( arg == "--safety-lock-path" ) safetyLockPath = next( "--safety-lock-path" );
-        else if( arg == "--tool" ) toolWhitelist = splitCsv( next( "--tool" ) );
-        else if( arg == "--category" ) enabledCategories = splitCsv( next( "--category" ) );
-        else if( arg == "--http" || arg == "--http-transport" )
-        { httpMode = true; if( i + 1 < argc && argv[ i + 1 ][ 0 ] != '-' ) httpPort = std::atoi( argv[ ++i ] ); }
-        else if( arg == "--https" )
-        { httpMode = true; httpsMode = true; if( i + 1 < argc && argv[ i + 1 ][ 0 ] != '-' ) httpPort = std::atoi( argv[ ++i ] ); }
-        else if( arg == "--host" ) httpHost = next( "--host" );
-        else if( arg == "--path" ) httpPath = next( "--path" );
-        else if( arg == "--tls-cert" ) tlsCertFile = next( "--tls-cert" );
-        else if( arg == "--tls-key" ) tlsKeyFile = next( "--tls-key" );
-        else if( arg == "--help" || arg == "-h" ) { usage(); return 0; }
-        else if( arg == "--version" )
-        {
-            std::cout << kMcpPluginVersion << "\n";
-            return 0;
-        }
-        else
-        {
-            std::cerr << "unknown argument '" << arg << "' (try --help)\n";
-            return 2;
-        }
-    }
+    int earlyExitCode = 0;
+    if( parseArgs( argc, argv, args, earlyExitCode ) ) return earlyExitCode;
 
     // The --write-* / --list-tools paths build the tool table WITHOUT touching
     // the database (handlers only run through serving).
@@ -265,17 +415,10 @@ int main( int argc, char** argv )
         envOr( "SQLITE_DB_PATH", "" ),
         envOr( "FRACTALSQL_EXTENSION_PATH", "" ),
         envOr( "FRACTALSQL_BOOTSTRAP_SQL", "" ),
-        // FSQL_MCP_AGENT_PARTIAL: 'on' (default) opts each
-        // session into the engine's partial-result honesty mode. A
-        // reasoning-endpoint failure inside an agent's scalar call
-        // returns the computed data half plus "reasoning_step_failed"
-        // instead of raising. Anything else (e.g. 'off') keeps the
-        // engine's documented raise behavior.
-        []( const std::string& v ) { return v.empty() || v == "on" || v == "true" || v == "1"; }(
-            envOr( "FSQL_MCP_AGENT_PARTIAL", "on" ) ),
+        agentPartialEnabled( envOr( "FSQL_MCP_AGENT_PARTIAL", "on" ) ),
     } );
 
-    const bool serving = !writeLock && !writeSafetyLock && !writeManifest && !listTools;
+    const bool serving = !args.writeLock && !args.writeSafetyLock && !args.writeManifest && !args.listTools;
     db.selectSession( "stdio" );   // default; the HTTP transport re-selects per session
 
     if( serving )
@@ -297,75 +440,19 @@ int main( int argc, char** argv )
 
     std::vector<ToolSpec> tools = buildAllTools( db );
     // 15.1: env vars feed the same filters the flags set (flags win).
-    if( toolWhitelist.empty() ) toolWhitelist = splitCsv( envOr( "FSQL_MCP_TOOL_WHITELIST", "" ) );
-    if( enabledCategories.empty() ) enabledCategories = splitCsv( envOr( "FSQL_MCP_ENABLED_CATEGORIES", "" ) );
-    tools = filterTools( std::move( tools ), enabledCategories, toolWhitelist );
+    if( args.toolWhitelist.empty() ) args.toolWhitelist = splitCsv( envOr( "FSQL_MCP_TOOL_WHITELIST", "" ) );
+    if( args.enabledCategories.empty() ) args.enabledCategories = splitCsv( envOr( "FSQL_MCP_ENABLED_CATEGORIES", "" ) );
+    tools = filterTools( std::move( tools ), args.enabledCategories, args.toolWhitelist );
 
-    if( lockPath.empty() ) lockPath = findRepoLockPath( ".mcp-schema-lock" );
-    if( safetyLockPath.empty() ) safetyLockPath = findRepoLockPath( ".mcp-safety-annotations-lock" );
+    if( args.lockPath.empty() ) args.lockPath = findRepoLockPath( ".mcp-schema-lock" );
+    if( args.safetyLockPath.empty() ) args.safetyLockPath = findRepoLockPath( ".mcp-safety-annotations-lock" );
 
     const std::string hash = computeSchemaHash( tools );
-    if( writeLock ) { writeSchemaLock( lockPath, hash ); std::cout << hash << "\n"; return 0; }
+    const int oneShotExit = maybeRunOneShot( args, tools, hash );
+    if( oneShotExit >= 0 ) return oneShotExit;
 
-    if( writeSafetyLock )
-    {
-        writeSafetyAnnotations( safetyLockPath, renderSafetyAnnotations( tools ) );
-        std::cout << safetyLockPath << " written\n";
-        return 0;
-    }
-
-    if( writeManifest )
-    {
-        Json tools_json = Json::array();
-        for( const ToolSpec& t : tools )
-            tools_json.push_back( Json{ { "name", std::string( t.name ) },
-                                        { "description", std::string( t.description ) } } );
-        Json manifest{
-            { "name", kMcpPluginName }, { "version", kMcpPluginVersion },
-            { "server", { { "type", "binary" }, { "entry_point", kMcpPluginName } } },
-            { "tools", tools_json }
-        };
-        // 15.5: manifests default into mcp/ like the lock files.
-        const std::string manifestPath = envOr( "FSQL_MCP_MANIFEST_PATH", findRepoLockPath( "manifest.json" ) );
-        std::ofstream( manifestPath ) << manifest.dump( 2 ) << "\n";
-        std::cout << manifestPath << " written (" << tools.size() << " tools)\n";
-        return 0;
-    }
-
-    if( listTools )
-    {
-        for( const ToolSpec& t : tools )
-            std::cout << t.name << "\n";
-        return 0;
-    }
-
-    // 15.3: safety-annotation check is a HARD mismatch (exit 3), regardless of
-    // FSQL_MCP_STRICT_SCHEMA_HASH.
-    {
-        std::string diffOut;
-        if( !checkSafetyAnnotations( safetyLockPath, renderSafetyAnnotations( tools ), &diffOut ) )
-        {
-            std::cerr << "safety-annotation regression: the registered safety hints differ from "
-                      << safetyLockPath << "\n--- lock file contents ---\n" << diffOut;
-            return 3;
-        }
-    }
-
-    // 10.5: schema-lock check, warn by default, hard-fail (exit 2) when strict.
-    {
-        std::string expected;
-        const LockCheckResult lockResult = checkSchemaLock( lockPath, hash, &expected );
-        std::string filtered = ( tools.size() == 81 ) ? std::string() : " (filtered surface)";
-        if( lockResult == LockCheckResult::Warn )
-        {
-            std::cerr << "schema hash mismatch: expected " << expected << " got " << hash << " ("
-                      << tools.size() << " tools" << filtered << "); regenerate via "
-                      "fractalsql-sqlite-mcp --write-schema-lock\n";
-            if( envBool( "FSQL_MCP_STRICT_SCHEMA_HASH", false ) ) return 2;
-        }
-        else if( lockResult == LockCheckResult::Ok )
-            logging::event( "schema_lock_ok", Json{ { "hash", hash } } );
-    }
+    if( const int safetyExit = checkSafetyGate( args.safetyLockPath, tools ) ) return safetyExit;
+    if( const int schemaExit = checkSchemaGate( args.lockPath, hash, tools ) ) return schemaExit;
 
     logging::init( { envOr( "FSQL_MCP_LOG_LEVEL", "info" ) == "verbose" ||
                              envOr( "FSQL_MCP_LOG_LEVEL", "info" ) == "debug"
@@ -386,33 +473,11 @@ int main( int argc, char** argv )
     JsonRpcServer server( serverCfg, std::move( tools ), concCfg );
     server.interruptHook = [ &db ]( const std::string& clientKey ) { db.interrupt( clientKey ); };
 
-    if( httpMode )
-    {
-        HttpConfig httpCfg;
-        httpCfg.host = httpHost;
-        httpCfg.port = httpPort;
-        httpCfg.path = httpPath;
-        httpCfg.authToken     = envOr( "FSQL_MCP_AUTH_TOKEN", "" );
-        httpCfg.authTokenFile = envOr( "FSQL_MCP_AUTH_TOKEN_FILE", "" );
-        httpCfg.shutdownDrainMs = envIntOr( "FSQL_MCP_SHUTDOWN_DRAIN_MS", 5000 );
-        httpCfg.tlsEnabled  = httpsMode || envBool( "FSQL_MCP_HTTPS", false );
-        httpCfg.tlsCertFile = tlsCertFile;
-        httpCfg.tlsKeyFile  = tlsKeyFile;
-        if( httpCfg.authToken.empty() && httpCfg.authTokenFile.empty() )
-        {
-            std::cerr << "the HTTP transport requires FSQL_MCP_AUTH_TOKEN or "
-                         "FSQL_MCP_AUTH_TOKEN_FILE\n";
-            return 2;
-        }
-        if( httpCfg.tlsEnabled && ( httpCfg.tlsCertFile.empty() || httpCfg.tlsKeyFile.empty() ) )
-        {
-            std::cerr << "--https requires a TLS cert and key: pass --tls-cert/--tls-key or set "
-                         "FSQL_MCP_TLS_CERT_FILE/FSQL_MCP_TLS_KEY_FILE\n";
-            return 2;
-        }
-        return runHttpTransport( server, httpCfg, [ &db ] { return db.probeAlive(); },
-                                 [ &db ]( const std::string& key ) { db.closeSession( key ); } );
-    }
+    // HTTP connection threads are detached and can outlive the transport's
+    // bounded drain, so main's locals (server, db) must stay alive through
+    // process teardown: exit() runs atexit handlers (coverage flush) but
+    // does not unwind main's stack objects.
+    if( args.httpMode ) std::exit( runHttpMode( server, args, db ) );
 
     StdioConfig stdioCfg;
     stdioCfg.shutdownDrainMs = envIntOr( "FSQL_MCP_SHUTDOWN_DRAIN_MS", 5000 );

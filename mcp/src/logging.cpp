@@ -27,7 +27,7 @@ namespace fsqlmcp::logging
         EVP_DigestUpdate( ctx, s.data(), s.size() );
         EVP_DigestFinal_ex( ctx, digest, &len );
         EVP_MD_CTX_free( ctx );
-        static const char* kHex = "0123456789abcdef";
+        static const char* const kHex = "0123456789abcdef";
         std::string out;
         for( unsigned int i = 0; i < 4 && i < len; ++i )
         {

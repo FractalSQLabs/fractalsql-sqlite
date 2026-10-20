@@ -237,7 +237,7 @@ if (-not (Test-Path -LiteralPath $script:BTROOT)) {
 $script:DEFAULT_GATES = @('01', '02', '03', '04', '05', '06', '07', '08', '09', '10',
                           '11', '12', '13', '14', '15', '16', '17', '18', '19', '20',
                           '22', '23', '24', '25', '26', '27', '28', '29', '30', '31',
-                          '32', '37', '38')
+                          '32', '35', '36', '37', '38', '39', '40', '41', '42')
 $script:QUICK_GATES = @('01', '02')
 $script:FUZZ_GATES = @('21')
 
@@ -361,6 +361,18 @@ function Find-Toolchain {
         foreach ($n in @('gcc', 'cc', 'clang')) {
             $c = Get-Command $n -ErrorAction SilentlyContinue
             if ($c) { $script:Cc = $c.Source; break }
+        }
+    }
+    # C++17 sibling, for the mcp/ standalone-unit-test probes (gates 40/
+    # 42): the same mingw toolchain as $script:Cc, but g++ specifically
+    # (gcc alone mis-links C++ standard library symbols).
+    if ($env:FSQL_CXX) {
+        $script:Cxx = $env:FSQL_CXX
+    }
+    else {
+        foreach ($n in @('g++', 'clang++')) {
+            $c = Get-Command $n -ErrorAction SilentlyContinue
+            if ($c) { $script:Cxx = $c.Source; break }
         }
     }
     # python3/python, probed for the stdlib sqlite3 module (the Windows
@@ -860,8 +872,8 @@ function Gate-01-Build {
 
 function Gate-02-Smoke {
     $ver = Sqlq 'SELECT fractalsql_version();'
-    if ($ver -eq '2.0.7') { Pass "02 smoke: version=$ver" }
-    else { Fail "02 smoke: version='$ver' (want 2.0.7)" }
+    if ($ver -eq '2.0.8') { Pass "02 smoke: version=$ver" }
+    else { Fail "02 smoke: version='$ver' (want 2.0.8)" }
     # fractal_search convergence: self-distance ~0
     $d = Sqlq "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');"
     if ($d -eq '0.0' -or (PyAbsLt1e6 $d)) { Pass "02 smoke: fractal_search self-distance=$d" }
@@ -918,6 +930,21 @@ function Gate-04-TextToSql {
         ForEach-Object { "$_" }) -join "`n"
     if ($n -eq '0') { Pass '04 never-executes (bt_orders still empty)' }
     else { Fail "04 never-executes: row count=$n" }
+    # Empty candidate: the model's response has no fenced ```sql block
+    # and no bare statement (the mock returns the canned file's content
+    # verbatim in code mode -- an empty file is an empty candidate).
+    # max_attempts=1 makes this a single-shot exhaustion, exercising
+    # t2s_handle_empty_candidate's own path, otherwise dead -- every
+    # other T2sExpect case above returns a real (valid or rejected) SQL
+    # candidate.
+    [IO.File]::WriteAllText($script:SqlTxt, '')
+    if (ExpectErr 'the model response contained no SQL' `
+            "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
+            "SELECT fractalsql_set('text_to_sql_max_attempts','1');" `
+            "SELECT fractal_text_to_sql('q');") {
+        Pass '04 empty candidate -> rejected (no fenced block, no bare statement)'
+    }
+    else { Fail '04 empty candidate: did not error cleanly' }
     # auto-discovery: the full GENERATE -> ALLOWLIST -> prepare pipeline
     # works off the auto-built schema context (0-arg registration).
     [IO.File]::WriteAllText($script:SqlTxt, 'SELECT count(*) FROM bt_orders')
@@ -1425,6 +1452,24 @@ function Gate-15-Embed {
         Pass '15 vectorizer: injection-shaped source_table rejected'
     }
     else { Fail '15 vectorizer: injection-shaped source_table accepted' }
+
+    # Unconfigured embed endpoint: process_queue() must mark every row
+    # 'failed' with a clean error, not silently skip or crash (fsqlv_fail_row's
+    # own path, otherwise dead -- every other vectorizer test above
+    # configures a working mock embed endpoint first).
+    $rfail = Sqlq `
+        'CREATE TABLE bt_vnoembed(id INTEGER PRIMARY KEY, body TEXT, emb TEXT);' `
+        "INSERT INTO bt_vnoembed(body) VALUES ('a'),('b');" `
+        "SELECT fractal_vectorizer_create('bt_vnoembed','body','emb');" `
+        "SELECT 'PROCESSED=' || fractal_vectorizer_process_queue(10);" `
+        "SELECT 'FAILED=' || count(*) FROM fractal_vectorizer_queue WHERE status='failed';" `
+        "SELECT error FROM fractal_vectorizer_queue LIMIT 1;"
+    if ($rfail.Contains('PROCESSED=2') -and $rfail.Contains('FAILED=2') -and
+        $rfail.Contains('reasoning plugin not configured')) {
+        Pass '15 vectorizer: unconfigured embed endpoint fails every row cleanly'
+    }
+    else { Fail "15 vectorizer: unconfigured embed endpoint: got '$rfail'" }
+
     # pause/resume/drop surface: a paused vectorizer defers (0 processed).
     $r = Sqlq `
         'CREATE TABLE bt_vsoak_stub(
@@ -3304,6 +3349,275 @@ function Gate-32-EnterpriseSignatureReal {
     Remove-Item -Force -ErrorAction SilentlyContinue $sigPath
 }
 
+# ----------------------------------------------------------------------
+# Gates 35/36/39/40/41/42: standalone unit-test probes, hand-mirrored
+# from build_test.sh by inspection (same posture as gate 32 above) --
+# this authoring environment has no Windows host to run PowerShell
+# against. Unlike their .sh siblings, these carry NO --coverage/gcov
+# plumbing at all: this harness has no coverage reporting on Windows
+# (no lcov/genhtml equivalent is wired up), so each probe here is a
+# plain functional smoke test of the same standalone logic -- simpler
+# than build_test.sh's own version, which additionally has to dodge
+# overwriting the real build's own .o/.gcda via separately-named
+# objects. Still worth running: these are the only place that logic's
+# own error/malformed-input paths get exercised on this platform at
+# all, and they catch MSVC/mingw-specific bugs (e.g. a probe's own
+# #include resolving differently) the SQL-level gates never would.
+# ----------------------------------------------------------------------
+
+function Gate-35-Ed25519 {
+    if (-not $script:Cc) {
+        Skip '35 ed25519 (no C compiler on PATH)'
+        return
+    }
+    $obj = Join-Path $script:PlugDir '_ed25519_probe.o'
+    $buildLog = Join-Path $script:PlugDir 'ed25519_probe_build.log'
+    & $script:Cc -std=c11 -O1 -g -Isrc -c 'tests/ed25519_probe.c' -o $obj 1>$buildLog 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $obj)) {
+        Fail "35 ed25519: probe failed to build (see $buildLog)"
+        return
+    }
+    $bin = Join-Path $script:PlugDir 'ed25519_probe.exe'
+    $linkLog = Join-Path $script:PlugDir 'ed25519_probe_link.log'
+    & $script:Cc $obj -o $bin 1>$linkLog 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Fail "35 ed25519: probe failed to link (see $linkLog)"
+        return
+    }
+    $out = & $bin 2>&1
+    $rc = $LASTEXITCODE
+    if ($rc -eq 0) {
+        Pass '35 ed25519: fsql_ed25519_verify_detached (RFC 8032 TEST 1/2 + throwaway-key accept/tamper/wrong-key/corrupt-sig reject -- see driver OK lines above)'
+    }
+    else {
+        Fail "35 ed25519: see driver output above ($out)"
+    }
+}
+
+function Gate-36-ExtractPopulation {
+    if (-not $script:Cc) {
+        Skip '36 extract_population (no C compiler on PATH)'
+        return
+    }
+    $mainObj = Join-Path $script:PlugDir '_extract_pop_main.o'
+    $supportObj = Join-Path $script:PlugDir '_extract_pop_support.o'
+    $buildLog = Join-Path $script:PlugDir 'extract_pop_build.log'
+    & $script:Cc -std=c11 -O1 -g -Isrc -c 'tests/extract_population_probe.c' -o $mainObj 1>$buildLog 2>&1
+    $rc1 = $LASTEXITCODE
+    & $script:Cc -std=c11 -O1 -g -c 'src/fsql_parse.c' -o $supportObj 1>>$buildLog 2>&1
+    $rc2 = $LASTEXITCODE
+    if ($rc1 -ne 0 -or $rc2 -ne 0 -or -not (Test-Path -LiteralPath $mainObj) -or -not (Test-Path -LiteralPath $supportObj)) {
+        Fail "36 extract_population: probe failed to build (see $buildLog)"
+        return
+    }
+    $bin = Join-Path $script:PlugDir 'extract_population_probe.exe'
+    $linkLog = Join-Path $script:PlugDir 'extract_pop_link.log'
+    & $script:Cc $mainObj $supportObj -o $bin 1>$linkLog 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Fail "36 extract_population: probe failed to link (see $linkLog)"
+        return
+    }
+    $out = & $bin 2>&1
+    $rc = $LASTEXITCODE
+    if ($rc -eq 0) {
+        Pass '36 extract_population: fsql_extract_population (see driver OK lines above)'
+    }
+    else {
+        Fail "36 extract_population: see driver output above ($out)"
+    }
+}
+
+function Gate-39-ExtractParse {
+    if (-not $script:Cc) {
+        Skip '39 extract_parse (no C compiler on PATH)'
+        return
+    }
+    $mainObj = Join-Path $script:PlugDir '_extract_parse_main.o'
+    $supportObj = Join-Path $script:PlugDir '_extract_parse_support.o'
+    $buildLog = Join-Path $script:PlugDir 'extract_parse_build.log'
+    & $script:Cc -std=c11 -O1 -g -Isrc -c 'tests/extract_parse_probe.c' -o $mainObj 1>$buildLog 2>&1
+    $rc1 = $LASTEXITCODE
+    & $script:Cc -std=c11 -O1 -g -c 'src/fsql_parse.c' -o $supportObj 1>>$buildLog 2>&1
+    $rc2 = $LASTEXITCODE
+    if ($rc1 -ne 0 -or $rc2 -ne 0 -or -not (Test-Path -LiteralPath $mainObj) -or -not (Test-Path -LiteralPath $supportObj)) {
+        Fail "39 extract_parse: probe failed to build (see $buildLog)"
+        return
+    }
+    $bin = Join-Path $script:PlugDir 'extract_parse_probe.exe'
+    $linkLog = Join-Path $script:PlugDir 'extract_parse_link.log'
+    & $script:Cc $mainObj $supportObj -o $bin 1>$linkLog 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Fail "39 extract_parse: probe failed to link (see $linkLog)"
+        return
+    }
+    $out = & $bin 2>&1
+    $rc = $LASTEXITCODE
+    if ($rc -eq 0) {
+        Pass '39 extract_parse: fsql_extract_best_point/fsql_parse_embedding_array/fsql_extract_topk malformed-input branches (see driver OK lines above)'
+    }
+    else {
+        Fail "39 extract_parse: see driver output above ($out)"
+    }
+}
+
+function Gate-40-VectorsProbe {
+    if (-not (Test-Path -LiteralPath (Join-Path $script:Here 'mcp\tests\vectors_probe.cpp'))) {
+        Skip '40 vectors_probe (mcp/ test not present)'
+        return
+    }
+    if (-not $script:Cxx) {
+        Skip '40 vectors_probe (no g++ on PATH)'
+        return
+    }
+    $mainObj = Join-Path $script:PlugDir '_vectors_probe_main.o'
+    $vecObj = Join-Path $script:PlugDir '_vectors_probe_vectors.o'
+    $errObj = Join-Path $script:PlugDir '_vectors_probe_errors.o'
+    $buildLog = Join-Path $script:PlugDir 'vectors_probe_build.log'
+    Push-Location (Join-Path $script:Here 'mcp')
+    try {
+        & $script:Cxx -std=c++17 -O1 -g -Ivendor -Isrc -c 'tests/vectors_probe.cpp' -o $mainObj 1>$buildLog 2>&1
+        $rc1 = $LASTEXITCODE
+        & $script:Cxx -std=c++17 -O1 -g -Ivendor -Isrc -c 'src/vectors.cpp' -o $vecObj 1>>$buildLog 2>&1
+        $rc2 = $LASTEXITCODE
+        & $script:Cxx -std=c++17 -O1 -g -Ivendor -Isrc -c 'src/errors.cpp' -o $errObj 1>>$buildLog 2>&1
+        $rc3 = $LASTEXITCODE
+    }
+    finally { Pop-Location }
+    if ($rc1 -ne 0 -or $rc2 -ne 0 -or $rc3 -ne 0 -or -not (Test-Path -LiteralPath $mainObj) `
+            -or -not (Test-Path -LiteralPath $vecObj) -or -not (Test-Path -LiteralPath $errObj)) {
+        Fail "40 vectors_probe: probe failed to build (see $buildLog)"
+        return
+    }
+    $bin = Join-Path $script:PlugDir 'vectors_probe.exe'
+    $linkLog = Join-Path $script:PlugDir 'vectors_probe_link.log'
+    & $script:Cxx $mainObj $vecObj $errObj -o $bin 1>$linkLog 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Fail "40 vectors_probe: probe failed to link (see $linkLog)"
+        return
+    }
+    $out = & $bin 2>&1
+    $rc = $LASTEXITCODE
+    if ($rc -eq 0) {
+        Pass '40 vectors_probe: mcp/src/vectors.cpp coercion/validation branches (see driver OK lines above)'
+    }
+    else {
+        Fail "40 vectors_probe: see driver output above ($out)"
+    }
+}
+
+function Gate-41-DbProbe {
+    if (-not (Test-Path -LiteralPath (Join-Path $script:Here 'mcp\tests\db_probe.cpp'))) {
+        Skip '41 db_probe (mcp/ test not present)'
+        return
+    }
+    # Unlike gates 35/36/39/40/42's mingw g++/gcc, db_probe needs the SAME
+    # MSVC + vcpkg-OpenSSL toolchain the real MCP server binary (gate 37)
+    # is built with: mcp/src/logging.cpp pulls in <openssl/evp.h> for its
+    # redaction hash, and that dependency is only resolved against the
+    # vcpkg x64-windows-static triplet on this platform -- mingw's own
+    # object/ABI format cannot link against those .lib files. The VS +
+    # OpenSSL + SQLITE_DIR resolution below is copied from mcp\scripts\
+    # windows\build.bat's own (not refactored into a shared helper,
+    # since that script builds a fixed file glob, not a probe-specific
+    # source list).
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    $vsPath = $null
+    if (Test-Path -LiteralPath $vswhere) {
+        $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+    }
+    if (-not $vsPath) { $vsPath = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools' }
+    $vcvars64 = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+    if (-not (Test-Path -LiteralPath $vcvars64)) {
+        Skip '41 db_probe (no Visual Studio 2022 VC tools found -- see gate 37''s own toolchain note)'
+        return
+    }
+    $vcpkgRoot = $env:VCPKG_ROOT
+    $opensslDir = if ($vcpkgRoot) { Join-Path $vcpkgRoot 'installed\x64-windows-static' } else { $null }
+    if (-not $opensslDir -or -not (Test-Path -LiteralPath (Join-Path $opensslDir 'include\openssl\evp.h'))) {
+        $candidate = Join-Path $script:Here '..\vcpkg\installed\x64-windows-static'
+        if (Test-Path -LiteralPath (Join-Path $candidate 'include\openssl\evp.h')) { $opensslDir = $candidate }
+    }
+    if (-not $opensslDir -or -not (Test-Path -LiteralPath (Join-Path $opensslDir 'include\openssl\evp.h'))) {
+        Skip '41 db_probe (OpenSSL for MSVC not found -- install via "vcpkg install openssl:x64-windows-static" and set VCPKG_ROOT)'
+        return
+    }
+    $sqliteDir = Resolve-SqliteDir
+    if (-not (Test-Path -LiteralPath (Join-Path $sqliteDir 'sqlite3.c'))) {
+        Skip "41 db_probe (vendored sqlite3 amalgamation not found at $sqliteDir)"
+        return
+    }
+
+    $outDir = $script:PlugDir
+    $buildLog = Join-Path $script:PlugDir 'db_probe_build.log'
+    $bin = Join-Path $outDir 'db_probe.exe'
+    $boot = Join-Path $script:BTROOT 'fractalsql_bt_db_probe_cmd.bat'
+    $mcpDir = Join-Path $script:Here 'mcp'
+    $lines = @(
+        '@echo off',
+        "call `"$vcvars64`" >nul 2>&1",
+        "cl.exe /nologo /std:c++17 /utf-8 /EHsc /MT /O1 /Zi /DFSQL_MCP_VERSION=`"\`"2.0.8\`"`" ^",
+        "  /I `"$mcpDir\vendor`" /I `"$mcpDir\src`" /I `"$sqliteDir`" /I `"$opensslDir\include`" ^",
+        "  `"$mcpDir\tests\db_probe.cpp`" `"$mcpDir\src\errors.cpp`" `"$mcpDir\src\logging.cpp`" `"$sqliteDir\sqlite3.c`" ^",
+        "  /Fo`"$outDir\\`" /Fe`"$bin`" ^",
+        "  /link /LIBPATH:`"$opensslDir\lib`" libssl.lib libcrypto.lib ws2_32.lib advapi32.lib user32.lib crypt32.lib",
+        'exit /b %ERRORLEVEL%'
+    )
+    [IO.File]::WriteAllLines($boot, $lines)
+    & cmd /c "call $boot" 1>$buildLog 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $bin)) {
+        Fail "41 db_probe: probe failed to build/link (see $buildLog)"
+        return
+    }
+    $extForAbs = $script:ExtAbs
+    $out = & $bin $extForAbs 2>&1
+    $rc = $LASTEXITCODE
+    if ($rc -eq 0) {
+        Pass '41 db_probe: mcp/src/db.h prepare/bind/step-failure, version-skew-warning, bootstrap-failure and classifySqliteError branches (see driver OK lines above)'
+    }
+    else {
+        Fail "41 db_probe: see driver output above ($out)"
+    }
+}
+
+function Gate-42-ConcurrencyProbe {
+    if (-not (Test-Path -LiteralPath (Join-Path $script:Here 'mcp\tests\concurrency_probe.cpp'))) {
+        Skip '42 concurrency_probe (mcp/ test not present)'
+        return
+    }
+    if (-not $script:Cxx) {
+        Skip '42 concurrency_probe (no g++ on PATH)'
+        return
+    }
+    $obj = Join-Path $script:PlugDir '_concurrency_probe.o'
+    $buildLog = Join-Path $script:PlugDir 'concurrency_probe_build.log'
+    Push-Location (Join-Path $script:Here 'mcp')
+    try {
+        & $script:Cxx -std=c++17 -O1 -g -pthread -Ivendor -Isrc -c 'tests/concurrency_probe.cpp' -o $obj 1>$buildLog 2>&1
+        $rc1 = $LASTEXITCODE
+    }
+    finally { Pop-Location }
+    if ($rc1 -ne 0 -or -not (Test-Path -LiteralPath $obj)) {
+        Fail "42 concurrency_probe: probe failed to build (see $buildLog)"
+        return
+    }
+    $bin = Join-Path $script:PlugDir 'concurrency_probe.exe'
+    $linkLog = Join-Path $script:PlugDir 'concurrency_probe_link.log'
+    & $script:Cxx -pthread $obj -o $bin 1>$linkLog 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Fail "42 concurrency_probe: probe failed to link (see $linkLog)"
+        return
+    }
+    $out = & $bin 2>&1
+    $rc = $LASTEXITCODE
+    if ($rc -eq 0) {
+        Pass '42 concurrency_probe: mcp/src/concurrency.h per-client-limit, global-timeout and Token-release branches (see driver OK lines above)'
+    }
+    else {
+        Fail "42 concurrency_probe: see driver output above ($out)"
+    }
+}
+
 # ======================================================================
 # Runner
 # ======================================================================
@@ -3327,8 +3641,10 @@ function Gate-Title { param([string]$G)
         '29' { 'domain_agents' }     '30' { 'feature_store' }
         '31' { 'ledger_chain' }
         '32' { 'enterprise_signature_real' }
-        '37' { 'mcp_smoke' }
-        '38' { 'mcp_https' }
+        '35' { 'ed25519' }           '36' { 'extract_population' }
+        '37' { 'mcp_smoke' }         '38' { 'mcp_https' }
+        '39' { 'extract_parse' }     '40' { 'vectors_probe' }
+        '41' { 'db_probe' }          '42' { 'concurrency_probe' }
     }
 }
 
@@ -3351,8 +3667,10 @@ function Invoke-Gate { param([string]$G)
         '29' { Gate-29-DomainAgents }       '30' { Gate-30-FeatureStore }
         '31' { Gate-31-LedgerChain }
         '32' { Gate-32-EnterpriseSignatureReal }
-        '37' { Gate-37-McpSmoke }
-        '38' { Gate-38-McpHttps }
+        '35' { Gate-35-Ed25519 }                '36' { Gate-36-ExtractPopulation }
+        '37' { Gate-37-McpSmoke }                '38' { Gate-38-McpHttps }
+        '39' { Gate-39-ExtractParse }             '40' { Gate-40-VectorsProbe }
+        '41' { Gate-41-DbProbe }                  '42' { Gate-42-ConcurrencyProbe }
     }
 }
 

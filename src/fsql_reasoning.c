@@ -102,7 +102,7 @@ SQLITE_EXTENSION_INIT3
 #include <string.h>
 
 #ifdef _WIN32
-#include <windows.h>
+#include <Windows.h>
 #endif
 
 #include "fsql_sqlite_internal.h"
@@ -496,7 +496,12 @@ int fsql_reasoning_ensure_attached(FsqlState *st, int tier,
 int fsql_reasoning_generate(FsqlState *st, int tier, const char *query,
                             const char *context_json,
                             char **out_resp, char *err, size_t err_cap) {
-    if (out_resp) *out_resp = NULL;
+    if (!out_resp) {
+        set_err(err, err_cap,
+                "fractalsql: reasoning output pointer must not be NULL");
+        return -1;
+    }
+    *out_resp = NULL;
 
     if (!st || !st->ctx) {
         set_err(err, err_cap, "fractalsql: not initialized");

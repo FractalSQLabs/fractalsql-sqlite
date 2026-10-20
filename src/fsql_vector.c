@@ -11,7 +11,6 @@
  */
 
 #include <sqlite3ext.h>
-SQLITE_EXTENSION_INIT3
 
 #include <math.h>
 #include <stdarg.h>
@@ -20,6 +19,8 @@ SQLITE_EXTENSION_INIT3
 #include <string.h>
 
 #include "fsql_vector.h"
+
+SQLITE_EXTENSION_INIT3
 
 /* snprintf's return value is how many bytes WOULD have been written given
  * enough room, not how many actually were -- using it to advance a cursor
@@ -229,7 +230,10 @@ static void fv_binary_real_fn(sqlite3_context *ctx, int argc,
         sqlite3_value_type(argv[1]) == SQLITE_NULL) {
         sqlite3_result_null(ctx); return;
     }
-    float *pa = NULL, *pb = NULL; int da = 0, db = 0;
+    float *pa = NULL;
+    float *pb = NULL;
+    int da = 0;
+    int db = 0;
     int drc = decode_pair(argv[0], argv[1], &pa, &da, &pb, &db);
     if (drc == -2) {
         sqlite3_result_error(ctx, "fractalsql: vector dim mismatch", -1);
@@ -272,7 +276,10 @@ static void fv_binary_vec_fn(sqlite3_context *ctx, int argc,
         sqlite3_value_type(argv[1]) == SQLITE_NULL) {
         sqlite3_result_null(ctx); return;
     }
-    float *pa = NULL, *pb = NULL; int da = 0, db = 0;
+    float *pa = NULL;
+    float *pb = NULL;
+    int da = 0;
+    int db = 0;
     int drc = decode_pair(argv[0], argv[1], &pa, &da, &pb, &db);
     if (drc == -2) {
         sqlite3_result_error(ctx, "fractalsql: vector dim mismatch", -1);
@@ -375,7 +382,10 @@ static void fv_lp_distance_fn(sqlite3_context *ctx, int argc,
         sqlite3_value_type(argv[2]) == SQLITE_NULL) {
         sqlite3_result_null(ctx); return;
     }
-    float *pa = NULL, *pb = NULL; int da = 0, db = 0;
+    float *pa = NULL;
+    float *pb = NULL;
+    int da = 0;
+    int db = 0;
     int drc = decode_pair(argv[0], argv[1], &pa, &da, &pb, &db);
     if (drc == -2) {
         sqlite3_result_error(ctx, "fractalsql: vector dim mismatch", -1);
@@ -524,11 +534,11 @@ int fsql_vector_register(sqlite3 *db, FsqlState *st) {
     int rc;
 
     struct { const char *name; int narg; void *fn; intptr_t tag; } scalars[] = {
-        { "fractal_vector_l2_distance",           2, (void *)fv_binary_real_fn, 1 },
-        { "fractal_vector_l2_squared",            2, (void *)fv_binary_real_fn, 2 },
-        { "fractal_vector_cosine_distance",       2, (void *)fv_binary_real_fn, 3 },
-        { "fractal_vector_cosine_similarity",     2, (void *)fv_binary_real_fn, 4 },
-        { "fractal_vector_negative_inner_product",2, (void *)fv_binary_real_fn, 5 },
+        { "fractal_vector_l2_distance",           2, (void *)&fv_binary_real_fn, 1 },
+        { "fractal_vector_l2_squared",            2, (void *)&fv_binary_real_fn, 2 },
+        { "fractal_vector_cosine_distance",       2, (void *)&fv_binary_real_fn, 3 },
+        { "fractal_vector_cosine_similarity",     2, (void *)&fv_binary_real_fn, 4 },
+        { "fractal_vector_negative_inner_product",2, (void *)&fv_binary_real_fn, 5 },
     };
     for (size_t i = 0; i < sizeof(scalars)/sizeof(scalars[0]); i++) {
         rc = sqlite3_create_function_v2(db, scalars[i].name, scalars[i].narg,
@@ -540,8 +550,8 @@ int fsql_vector_register(sqlite3 *db, FsqlState *st) {
     }
 
     struct { const char *name; int narg; void *fn; intptr_t tag; } vecs[] = {
-        { "fractal_vector_add",  2, (void *)fv_binary_vec_fn, 1 },
-        { "fractal_vector_sub",  2, (void *)fv_binary_vec_fn, 2 },
+        { "fractal_vector_add",  2, (void *)&fv_binary_vec_fn, 1 },
+        { "fractal_vector_sub",  2, (void *)&fv_binary_vec_fn, 2 },
     };
     for (size_t i = 0; i < sizeof(vecs)/sizeof(vecs[0]); i++) {
         rc = sqlite3_create_function_v2(db, vecs[i].name, vecs[i].narg,
@@ -553,17 +563,17 @@ int fsql_vector_register(sqlite3 *db, FsqlState *st) {
     }
 
     struct { const char *name; int narg; void *fn; } plain[] = {
-        { "fractal_vector",            1, (void *)fv_construct_fn  },
-        { "fractal_vector_from_text",  1, (void *)fv_from_text_fn  },
-        { "fractal_vector_to_json",    1, (void *)fv_to_json_fn    },
-        { "fractal_vector_dims",       1, (void *)fv_dims_fn       },
-        { "fractal_vector_scale",      2, (void *)fv_scale_fn      },
-        { "fractal_vector_norm",       1, (void *)fv_norm_fn       },
-        { "fractal_vector_normalize",  1, (void *)fv_normalize_fn  },
-        { "fractal_vector_lp_distance",      3, (void *)fv_lp_distance_fn     },
-        { "fractal_vector_quantize_int8",    1, (void *)fv_quantize_int8_fn   },
-        { "fractal_vector_quantize_binary",  1, (void *)fv_quantize_binary_fn },
-        { "fractal_vector_hamming_distance", 2, (void *)fv_hamming_distance_fn},
+        { "fractal_vector",            1, (void *)&fv_construct_fn  },
+        { "fractal_vector_from_text",  1, (void *)&fv_from_text_fn  },
+        { "fractal_vector_to_json",    1, (void *)&fv_to_json_fn    },
+        { "fractal_vector_dims",       1, (void *)&fv_dims_fn       },
+        { "fractal_vector_scale",      2, (void *)&fv_scale_fn      },
+        { "fractal_vector_norm",       1, (void *)&fv_norm_fn       },
+        { "fractal_vector_normalize",  1, (void *)&fv_normalize_fn  },
+        { "fractal_vector_lp_distance",      3, (void *)&fv_lp_distance_fn     },
+        { "fractal_vector_quantize_int8",    1, (void *)&fv_quantize_int8_fn   },
+        { "fractal_vector_quantize_binary",  1, (void *)&fv_quantize_binary_fn },
+        { "fractal_vector_hamming_distance", 2, (void *)&fv_hamming_distance_fn},
     };
     for (size_t i = 0; i < sizeof(plain)/sizeof(plain[0]); i++) {
         rc = sqlite3_create_function_v2(db, plain[i].name, plain[i].narg,

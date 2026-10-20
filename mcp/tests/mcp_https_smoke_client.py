@@ -127,6 +127,43 @@ def main() -> int:
     check("--https with an unloadable cert file exits nonzero (TLS init "
           "failure, not a hang or a crash)", r.returncode != 0)
 
+    # 1c. fail-fast: a valid cert paired with a KEY file that isn't a real
+    # key at all (isolates SSL_CTX_use_PrivateKey_file's own failure from
+    # 1b's cert-load failure, a distinct code path/message in
+    # TlsServerContext::init).
+    bad_key = os.path.join(cwd, "mcp_https_garbage_key.pem")
+    with open(bad_key, "w", encoding="utf-8") as fh:
+        fh.write("-----BEGIN PRIVATE KEY-----\nnot a real key\n-----END PRIVATE KEY-----\n")
+    r = cli_run(mcp_exe, cwd, ["--https", str(port), "--tls-cert", cert,
+                              "--tls-key", bad_key], dict(common_env))
+    check("--https with a cert that loads but a key file that doesn't "
+          "parse exits nonzero", r.returncode != 0)
+
+    # 1d. fail-fast: a valid cert paired with a valid key that just
+    # doesn't belong to it (SSL_CTX_check_private_key's mismatch branch,
+    # distinct from both 1b and 1c -- both load fine individually, they
+    # just don't match each other). A second throwaway self-signed pair,
+    # same minimal-config recipe build_test.sh's gate uses for the first.
+    cert2 = os.path.join(cwd, "mcp_https_cert2.pem")
+    key2 = os.path.join(cwd, "mcp_https_key2.pem")
+    cnf2 = os.path.join(cwd, "mcp_https_openssl2.cnf")
+    with open(cnf2, "w", encoding="utf-8") as fh:
+        fh.write("[req]\ndistinguished_name = dn\nprompt = no\n[dn]\n")
+    genrc = subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+         "-subj", "/CN=127.0.0.1", "-config", cnf2, "-keyout", key2, "-out", cert2],
+        capture_output=True, text=True)
+    if genrc.returncode == 0:
+        r = cli_run(mcp_exe, cwd, ["--https", str(port), "--tls-cert", cert,
+                                  "--tls-key", key2], dict(common_env))
+        check("--https with a valid cert and a valid but NON-MATCHING key "
+              "exits nonzero (cert/key mismatch, not a load failure)",
+              r.returncode != 0)
+    else:
+        check("--https with a valid cert and a valid but NON-MATCHING key "
+              "exits nonzero (skipped: couldn't generate the second "
+              "throwaway cert/key pair)", True)
+
     # 2+3. the real server: TLS-only listening, auth still enforced, and a
     # full authenticated JSON-RPC round trip over the direct-TLS transport.
     log_path = os.path.join(cwd, "mcp_https_server.log")
