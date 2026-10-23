@@ -359,6 +359,10 @@ namespace fsqlmcp
         t.back().description = std::string( "MCTS-style exploration of up to max_branches non-overlapping strategy "
             "trajectories, seeded from the vector nearest a state LABEL. Returns branches of {branch_id, "
             "plan_trajectory, confidence_score}." );
+        // Open-world: embeds the caller's state label through the configured
+        // embedding provider. Not secretHint: only a derived vector leaves,
+        // no prompt text goes to a chat model.
+        t.back().openWorldHint = true;
 
         t.push_back( ToolSpec{ "fractal_agent_trajectory_predict", "Agency", ToolClass::Expensive,
             { Str("table_name",true,"Table with a single-column primary key."), Str("vector_col",true,"Embedding column."),
@@ -372,11 +376,13 @@ namespace fsqlmcp
             "against a table's own history. Returns {predicted_state_vector, projected_drift_delta, "
             "risk_threshold_exceeded}." );
 
+        // Read-only: pure computation over the caller's state_log; it writes
+        // no table and calls no provider.
         t.push_back( ToolSpec{ "fractal_agent_detect_loop", "Agency", ToolClass::Cheap,
             { Str("agent_id",true,"Agent identifier."), Vec("state_log",true,"Row-major n_states*dim doubles."),
               Int("dim",true,"State dimension."), Int("n_bits",false,"SimHash bits.",64),
               Num("seed",false,"SimHash seed.",42.0), Int("hamming_threshold",false,"Cycle-match Hamming tolerance.",0) },
-            std::nullopt, false, false,
+            std::nullopt, false, true,
             [&db]( const Json& a, CallCtx& ) { return callAgent( db, "SELECT fractal_agent_detect_loop(?,?,?,?,?,?)",
                 { a.at("agent_id").get<std::string>(), vectors::vectorParamToText( a.at("state_log"), "state_log" ),
                   a.at("dim").get<std::int64_t>(), a.value( "n_bits", 64 ),

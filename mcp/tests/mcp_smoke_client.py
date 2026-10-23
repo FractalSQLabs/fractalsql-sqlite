@@ -1093,7 +1093,7 @@ def run_http_and_cli_phase() -> None:
                               input="")
     r = cli_run(["--version"])
     check("CLI: --version prints the release banner",
-          r.returncode == 0 and "2.0.8" in r.stdout)
+          r.returncode == 0 and "2.0.10" in r.stdout)
     r = cli_run(["--help"])
     check("CLI: --help prints the flag table",
           r.returncode == 0 and "--tool" in r.stdout)

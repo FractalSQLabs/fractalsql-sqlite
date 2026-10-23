@@ -872,8 +872,8 @@ function Gate-01-Build {
 
 function Gate-02-Smoke {
     $ver = Sqlq 'SELECT fractalsql_version();'
-    if ($ver -eq '2.0.8') { Pass "02 smoke: version=$ver" }
-    else { Fail "02 smoke: version='$ver' (want 2.0.8)" }
+    if ($ver -eq '2.0.10') { Pass "02 smoke: version=$ver" }
+    else { Fail "02 smoke: version='$ver' (want 2.0.10)" }
     # fractal_search convergence: self-distance ~0
     $d = Sqlq "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');"
     if ($d -eq '0.0' -or (PyAbsLt1e6 $d)) { Pass "02 smoke: fractal_search self-distance=$d" }
@@ -3556,7 +3556,7 @@ function Gate-41-DbProbe {
     $lines = @(
         '@echo off',
         "call `"$vcvars64`" >nul 2>&1",
-        "cl.exe /nologo /std:c++17 /utf-8 /EHsc /MT /O1 /Zi /DFSQL_MCP_VERSION=`"\`"2.0.8\`"`" ^",
+        "cl.exe /nologo /std:c++17 /utf-8 /EHsc /MT /O1 /Zi /DFSQL_MCP_VERSION=`"\`"2.0.10\`"`" ^",
         "  /I `"$mcpDir\vendor`" /I `"$mcpDir\src`" /I `"$sqliteDir`" /I `"$opensslDir\include`" ^",
         "  `"$mcpDir\tests\db_probe.cpp`" `"$mcpDir\src\errors.cpp`" `"$mcpDir\src\logging.cpp`" `"$sqliteDir\sqlite3.c`" ^",
         "  /Fo`"$outDir\\`" /Fe`"$bin`" ^",

@@ -110,7 +110,7 @@ Sanity check without a database: `fractalsql-sqlite-mcp --version` and
 
 | Variable | Required | What it is |
 | --- | --- | --- |
-| `SQLITE_DB_PATH` | yes | The database file (or `:memory:`) the MCP server's connection opens. **This file is your access-control boundary**; see [Access & least privilege](#access--least-privilege). |
+| `SQLITE_DB_PATH` | yes | The database file (or `:memory:`) the MCP server's connection opens. **This file is your access-control boundary**; see [Security](#security). |
 | `FRACTALSQL_EXTENSION_PATH` | yes | The `fractalsql.so` / `.dylib` / `.dll` to load in-process. |
 | `FRACTALSQL_BOOTSTRAP_SQL` | recommended | The per-connection `fractalsql_set(...)` snippet the server applies at session start: the same `load_fractalsql.sql` text [easy_install](getting-started.md) generates (`.load` lines in it are honored-but-skipped; the extension loads via the driver first). |
 | `FSQL_MCP_HTTP_HOST` / `FSQL_MCP_HTTP_PORT` / `FSQL_MCP_HTTP_PATH` | no | HTTP transport bind address (default `127.0.0.1:8765`, path `/mcp`); transport is chosen by flag (`--http`/`--https`), not env. Default posture is TLS terminating **in front** (reverse proxy/LB); see [Security](#security). |
@@ -122,7 +122,7 @@ Sanity check without a database: `fractalsql-sqlite-mcp --version` and
 | `FSQL_MCP_MAX_QUEUE_WAIT_MS` | no | How long a request beyond a cap waits for a slot before a "server busy" error (default 900000). |
 | `FSQL_MCP_SHUTDOWN_DRAIN_MS` | no | Graceful-shutdown drain window (default 5000). |
 | `FSQL_MCP_STRICT_SCHEMA_HASH` | no | `true` turns a tool-surface schema-hash mismatch into a hard start failure. |
-| `FSQL_MCP_READ_ONLY` | no | Deployment-wide kill switch: the server refuses every non-read-only tool call with a clear error (default off). |
+| `FSQL_MCP_READ_ONLY` | no | Deployment-wide kill switch: the server refuses every `destructiveHint` tool call with a clear error, before the call reaches the engine (default off). It keys on `destructiveHint`, not on `readOnlyHint` — the seven destructive tools (ledger write/reset, `fractal_vectorizer_drop`, the two config tools), not every write. |
 | `FSQL_MCP_TOOL_WHITELIST` / `FSQL_MCP_ENABLED_CATEGORIES` | no | Runtime narrowing of the catalog: a comma-separated tool list or category list (`discovery,cognition,agency,analytics,enterprise,vectorizer,admin`). The demo container uses `FSQL_MCP_TOOL_WHITELIST`'s flag form, `--tool`. |
 | `FSQL_MCP_LOG_LEVEL` | no | `info` (default), `verbose` (redacted argument bodies in the per-call log), or `debug`. |
 | `FSQL_MCP_AGENT_PARTIAL` | no | `on` (default) opts every session into the engine's `agent_partial_reasoning_fail` mode: partial-result honesty. `off` keeps the engine's documented raise behavior for reasoning-endpoint failures inside agent calls. |
@@ -467,14 +467,39 @@ exception reaches a log line.
 - Enterprise write-path tools and destructive vectorizer operations
   carry `destructiveHint` annotations; reasoning-config changes are
   similarly flagged and always logged with old + new values.
+- **"Reaches outside the database" is annotated per tool.** `openWorldHint`
+  marks the tools whose call actually crosses the server boundary — a
+  chat-LLM or embedding-provider dispatch (`fractal_reason`,
+  `fractal_embed`, `fractal_text_to_sql`, the reasoning agents, and
+  `fractal_agent_plan_explore`, which embeds the caller's state label
+  through the configured embedding provider before exploring the strategy
+  table). It is set PER TOOL, not per tier: the closed-world engines
+  (`fractal_agent_recall_hybrid`, `fractal_agent_recommend_diverse`,
+  `fractal_agent_feedback_audit`, `fractal_agent_trajectory_predict`,
+  `fractal_agent_detect_loop`, `fractal_schema_context`) do NOT carry it,
+  because they only read and compute inside this database. A client that
+  gates "this may leave the world" should not have to ask a human about a
+  local vector recall.
 - One boundary the MCP layer cannot widen: which database file the
   server is opened against is fixed at process launch, an operator
   decision, never something an MCP client or LLM can change mid-session.
 - **Deployment-wide read-only kill switch:** setting `FSQL_MCP_READ_ONLY=true`
-  makes the server refuse every non-read-only tool call with a clear
-  in-band error: a fast lever for incident response and scheduled
-  export/reporting windows that doesn't require re-permissioning the
-  database file.
+  makes the server refuse every `destructiveHint` tool call with a clear
+  in-band error, before the call reaches the engine: a fast lever for
+  incident response and scheduled export/reporting windows that doesn't
+  require re-permissioning the database file. It keys on
+  `destructiveHint`, not on `readOnlyHint`, so it stops the seven
+  destructive tools (the four ledger write/reset tools,
+  `fractal_vectorizer_drop`, and the two config tools) — NOT every
+  write: `fractal_store_morphology`, the four `fractal_vectorizer_*`
+  lifecycle tools, and `fractal_audit_log` also write to the database,
+  do not carry `destructiveHint`, and stay callable under the switch.
+  (`fractal_audit_log` is enterprise-gated, so on Community it returns
+  the clean "enterprise tier not loaded" error and writes nothing; on an
+  enterprise install it appends audit rows — including the ones the
+  agent engines emit.) For a genuine no-write posture, scope the DB file
+  itself — on SQLite that file is the access-control boundary
+  (see [Security](#security) below).
 - **Data, never instructions:** tool results (LLM text and especially
   recalled/retrieved row content) are DATA. A row embedded from
   user-submitted text (a ticket, a review) can carry prompt-injection
