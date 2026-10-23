@@ -1,14 +1,14 @@
 fractal_agent_allocate destructive=0 readOnly=0 idempotent=0 openWorld=1 secret=1
 fractal_agent_anomaly_triage destructive=0 readOnly=0 idempotent=0 openWorld=1 secret=1
 fractal_agent_data_analyst destructive=0 readOnly=0 idempotent=0 openWorld=1 secret=1
-fractal_agent_detect_loop destructive=0 readOnly=0 idempotent=0 openWorld=0 secret=0
+fractal_agent_detect_loop destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
 fractal_agent_detour_classify destructive=0 readOnly=0 idempotent=0 openWorld=1 secret=1
 fractal_agent_diverse_portfolios destructive=0 readOnly=0 idempotent=0 openWorld=1 secret=1
 fractal_agent_feedback_audit destructive=0 readOnly=0 idempotent=0 openWorld=0 secret=0
 fractal_agent_network_coverage_alert destructive=0 readOnly=0 idempotent=0 openWorld=1 secret=1
 fractal_agent_outlier_intercept destructive=0 readOnly=0 idempotent=0 openWorld=1 secret=1
 fractal_agent_patient_deterioration_triage destructive=0 readOnly=0 idempotent=0 openWorld=1 secret=1
-fractal_agent_plan_explore destructive=0 readOnly=0 idempotent=0 openWorld=0 secret=0
+fractal_agent_plan_explore destructive=0 readOnly=0 idempotent=0 openWorld=1 secret=0
 fractal_agent_rebalance_sibling destructive=0 readOnly=0 idempotent=0 openWorld=1 secret=1
 fractal_agent_recall_hybrid destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
 fractal_agent_recommend_diverse destructive=0 readOnly=0 idempotent=0 openWorld=0 secret=0

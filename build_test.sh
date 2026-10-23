@@ -1082,9 +1082,9 @@ gate_01_build() {
 
 gate_02_smoke() {
   local ver; ver=$(sqlq "SELECT fractalsql_version();")
-  [[ "$ver" = "2.0.8" ]] \
+  [[ "$ver" = "2.0.10" ]] \
     && pass "02 smoke: version=$ver" \
-    || fail "02 smoke: version='$ver' (want 2.0.8)"
+    || fail "02 smoke: version='$ver' (want 2.0.10)"
   # fractal_search convergence: self-distance ~0
   local d; d=$(sqlq "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');")
   if [[ "$d" = "0.0" ]] || python_abs_lt_1e6 "$d"; then
@@ -7519,15 +7519,15 @@ gate_41_db_probe() {
   rm -f "$mainobj" "$errobj" "$logobj" "$sqliteobj"
   ( cd "$HERE/mcp" && \
     env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g \
-        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.8\"" \
+        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.10\"" \
         -I../deps/sqlite -Ivendor -Isrc ${ossl_cflags[@]+"${ossl_cflags[@]}"} \
         -c tests/db_probe.cpp -o "$mainobj" \
      && env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g \
-        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.8\"" \
+        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.10\"" \
         -I../deps/sqlite -Ivendor -Isrc ${ossl_cflags[@]+"${ossl_cflags[@]}"} \
         -c src/errors.cpp -o "$errobj" \
      && env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g \
-        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.8\"" \
+        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.10\"" \
         -I../deps/sqlite -Ivendor -Isrc ${ossl_cflags[@]+"${ossl_cflags[@]}"} \
         -c src/logging.cpp -o "$logobj" \
      && env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$CC" -std=c99 -O1 -g -fPIC \

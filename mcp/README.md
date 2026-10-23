@@ -98,7 +98,11 @@ deploy:
   share a connection.
 - `auto_execute` defaults to false on the SQL-writing agents and requires an
   explicit client-set parameter to enable. `FSQL_MCP_READ_ONLY=true` is the
-  deployment-wide stop switch: every non-read-only call is refused outright.
+  deployment-wide stop switch: every `destructiveHint` tool is refused
+  outright, before the call reaches the engine. It keys on
+  `destructiveHint`, so it stops the seven destructive tools (ledger
+  write/reset, `fractal_vectorizer_drop`, the two config tools) — not
+  every write; the real no-write boundary is scoping the DB file.
 
 ## Regenerating the integrity locks
 
