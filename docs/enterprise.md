@@ -79,6 +79,23 @@ preserving from that shape, so it starts a fresh chain.
 | `fractal_ledger_shadow_count()` | Shadow-side entry count. |
 | `fractal_audit_unpack(blob)` | Decode a persisted QTL blob into its audit JSON (TEXT). |
 
+**Locking the destructive functions.** `fractal_ledger_flush()`,
+`fractal_ledger_compact()`, `fractal_ledger_reset_soft()` and
+`fractal_ledger_reset_hard()` are registered `SQLITE_DIRECTONLY`: SQLite itself
+refuses to run them from a trigger, a view, a `CHECK` constraint or a generated
+column, so a schema cannot make an ordinary statement wipe the ledger (a
+top-level `SELECT` still works). `fractal_lock_destructive()` goes further on one
+connection: it is a **one-way latch** (returns `'locked'`), after which those four
+functions refuse with `destructive ledger operations are locked on this
+connection`, whether or not an enterprise core is loaded. Nothing in SQL clears
+it, so SQL that runs later on the connection, including SQL a reasoning agent
+generated, cannot undo it; closing the connection does. It is per connection, not
+per database file. The MCP server calls it on every connection it opens when
+`FSQL_MCP_READ_ONLY=true`, on top of its own refusal of the `destructiveHint`
+tools. The other destructive MCP tools (`fractal_vectorizer_drop`,
+`fractalsql_set_config`, `fractalsql_configure_reasoning`) are covered by the
+server's refusal only.
+
 **`fractal_audit_log(entry_type, payload)`**: the general decision-audit
 record. **Enterprise-gated**, same as the eight ledger-management functions
 above — returns `fractalsql: enterprise tier not loaded` without

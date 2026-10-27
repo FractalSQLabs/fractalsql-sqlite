@@ -60,7 +60,7 @@ Confirm the extension is alive and which edition it is:
 ```bash
 docker compose exec demo sqlite3 fractalsql_demo.sqlite \
   -init demo_init.sql "SELECT fractalsql_edition(), fractalsql_version();"
-# expect: Community|2.0.10
+# expect: Community|2.0.11
 ```
 
 Run any demo (re-runnable; each recreates its own fixture tables):
@@ -196,7 +196,7 @@ or drop the `--tool` list to see the full catalog); optional, not
 required.
 
 The demo server reuses the demo compose project's own credentials and
-posture, *not* a production configuration. For the full 81-tool
+posture, *not* a production configuration. For the full 82-tool
 catalog, a real client config, and the production server, see
 **[docs/mcp-plugin.md](mcp-plugin.md)**.
 

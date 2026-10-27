@@ -62,7 +62,7 @@
 
 /* Extension version. Single source of truth for fractalsql_version()
  * and the smoke gate; bumped in lockstep with packaging scripts. */
-#define FSQL_SQLITE_VERSION_STR   "2.0.10"
+#define FSQL_SQLITE_VERSION_STR   "2.0.11"
 #define FSQL_SQLITE_EDITION_STR   "Community"
 
 /* SFS tuning: same values the pre-2.x path used. */
@@ -275,6 +275,14 @@ typedef struct FsqlState {
     void        *ent_handle;         /* dlopen/LoadLibrary handle      */
     int          ent_attempted;      /* sticky single-attempt flag     */
     int          ent_loaded;         /* 1 = enterprise surface live    */
+
+    /* One-way latch set by fractal_lock_destructive() (fsql_ledger.c).
+     * Once set, the destructive ledger functions (flush / compact /
+     * reset_soft / reset_hard) refuse on this connection; nothing clears
+     * it, so SQL run later on the connection (including SQL a reasoning
+     * agent generated) cannot undo it. The MCP server sets it on its own
+     * connections when FSQL_MCP_READ_ONLY=true. */
+    int          destructive_locked;
 
     /* Diffusion arena for fractal_search memoization (see the entry TU). */
     double       query[FSQL_ARENA_MAX_DIM];

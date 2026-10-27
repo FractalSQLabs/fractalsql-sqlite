@@ -237,7 +237,7 @@ if (-not (Test-Path -LiteralPath $script:BTROOT)) {
 $script:DEFAULT_GATES = @('01', '02', '03', '04', '05', '06', '07', '08', '09', '10',
                           '11', '12', '13', '14', '15', '16', '17', '18', '19', '20',
                           '22', '23', '24', '25', '26', '27', '28', '29', '30', '31',
-                          '32', '35', '36', '37', '38', '39', '40', '41', '42')
+                          '32', '35', '36', '37', '38', '39', '40', '41', '42', '43')
 $script:QUICK_GATES = @('01', '02')
 $script:FUZZ_GATES = @('21')
 
@@ -872,8 +872,8 @@ function Gate-01-Build {
 
 function Gate-02-Smoke {
     $ver = Sqlq 'SELECT fractalsql_version();'
-    if ($ver -eq '2.0.10') { Pass "02 smoke: version=$ver" }
-    else { Fail "02 smoke: version='$ver' (want 2.0.10)" }
+    if ($ver -eq '2.0.11') { Pass "02 smoke: version=$ver" }
+    else { Fail "02 smoke: version='$ver' (want 2.0.11)" }
     # fractal_search convergence: self-distance ~0
     $d = Sqlq "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');"
     if ($d -eq '0.0' -or (PyAbsLt1e6 $d)) { Pass "02 smoke: fractal_search self-distance=$d" }
@@ -2143,6 +2143,67 @@ print(','.join('%s,%s'%(i,i+1) for i in range(n-1)))" 2>$null)
         Pass '22 v2_functions: periodogram returns the peak lists'
     }
     else { Fail "22 v2_functions: periodogram: $r" }
+    # spectrogram_entropy: a period-4 tone (low entropy) vs an LCG noise
+    # series (high entropy), built in SQL so no data file is needed.
+    # Frame count = floor((128-32)/16)+1 = 7.
+    $seTone = '(WITH RECURSIVE g(t) AS (VALUES(0) UNION ALL SELECT t+1 FROM g WHERE t<127) SELECT group_concat(CASE t%4 WHEN 0 THEN 1 WHEN 2 THEN -1 ELSE 0 END) FROM (SELECT t FROM g ORDER BY t))'
+    $seNoise = '(WITH RECURSIVE g(t,x) AS (VALUES(0,12345) UNION ALL SELECT t+1,(x*1103515245+12345)%2147483648 FROM g WHERE t<127) SELECT group_concat((x/65536)%1000) FROM (SELECT t,x FROM g ORDER BY t))'
+    $r = Sqlq "SELECT json_array_length(fractal_spectrogram_entropy($seTone,32,16));"
+    if ($script:SqlqRc -eq 0 -and $r.Trim() -eq '7') {
+        Pass '22 v2_functions: spectrogram_entropy returns one value per frame'
+    }
+    else { Fail "22 v2_functions: spectrogram_entropy frame count: $r" }
+    $r = Sqlq "SELECT max(value) < 0.5 AND min(value) >= 0.0 FROM json_each(fractal_spectrogram_entropy($seTone,32,16));"
+    if ($script:SqlqRc -eq 0 -and $r.Trim() -eq '1') {
+        Pass '22 v2_functions: spectrogram_entropy reads a pure tone as ordered (< 0.5)'
+    }
+    else { Fail "22 v2_functions: spectrogram_entropy tone: $r" }
+    $r = Sqlq "SELECT avg(value) > 0.7 AND max(value) <= 1.0 FROM json_each(fractal_spectrogram_entropy($seNoise,32,32));"
+    if ($script:SqlqRc -eq 0 -and $r.Trim() -eq '1') {
+        Pass '22 v2_functions: spectrogram_entropy reads noise as disordered (> 0.7, <= 1)'
+    }
+    else { Fail "22 v2_functions: spectrogram_entropy noise: $r" }
+    $r = Sqlq "SELECT fractal_spectrogram_entropy('2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2',8,8);"
+    if ($script:SqlqRc -eq 0 -and $r.Trim() -eq '[0.0000000000,0.0000000000]') {
+        Pass '22 v2_functions: spectrogram_entropy reports a constant frame as 0.0, not NaN'
+    }
+    else { Fail "22 v2_functions: spectrogram_entropy constant frame: $r" }
+    $r = Sqlq "SELECT json_array_length(fractal_spectrogram_entropy($seTone,32,16,2));"
+    if ($script:SqlqRc -eq 0 -and $r.Trim() -eq '2') {
+        Pass '22 v2_functions: spectrogram_entropy honours max_frames'
+    }
+    else { Fail "22 v2_functions: spectrogram_entropy max_frames: $r" }
+    $r = Sqlq 'SELECT fractal_spectrogram_entropy(NULL);'
+    if ($script:SqlqRc -eq 0 -and $r.Trim() -eq '') {
+        Pass '22 v2_functions: spectrogram_entropy(NULL) is NULL'
+    }
+    else { Fail "22 v2_functions: spectrogram_entropy(NULL): $r" }
+    # Regime change: 64 tone samples then 64 noise samples -> the entropy
+    # series steps up, and change_point_detect localizes it from the bare
+    # array (the function's output feeds the next one directly).
+    $r = Sqlq "WITH RECURSIVE g(t,x) AS (VALUES(0,12345) UNION ALL SELECT t+1,(x*1103515245+12345)%2147483648 FROM g WHERE t<127),
+                  s(v) AS (SELECT group_concat(CASE WHEN t<64 THEN (CASE t%4 WHEN 0 THEN 1 WHEN 2 THEN -1 ELSE 0 END) ELSE (x/65536)%1000 END) FROM (SELECT t,x FROM g ORDER BY t))
+                SELECT fractal_change_point_detect(fractal_spectrogram_entropy(v,16,8),3,1.0) FROM s;"
+    if ($script:SqlqRc -eq 0 -and $r -match '"indices":\[[0-9]') {
+        Pass '22 v2_functions: spectrogram_entropy -> change_point_detect localizes a regime change'
+    }
+    else { Fail "22 v2_functions: spectrogram_entropy regime change: $r" }
+    foreach ($bad in @(
+            @("'$s32',4", 'window < 8'),
+            @("'$s32',600", 'window > 512'),
+            @("'$s32',16,0", 'hop < 1'),
+            @("'$s32',16,8,0", 'max_frames < 1'),
+            @("'$s32',16,8,5000", 'max_frames > 4096'),
+            @("'1,2,3'", 'series shorter than window'))) {
+        if (ExpectErr 'needs window in' "SELECT fractal_spectrogram_entropy($($bad[0]));") {
+            Pass "22 v2_functions: spectrogram_entropy rejects $($bad[1])"
+        }
+        else { Fail "22 v2_functions: spectrogram_entropy accepted $($bad[1])" }
+    }
+    if (ExpectErr 'malformed series' "SELECT fractal_spectrogram_entropy('bad!vec',16);") {
+        Pass '22 v2_functions: spectrogram_entropy rejects a malformed series'
+    }
+    else { Fail '22 v2_functions: spectrogram_entropy accepted a malformed series' }
     # TDA: an 8-point square ring at spacing 2 (threshold 2.5 admits the
     # 8 ring edges, excludes the 2.83 corner diagonals) -> E-V+C = 1.
     $r = Sqlq "SELECT fractal_tda_persistence_diagram(
@@ -2375,6 +2436,31 @@ function Gate-24-Enterprise {
         Pass '24 enterprise: audit_log rejects cleanly (dormant tier)'
     }
     else { Fail '24 enterprise: audit_log did not surface the dormant-tier error' }
+    # Engine-side guard behind the MCP server's FSQL_MCP_READ_ONLY switch. Both
+    # checks need no enterprise core: the latch is tested before the core is
+    # resolved, and DIRECTONLY is enforced by SQLite itself at prepare time.
+    # fractal_lock_destructive() is a one-way, per-connection latch (no unlock
+    # function exists); after it, the four destructive ledger functions refuse.
+    $lockBad = @()
+    foreach ($lf in 'fractal_ledger_flush', 'fractal_ledger_compact', 'fractal_ledger_reset_soft', 'fractal_ledger_reset_hard') {
+        if (-not (ExpectErr 'locked on this connection' 'SELECT fractal_lock_destructive();' "SELECT $lf();")) { $lockBad += $lf }
+    }
+    if ($lockBad.Count -eq 0) {
+        Pass '24 enterprise: fractal_lock_destructive() latches flush/compact/reset_soft/reset_hard on the connection'
+    }
+    else { Fail "24 enterprise: destructive ledger functions still ran after the latch: $($lockBad -join ', ')" }
+    # The destructive ledger functions are SQLITE_DIRECTONLY: a trigger or a
+    # view cannot make an ordinary statement call them.
+    # Reparsed from the schema (separate invocations): objects created and used
+    # in one session are never flagged, only ones loaded from sqlite_schema.
+    $null = Sqlq 'CREATE TABLE bt_do(a);' 'CREATE TRIGGER bt_do_tr AFTER INSERT ON bt_do BEGIN SELECT fractal_ledger_reset_hard(); END;' 'CREATE VIEW bt_do_v AS SELECT fractal_ledger_reset_hard() AS x;'
+    $doTrig = ExpectErr 'unsafe use of fractal_ledger_reset_hard' 'INSERT INTO bt_do VALUES (1);'
+    $doView = ExpectErr 'unsafe use of fractal_ledger_reset_hard' 'SELECT * FROM bt_do_v;'
+    $null = Sqlq 'DROP VIEW bt_do_v;' 'DROP TABLE bt_do;'
+    if ($doTrig -and $doView) {
+        Pass '24 enterprise: the destructive ledger functions are DIRECTONLY (refused from a trigger and a view)'
+    }
+    else { Fail '24 enterprise: a trigger or view reached a destructive ledger function' }
     # A bogus enterprise_lib must be an absolute path (the same set-time
     # path validation as the plugin keys: the native backslash form;
     # MSYS's argument conversion has no analog here), and the ledger call
@@ -2626,7 +2712,7 @@ function Gate-25-EnterpriseStress {
     # to begin with -- a hand-verified ctypes.WinDLL() load of the
     # correct windows-x86_64/*.dll path, by contrast, succeeds).
     $found = Get-ChildItem -Path 'include/windows-x86_64' `
-        -Filter '*fractalsql-enterprise-*.dll' -ErrorAction SilentlyContinue |
+        -Filter '*fractalsql-enterprise-sovereign-c.dll' -ErrorAction SilentlyContinue |
         Select-Object -First 1 -ExpandProperty FullName
     if (-not $found) {
         Skip '25 enterprise_stress (no enterprise core vendored in include/)'
@@ -3270,10 +3356,10 @@ function Gate-32-EnterpriseSignatureReal {
     # to begin with -- a hand-verified ctypes.WinDLL() load of the
     # correct windows-x86_64/*.dll path, by contrast, succeeds).
     $found = Get-ChildItem -Path 'include/windows-x86_64' `
-        -Filter '*fractalsql-enterprise-*.dll' -ErrorAction SilentlyContinue |
+        -Filter '*fractalsql-enterprise-sovereign-c.dll' -ErrorAction SilentlyContinue |
         Select-Object -First 1 -ExpandProperty FullName
     if (-not $found) {
-        Skip '32 enterprise_signature_real: skipped (community edition; no libfractalsql-enterprise-* in include/)'
+        Skip '32 enterprise_signature_real: skipped (community edition; no fractalsql-enterprise-sovereign-c.dll in include/)'
         return
     }
     $sigPath = "$found.sig"
@@ -3556,7 +3642,7 @@ function Gate-41-DbProbe {
     $lines = @(
         '@echo off',
         "call `"$vcvars64`" >nul 2>&1",
-        "cl.exe /nologo /std:c++17 /utf-8 /EHsc /MT /O1 /Zi /DFSQL_MCP_VERSION=`"\`"2.0.10\`"`" ^",
+        "cl.exe /nologo /std:c++17 /utf-8 /EHsc /MT /O1 /Zi /DFSQL_MCP_VERSION=`"\`"2.0.11\`"`" ^",
         "  /I `"$mcpDir\vendor`" /I `"$mcpDir\src`" /I `"$sqliteDir`" /I `"$opensslDir\include`" ^",
         "  `"$mcpDir\tests\db_probe.cpp`" `"$mcpDir\src\errors.cpp`" `"$mcpDir\src\logging.cpp`" `"$sqliteDir\sqlite3.c`" ^",
         "  /Fo`"$outDir\\`" /Fe`"$bin`" ^",
@@ -3645,6 +3731,161 @@ function Gate-Title { param([string]$G)
         '37' { 'mcp_smoke' }         '38' { 'mcp_https' }
         '39' { 'extract_parse' }     '40' { 'vectors_probe' }
         '41' { 'db_probe' }          '42' { 'concurrency_probe' }
+        '43' { 'kits' }
+    }
+}
+
+# Gate 43: the twenty-nine newer industry kits (demo/demo-vertical-*.sql).
+# Each kit is run end to end through a fresh in-memory connection with the
+# mock reasoning plugin configured, and must (a) exist, (b) raise no SQL
+# error beyond the one documented exception (the scenario-planning kit's
+# plan_explore call needs a real embedding endpoint), (c) print no NaN,
+# and (d) reproduce its headline result -- the fixtures are deterministic
+# (no random()), so the claim is checked against fixed numbers.
+function KitNum { param([string]$S)
+    $d = 0.0
+    if ([double]::TryParse($S, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$d)) { return $d }
+    return [double]::NaN
+}
+
+# KitShape: the 13 original kits print no HEADLINE line and seed random numbers, so only the SHAPE of
+# their output is pinned: the count of lines that are neither errors nor blank. A step that silently
+# returns no rows drops them. Callers require three quarters of what a clean run prints.
+function KitShape($lines) {
+    return @($lines | Where-Object { $_ -notmatch '^(Runtime error|Parse error|Error[: ]|Run Time:|\s*$)' }).Count
+}
+
+function Gate-43-Kits {
+    $demoDir = Join-Path $script:Here 'demo'
+    if (-not (Test-Path -LiteralPath $demoDir)) {
+        Skip '43 kits (demo/ not present)'
+        return
+    }
+    $tmp = Join-Path $script:PlugDir 'kits'
+    if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $kits = @('ev-battery-lifecycle', 'adas-safety-validation', 'v2x-warranty-triage',
+              'critical-inventory-routing', 'heavy-industry-predictive-maintenance',
+              'climatech-grid-balancing', 'hazmat-occupational-triage',
+              'scenario-planning-simulation', 'avionics-fault-prediction',
+              'satellite-constellation-coverage', 'telecom-account-anomaly-screening',
+              'telecom-traffic-routing', 'climatech-emissions-monitoring',
+              'climatech-risk-exposure', 'rf-spectrum-sensing',
+              'event-stream-anomaly-triage', 'outlier-interception-footprint',
+              'agentic-budget-reallocation', 'stalled-process-triage',
+              'intent-matching-discovery', 'agentic-next-action-ranking',
+              'document-risk-drift', 'coordinated-record-detection',
+              'sensor-telemetry-allocation', 'simulated-economy-drift',
+              'multi-series-replenishment', 'periodicity-portfolio-selection',
+              'agentic-recall-recommendation', 'spatial-footprint-portfolio-risk',
+              'agentic-customer-support', 'agentic-edge-swarm',
+              'agentic-fintech-mcts', 'agentic-ops-devops',
+              'biotech-genomics', 'cybersecurity-threat-detection',
+              'fleet-logistics', 'maritime-defense', 'medtech-clinical',
+              'quant-finance', 'recommendation-search', 'smart-cities-iot',
+              'sovereign-edge-ai')
+    foreach ($k in $kits) {
+        $kit = Join-Path $demoDir "demo-vertical-$k.sql"
+        if (-not (Test-Path -LiteralPath $kit)) { Fail "43 kits: demo-vertical-$k.sql is missing"; continue }
+        $kitLoad = (Resolve-Path -LiteralPath $kit).Path -replace '\\', '/'
+        # The shell's .load splits on whitespace and takes no quoting, and the checkout path
+        # here may contain spaces, so a path from $tmp back to the repo cannot be used. Load
+        # a copy that sits in $tmp itself instead.
+        $kitExt = Join-Path $tmp 'fractalsql.dll'
+        if (-not (Test-Path -LiteralPath (Join-Path $tmp 'fractalsql.dll'))) {
+            Copy-Item -LiteralPath $script:ExtAbs -Destination (Join-Path $tmp 'fractalsql.dll') -Force
+        }
+        Push-Location $tmp
+        try {
+            $raw = & $script:Sqlite3 -batch -cmd ".load $kitExt" `
+                       -cmd "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
+                       ':memory:' ".read '$kitLoad'" 2>&1
+        }
+        finally { Pop-Location }
+        $out = ($raw | ForEach-Object { "$_" }) -join "`n"
+        $lines = $out -split "`r?`n"
+        $nerr = @($lines | Where-Object { $_ -match '^(Runtime|Parse) error|^Error[: ]' }).Count
+        $want = 0
+        if ($k -eq 'scenario-planning-simulation') { $want = 1 }
+        if ($k -eq 'periodicity-portfolio-selection') { $want = 1 }
+        if ($k -eq 'agentic-fintech-mcts') { $want = 1 }
+        if ($k -eq 'agentic-ops-devops') { $want = 2 }
+        if ($nerr -ne $want) {
+            $first = (@($lines | Where-Object { $_ -match '^(Runtime|Parse) error|^Error[: ]' }) | Select-Object -First 2) -join ' '
+            $why = ''
+            if ($nerr -lt $want) { $why = ' | output near the expected error: ' + ((@($lines | Where-Object { $_ -match '(?i)embed|endpoint|last_error|hint|vectorizer|plan_explore|branches' } | Select-Object -First 6) | ForEach-Object { $_.Substring(0, [Math]::Min(160, $_.Length)) }) -join ' / ') }
+            Fail "43 kits: $k raised $nerr SQL error(s), expected ${want}: $first$why"
+            continue
+        }
+        if ($out -match '(?i)\b(nan|inf)\b') { Fail "43 kits: $k printed a NaN/inf cell"; continue }
+        $rows = @($lines | ForEach-Object { ,($_ -split '\|') })
+        $ok = $false
+        switch ($k) {
+            { $_ -in @('event-stream-anomaly-triage', 'outlier-interception-footprint', 'agentic-budget-reallocation', 'stalled-process-triage', 'intent-matching-discovery', 'agentic-next-action-ranking', 'document-risk-drift', 'coordinated-record-detection', 'sensor-telemetry-allocation', 'simulated-economy-drift', 'multi-series-replenishment', 'periodicity-portfolio-selection', 'agentic-recall-recommendation', 'spatial-footprint-portfolio-risk') } {
+                $ok = [bool]($out -match ("HEADLINE kit=" + $k + " ok")) }
+            'agentic-customer-support' { $ok = (KitShape $lines) -ge 22 }
+            'agentic-edge-swarm' { $ok = (KitShape $lines) -ge 21 }
+            'agentic-fintech-mcts' { $ok = (KitShape $lines) -ge 17 }
+            'agentic-ops-devops' { $ok = (KitShape $lines) -ge 28 }
+            'biotech-genomics' { $ok = (KitShape $lines) -ge 12 }
+            'cybersecurity-threat-detection' { $ok = (KitShape $lines) -ge 42 }
+            'fleet-logistics' { $ok = (KitShape $lines) -ge 33 }
+            'maritime-defense' { $ok = (KitShape $lines) -ge 35 }
+            'medtech-clinical' { $ok = (KitShape $lines) -ge 24 }
+            'quant-finance' { $ok = (KitShape $lines) -ge 26 }
+            'recommendation-search' { $ok = (KitShape $lines) -ge 39 }
+            'smart-cities-iot' { $ok = (KitShape $lines) -ge 24 }
+            'sovereign-edge-ai' { $ok = (KitShape $lines) -ge 33 }
+            'ev-battery-lifecycle' {
+                $a = @($rows | Where-Object { $_[0] -eq 'EV-203' -and $_.Count -eq 4 -and (KitNum $_[1]) -gt 0.5 -and (KitNum $_[2]) -gt 1.5 }).Count -gt 0
+                $b = @($rows | Where-Object { $_[0] -eq 'EV-101' -and $_.Count -eq 4 -and (KitNum $_[1]) -lt 0 -and (KitNum $_[2]) -lt 1 }).Count -gt 0
+                $ok = $a -and $b }
+            'adas-safety-validation' {
+                $a = @($rows | Where-Object { $_[0] -like 'P1 firm*' -and $_.Count -eq 4 -and $_[3] -eq '1' }).Count -gt 0
+                $b = @($rows | Where-Object { $_[0] -like 'P2 steady*' -and $_.Count -eq 4 -and $_[3] -eq '0' }).Count -gt 0
+                $c = @($rows | Where-Object { $_[0] -like 'P3 gentle*' -and $_.Count -eq 4 -and $_[3] -eq '1' }).Count -gt 0
+                $ok = $a -and $b -and $c }
+            'v2x-warranty-triage' { $ok = $out -match '(?m)^battery-thermal-service\|0\.99' }
+            'critical-inventory-routing' {
+                $ok = @($rows | Where-Object { $_[0] -eq '4' -and $_.Count -ge 5 -and $_[1] -eq 'west' -and (KitNum $_[4]) -gt 1.2 }).Count -gt 0 }
+            'heavy-industry-predictive-maintenance' {
+                $a = @($rows | Where-Object { $_[0] -eq 'PUMP-07' -and $_.Count -eq 4 -and (KitNum $_[1]) -gt 0.5 -and (KitNum $_[2]) -gt 1.5 }).Count -gt 0
+                $b = @($rows | Where-Object { $_[0] -eq 'PUMP-03' -and $_.Count -eq 4 -and (KitNum $_[1]) -lt 0 }).Count -gt 0
+                $ok = $a -and $b }
+            'climatech-grid-balancing' {
+                $a = @($rows | Where-Object { $_[0] -eq 'AREA-C' -and $_.Count -eq 4 -and (KitNum $_[1]) -gt 0.5 -and (KitNum $_[2]) -gt 1.2 }).Count -gt 0
+                $b = @($rows | Where-Object { $_[0] -eq 'AREA-A' -and $_.Count -eq 4 -and (KitNum $_[1]) -lt 0 }).Count -gt 0
+                $ok = $a -and $b }
+            'hazmat-occupational-triage' {
+                $n = @($rows | Where-Object { @('7', '15', '31') -contains $_[0] -and $_.Count -eq 4 -and $_[1] -eq 'reactor-bay' -and $_[2] -eq 'night' -and (KitNum $_[3]) -lt 0.001 }).Count
+                $ok = $n -ge 3 }
+            'scenario-planning-simulation' {
+                $ok = @($lines | Where-Object { $_ -match 'variant' }).Count -ge 6 }
+            'avionics-fault-prediction' { $ok = $out -match '(?m)^AC-09\|0\.2' }
+            'satellite-constellation-coverage' {
+                $h = @($rows | Where-Object { $_[0] -eq 'healthy' -and $_.Count -eq 3 } | Select-Object -First 1)
+                $d = @($rows | Where-Object { $_[0] -eq 'degraded' -and $_.Count -eq 3 } | Select-Object -First 1)
+                $ok = ($h.Count -eq 1) -and ($d.Count -eq 1) -and ((KitNum $h[0][2]) -gt 0) -and ((KitNum $d[0][2]) -gt (KitNum $h[0][2])) }
+            'telecom-account-anomaly-screening' {
+                $a = @($rows | Where-Object { $_[0] -like 'E1 swap*' -and $_.Count -eq 4 -and $_[3] -eq '1' }).Count -gt 0
+                $b = @($rows | Where-Object { $_[0] -like 'E2 routine*' -and $_.Count -eq 4 -and $_[3] -eq '0' }).Count -gt 0
+                $c = @($rows | Where-Object { $_[0] -like 'E4 faint*' -and $_.Count -eq 4 -and $_[3] -eq '1' }).Count -gt 0
+                $ok = $a -and $b -and $c }
+            'telecom-traffic-routing' {
+                $ok = ($out -match '(?m)^R3 mobile handover burst\|edge-mobile-hub\|') -and ($out -match '(?m)^R3 mobile handover burst\|edge-backup-west\s*$') }
+            'climatech-emissions-monitoring' {
+                $a = @($rows | Where-Object { $_[0] -eq 'CH4-02' -and $_.Count -eq 4 -and (KitNum $_[1]) -gt 0.5 -and (KitNum $_[2]) -gt 1.5 }).Count -gt 0
+                $b = @($rows | Where-Object { $_[0] -eq 'CH4-01' -and $_.Count -eq 4 -and (KitNum $_[1]) -lt 0 }).Count -gt 0
+                $ok = $a -and $b }
+            'climatech-risk-exposure' {
+                $a = @($rows | Where-Object { $_[0] -eq 'dry season' -and $_.Count -eq 3 }).Count -gt 0
+                $b = @($rows | Where-Object { $_[0] -eq 'wet season' -and $_.Count -eq 3 }).Count -gt 0
+                $ok = $a -and $b }
+            'rf-spectrum-sensing' {
+                $ok = ($out -match '(?m)^CH-A\|\{"indices":\[9\]\}') -and ($out -match '(?m)^CH-B\|\{"indices":\[\]\}') -and ($out -match '(?m)^CH-C\|\{"indices":\[\]\}') }
+        }
+        if ($ok) { Pass "43 kits: demo-vertical-$k.sql runs clean and reproduces its headline result" }
+        else { Fail "43 kits: demo-vertical-$k.sql did not reproduce its headline result" }
     }
 }
 
@@ -3671,6 +3912,7 @@ function Invoke-Gate { param([string]$G)
         '37' { Gate-37-McpSmoke }                '38' { Gate-38-McpHttps }
         '39' { Gate-39-ExtractParse }             '40' { Gate-40-VectorsProbe }
         '41' { Gate-41-DbProbe }                  '42' { Gate-42-ConcurrencyProbe }
+        '43' { Gate-43-Kits }
     }
 }
 
@@ -3763,7 +4005,7 @@ function Gate-37-McpSmoke {
     & $script:Py -u (Join-Path $script:Here 'mcp\tests\mcp_smoke_client.py') 2>&1 |
         ForEach-Object { Write-Host "    $_" }
     if ($LASTEXITCODE -eq 0) {
-        Pass '37 mcp_smoke: full MCP session (initialize, 81-tool catalog, discovery/cognition/agency round trips, enterprise clean-error path, $/cancel, resources+prompts)'
+        Pass '37 mcp_smoke: full MCP session (initialize, 82-tool catalog, discovery/cognition/agency round trips, enterprise clean-error path, $/cancel, resources+prompts)'
     }
     else {
         Fail "37 mcp_smoke: client driver exited $LASTEXITCODE"

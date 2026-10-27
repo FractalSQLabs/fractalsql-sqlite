@@ -264,6 +264,23 @@
 #                      across sequential acquire() calls saturates
 #                      the same counters deterministically, with no
 #                      real concurrency or timing dependency needed.
+#   43  kits           the twenty-nine newer industry kits (demo/demo-       ~10s
+#                      vertical-{ev-battery-lifecycle,adas-safety-
+#                      validation,v2x-warranty-triage,critical-
+#                      inventory-routing,heavy-industry-predictive-
+#                      maintenance,climatech-grid-balancing,hazmat-
+#                      occupational-triage,scenario-planning-
+#                      simulation,avionics-fault-prediction,
+#                      satellite-constellation-coverage,telecom-
+#                      account-anomaly-screening,telecom-traffic-
+#                      routing,climatech-emissions-monitoring,
+#                      climatech-risk-exposure,rf-spectrum-sensing}
+#                      .sql): each runs end to end with the mock
+#                      reasoning plugin, raises no SQL error (the
+#                      scenario kit's plan_explore needs a real
+#                      embedding endpoint: exactly one expected),
+#                      prints no NaN, and reproduces its headline
+#                      result on its deterministic fixture
 #
 # Gate sets:
 #   QUICK   = 01 02                                   post-edit sanity loop
@@ -457,7 +474,7 @@ wpath() {
   fi
 }
 
-DEFAULT_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 31 32 34 35 36 37 38 39 40 41 42)
+DEFAULT_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 31 32 34 35 36 37 38 39 40 41 42 43)
 QUICK_GATES=(01 02)
 FUZZ_GATES=(21)
 
@@ -666,6 +683,9 @@ find_toolchain() {
 # (single --gate invocations, fuzz-only runs). Sets EXT/EXTW or fails.
 resolve_ext() {
   [[ -n "$EXT" ]] && return 0
+  # FSQL_EXT (documented above as the prebuilt-extension override) also
+  # applies to single --gate invocations, not just to gate 01.
+  if [[ -n "${FSQL_EXT:-}" && -f "$FSQL_EXT" ]]; then EXT="$FSQL_EXT"; return 0; fi
   if [[ "$IS_MSYS" -eq 1 ]]; then
     EXT="dist/windows/fractalsql.dll"
   else
@@ -839,6 +859,61 @@ py_run() {
   FSQL_BT_DB="$DBW" FSQL_BT_EXT="$EXTW" "$PY" "$PDIRW/$name.py" "$@"
 }
 
+# drop_scope_exit_branches <in.info> <out.info>
+# The mcp/ server is heavy template C++ (nlohmann json, std::string): at the
+# CLOSING line of a scope -- a bare "}", "} );", "} } );" -- gcc/gcov report
+# a "branch" for every temporary's destructor and cleanup edge. They are
+# compiler-generated, carry no source-level decision, and are not tagged as
+# exception edges, so the 'e'-block filter alone leaves them in the
+# denominator (on a 4k-line server it was about 1,000 of 8,700 branches, e.g.
+# 76 "missed" on the single "}" that ends resources.cpp's table builder).
+# Drops BRDA records whose source line is only closing punctuation, plus those on
+# tool-table registration rows (see the comment at the second rule), and
+# recomputes BRF/BRH per file; prints the number dropped (and how many of those
+# were registration rows) on stderr.
+drop_scope_exit_branches() {
+  local in="$1" out="$2"
+  awk -v outfile="$out" '
+    function flush(   i, brf, brh, p) {
+      brf = 0; brh = 0
+      for (i = 1; i <= nl; i++) if (keep[i] && substr(L[i], 1, 5) == "BRDA:") {
+        split(substr(L[i], 6), p, ",")
+        brf++; if (p[4] != "-" && p[4] + 0 > 0) brh++
+      }
+      for (i = 1; i <= nl; i++) {
+        if (!keep[i]) continue
+        if (substr(L[i], 1, 4) == "BRF:") print "BRF:" brf > outfile
+        else if (substr(L[i], 1, 4) == "BRH:") print "BRH:" brh > outfile
+        else print L[i] > outfile
+      }
+    }
+    BEGIN { nl = 0 }
+    {
+      line = $0
+      if (substr(line, 1, 3) == "SF:") {
+        file = substr(line, 4); n = 0; delete src
+        while ((getline sl < file) > 0) { n++; src[n] = sl }
+        close(file)
+      }
+      L[++nl] = line; keep[nl] = 1
+      if (substr(line, 1, 5) == "BRDA:") {
+        split(substr(line, 6), p, ",")
+        if (src[p[1] + 0] ~ /^[ \t]*[})\];,]+[ \t})\];,]*$/) { keep[nl] = 0; dropped++ }
+        # A tool-table registration row: "t.push_back( ToolSpec{ name, category, ..., lambda } );".
+        # It is declarative (no decision in the row itself -- the handler lambda is on its own
+        # lines and stays counted), but the aggregate initialiser builds a std::vector of params,
+        # a std::function and several strings in one expression, and gcov attributes about six
+        # unwind/cleanup branches per row that no input can reach (78 rows, ~470 of them).
+        else if (index(src[p[1] + 0], "t.push_back( ToolSpec{") > 0) { keep[nl] = 0; dropped++; reg++ }
+      }
+      if (line == "end_of_record") { flush(); nl = 0; delete keep; delete L }
+    }
+    END { print dropped + 0, reg + 0 > "/dev/stderr" }
+  ' "$in" 2>"$out.dropped"
+  read -r SCOPE_EXIT_DROPPED REG_ROW_DROPPED < "$out.dropped" 2>/dev/null || true
+  rm -f "$out.dropped"
+}
+
 # --coverage: capture the .gcda the gate processes left in src/ and
 # generate an lcov report. Called once after the gate matrix finishes.
 # Unlike the PG runner there is no GCOV_PREFIX redirect to undo: no
@@ -973,9 +1048,15 @@ run_coverage_report() {
   lcov --extract "$TMPROOT/fractalsql_bt_mcp_coverage_raw.info" '*/mcp/src/*' \
        --output-file "$TMPROOT/fractalsql_bt_mcp_coverage.info" \
        --rc branch_coverage=1 >>"$TMPROOT/fractalsql_bt_lcov.log" 2>&1
+  # Compiler scope-exit (destructor) edges on closing-brace lines and the unwind edges on
+  # tool-table registration rows carry no source decision: see drop_scope_exit_branches.
+  # The filtered file is the one reported and rendered; the raw one stays in $TMPROOT.
+  drop_scope_exit_branches "$TMPROOT/fractalsql_bt_mcp_coverage.info" "$TMPROOT/fractalsql_bt_mcp_coverage_f.info"
 
   echo ""
   echo "=== coverage (mcp/src/*.cpp) ==="
+  echo "  (branch counts exclude exception edges, $(( ${SCOPE_EXIT_DROPPED:-0} - ${REG_ROW_DROPPED:-0} )) compiler records on closing-brace lines"
+  echo "   and ${REG_ROW_DROPPED:-0} records on tool-table registration rows, t.push_back( ToolSpec{ ... } ))"
   # See the src/*.c section above for why branches are summed from raw
   # BRDA: lines (excluding 'e'-tagged exception branches) instead of
   # trusted from the .info's own BRF:/BRH: fields -- here it's not a
@@ -1000,10 +1081,10 @@ run_coverage_report() {
       printf "  branches:  %d/%d", brh, brf
       if (brf > 0) printf " (%.1f%%)", 100*brh/brf
       print ""
-    }' "$TMPROOT/fractalsql_bt_mcp_coverage.info"
+    }' "$TMPROOT/fractalsql_bt_mcp_coverage_f.info"
 
   if command -v genhtml >/dev/null 2>&1; then
-    genhtml "$TMPROOT/fractalsql_bt_mcp_coverage.info" --output-directory coverage_html_mcp \
+    genhtml "$TMPROOT/fractalsql_bt_mcp_coverage_f.info" --output-directory coverage_html_mcp \
             --rc branch_coverage=1 --rc no_exception_branch=1 >>"$TMPROOT/fractalsql_bt_genhtml.log" 2>&1 \
       && pass "coverage: mcp report at coverage_html_mcp/index.html" \
       || fail "coverage: mcp genhtml failed; see $TMPROOT/fractalsql_bt_genhtml.log"
@@ -1082,9 +1163,9 @@ gate_01_build() {
 
 gate_02_smoke() {
   local ver; ver=$(sqlq "SELECT fractalsql_version();")
-  [[ "$ver" = "2.0.10" ]] \
+  [[ "$ver" = "2.0.11" ]] \
     && pass "02 smoke: version=$ver" \
-    || fail "02 smoke: version='$ver' (want 2.0.10)"
+    || fail "02 smoke: version='$ver' (want 2.0.11)"
   # fractal_search convergence: self-distance ~0
   local d; d=$(sqlq "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');")
   if [[ "$d" = "0.0" ]] || python_abs_lt_1e6 "$d"; then
@@ -2821,6 +2902,73 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
   else
     fail "22 v2_functions: periodogram accepted a too-short series"
   fi
+  # spectrogram_entropy: a period-4 tone (low entropy, constant per frame)
+  # vs an LCG noise series (high entropy), built in SQL so no external
+  # data file is needed. Frame count = floor((128-32)/16)+1 = 7.
+  se_tone="(WITH RECURSIVE g(t) AS (VALUES(0) UNION ALL SELECT t+1 FROM g WHERE t<127) SELECT group_concat(CASE t%4 WHEN 0 THEN 1 WHEN 2 THEN -1 ELSE 0 END) FROM (SELECT t FROM g ORDER BY t))"
+  se_noise="(WITH RECURSIVE g(t,x) AS (VALUES(0,12345) UNION ALL SELECT t+1,(x*1103515245+12345)%2147483648 FROM g WHERE t<127) SELECT group_concat((x/65536)%1000) FROM (SELECT t,x FROM g ORDER BY t))"
+  r=$(sqlq "SELECT json_array_length(fractal_spectrogram_entropy($se_tone,32,16));")
+  if [[ $? -eq 0 && "$r" == "7" ]]; then
+    pass "22 v2_functions: spectrogram_entropy returns one value per frame"
+  else
+    fail "22 v2_functions: spectrogram_entropy frame count: $r"
+  fi
+  r=$(sqlq "SELECT max(value) < 0.5 AND min(value) >= 0.0 FROM json_each(fractal_spectrogram_entropy($se_tone,32,16));")
+  if [[ $? -eq 0 && "$r" == "1" ]]; then
+    pass "22 v2_functions: spectrogram_entropy reads a pure tone as ordered (< 0.5)"
+  else
+    fail "22 v2_functions: spectrogram_entropy tone: $r"
+  fi
+  r=$(sqlq "SELECT avg(value) > 0.7 AND max(value) <= 1.0 FROM json_each(fractal_spectrogram_entropy($se_noise,32,32));")
+  if [[ $? -eq 0 && "$r" == "1" ]]; then
+    pass "22 v2_functions: spectrogram_entropy reads noise as disordered (> 0.7, <= 1)"
+  else
+    fail "22 v2_functions: spectrogram_entropy noise: $r"
+  fi
+  r=$(sqlq "SELECT fractal_spectrogram_entropy('2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2',8,8);")
+  if [[ $? -eq 0 && "$r" == "[0.0000000000,0.0000000000]" ]]; then
+    pass "22 v2_functions: spectrogram_entropy reports a constant frame as 0.0, not NaN"
+  else
+    fail "22 v2_functions: spectrogram_entropy constant frame: $r"
+  fi
+  r=$(sqlq "SELECT json_array_length(fractal_spectrogram_entropy($se_tone,32,16,2));")
+  if [[ $? -eq 0 && "$r" == "2" ]]; then
+    pass "22 v2_functions: spectrogram_entropy honours max_frames"
+  else
+    fail "22 v2_functions: spectrogram_entropy max_frames: $r"
+  fi
+  r=$(sqlq "SELECT fractal_spectrogram_entropy(NULL);")
+  if [[ $? -eq 0 && -z "$r" ]]; then
+    pass "22 v2_functions: spectrogram_entropy(NULL) is NULL"
+  else
+    fail "22 v2_functions: spectrogram_entropy(NULL): $r"
+  fi
+  # Regime change: 64 tone samples then 64 noise samples -> the entropy
+  # series steps up, and change_point_detect localizes it from the bare
+  # array (the function's output feeds the next one directly).
+  r=$(sqlq "WITH RECURSIVE g(t,x) AS (VALUES(0,12345) UNION ALL SELECT t+1,(x*1103515245+12345)%2147483648 FROM g WHERE t<127),
+              s(v) AS (SELECT group_concat(CASE WHEN t<64 THEN (CASE t%4 WHEN 0 THEN 1 WHEN 2 THEN -1 ELSE 0 END) ELSE (x/65536)%1000 END) FROM (SELECT t,x FROM g ORDER BY t))
+            SELECT fractal_change_point_detect(fractal_spectrogram_entropy(v,16,8),3,1.0) FROM s;")
+  if [[ $? -eq 0 ]] && grep <<< "$r" -qE '"indices":\[[0-9]'; then
+    pass "22 v2_functions: spectrogram_entropy -> change_point_detect localizes a regime change"
+  else
+    fail "22 v2_functions: spectrogram_entropy regime change: $r"
+  fi
+  for bad in "'$s32',4|window < 8" "'$s32',600|window > 512" "'$s32',16,0|hop < 1" \
+             "'$s32',16,8,0|max_frames < 1" "'$s32',16,8,5000|max_frames > 4096" \
+             "'1,2,3'|series shorter than window"; do
+    if expect_err "needs window in" "SELECT fractal_spectrogram_entropy(${bad%%|*});"; then
+      pass "22 v2_functions: spectrogram_entropy rejects ${bad##*|}"
+    else
+      fail "22 v2_functions: spectrogram_entropy accepted ${bad##*|}"
+    fi
+  done
+  if expect_err "malformed series" \
+      "SELECT fractal_spectrogram_entropy('bad!vec',16);"; then
+    pass "22 v2_functions: spectrogram_entropy rejects a malformed series"
+  else
+    fail "22 v2_functions: spectrogram_entropy accepted a malformed series"
+  fi
   # TDA: an 8-point square ring at spacing 2 (threshold 2.5 admits the
   # 8 ring edges, excludes the 2.83 corner diagonals) -> E-V+C = 1.
   r=$(sqlq "SELECT fractal_tda_persistence_diagram(
@@ -4090,6 +4238,41 @@ gate_24_enterprise() {
     pass "24 enterprise: audit_log rejects cleanly (dormant tier)"
   else
     fail "24 enterprise: audit_log did not surface the dormant-tier error"
+  fi
+  # Engine-side guard behind the MCP server's FSQL_MCP_READ_ONLY switch. Both
+  # checks need no enterprise core: the latch is tested before the core is
+  # resolved, and DIRECTONLY is enforced by SQLite itself at prepare time.
+  # fractal_lock_destructive() is a one-way, per-connection latch (no unlock
+  # function exists); after it, the four destructive ledger functions refuse.
+  local lock_bad=() lf
+  for lf in fractal_ledger_flush fractal_ledger_compact \
+            fractal_ledger_reset_soft fractal_ledger_reset_hard; do
+    expect_err "locked on this connection" \
+        "SELECT fractal_lock_destructive();" "SELECT ${lf}();" >/dev/null \
+      || lock_bad+=("$lf")
+  done
+  if [[ ${#lock_bad[@]} -eq 0 ]]; then
+    pass "24 enterprise: fractal_lock_destructive() latches flush/compact/reset_soft/reset_hard on the connection"
+  else
+    fail "24 enterprise: destructive ledger functions still ran after the latch: ${lock_bad[*]}"
+  fi
+  # The destructive ledger functions are SQLITE_DIRECTONLY: a trigger or a
+  # view cannot make an ordinary statement call them.
+  # Reparsed from the schema (separate invocations): objects created and used
+  # in one session are never flagged, only ones loaded from sqlite_schema.
+  sqlq "CREATE TABLE bt_do(a);" \
+       "CREATE TRIGGER bt_do_tr AFTER INSERT ON bt_do BEGIN SELECT fractal_ledger_reset_hard(); END;" \
+       "CREATE VIEW bt_do_v AS SELECT fractal_ledger_reset_hard() AS x;" >/dev/null
+  local do_ok=1
+  expect_err "unsafe use of fractal_ledger_reset_hard" \
+      "INSERT INTO bt_do VALUES (1);" || do_ok=0
+  expect_err "unsafe use of fractal_ledger_reset_hard" \
+      "SELECT * FROM bt_do_v;" || do_ok=0
+  sqlq "DROP VIEW bt_do_v;" "DROP TABLE bt_do;" >/dev/null
+  if [[ $do_ok -eq 1 ]]; then
+    pass "24 enterprise: the destructive ledger functions are DIRECTONLY (refused from a trigger and a view)"
+  else
+    fail "24 enterprise: a trigger or view reached a destructive ledger function"
   fi
   # fsql_enterprise_ensure's ent_attempted cache: a SECOND dormant-tier
   # call on the same connection (no enterprise_lib reconfigured
@@ -7135,7 +7318,7 @@ gate_37_mcp_smoke() {
   if [[ $rc -ne 0 ]]; then
     fail "37 mcp_smoke: client driver exited $rc"
   else
-    pass "37 mcp_smoke: full MCP session (initialize, 81-tool catalog, discovery/cognition/agency round trips, enterprise clean-error path, \$ / cancel, resources+prompts)"
+    pass "37 mcp_smoke: full MCP session (initialize, 82-tool catalog, discovery/cognition/agency round trips, enterprise clean-error path, \$ / cancel, resources+prompts)"
   fi
 }
 
@@ -7426,16 +7609,19 @@ gate_40_vectors_probe() {
   local errobj="$HERE/mcp/src/_vectors_probe_errors.o"
   local covflags=()
   [[ "$COVERAGE" -eq 1 ]] && covflags+=(--coverage -fprofile-update=atomic)
+  # std::to_chars(double) in src/vectors.cpp needs macOS >= 13.3 (see mcp/Makefile)
+  local minver=()
+  [[ "$(uname -s)" = "Darwin" ]] && minver+=(-mmacosx-version-min=13.3)
   rm -f "$mainobj" "$vecobj" "$errobj"
   ( cd "$HERE/mcp" && \
     env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g \
-        ${covflags[@]+"${covflags[@]}"} -Ivendor -Isrc \
+        ${covflags[@]+"${covflags[@]}"} ${minver[@]+"${minver[@]}"} -Ivendor -Isrc \
         -c tests/vectors_probe.cpp -o "$mainobj" \
      && env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g \
-        ${covflags[@]+"${covflags[@]}"} -Ivendor -Isrc \
+        ${covflags[@]+"${covflags[@]}"} ${minver[@]+"${minver[@]}"} -Ivendor -Isrc \
         -c src/vectors.cpp -o "$vecobj" \
      && env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g \
-        ${covflags[@]+"${covflags[@]}"} -Ivendor -Isrc \
+        ${covflags[@]+"${covflags[@]}"} ${minver[@]+"${minver[@]}"} -Ivendor -Isrc \
         -c src/errors.cpp -o "$errobj" \
   ) >"$PDIRW/vectors_probe_build.log" 2>&1
   if [[ ! -f "$mainobj" || ! -f "$vecobj" || ! -f "$errobj" ]]; then
@@ -7519,15 +7705,15 @@ gate_41_db_probe() {
   rm -f "$mainobj" "$errobj" "$logobj" "$sqliteobj"
   ( cd "$HERE/mcp" && \
     env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g \
-        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.10\"" \
+        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.11\"" \
         -I../deps/sqlite -Ivendor -Isrc ${ossl_cflags[@]+"${ossl_cflags[@]}"} \
         -c tests/db_probe.cpp -o "$mainobj" \
      && env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g \
-        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.10\"" \
+        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.11\"" \
         -I../deps/sqlite -Ivendor -Isrc ${ossl_cflags[@]+"${ossl_cflags[@]}"} \
         -c src/errors.cpp -o "$errobj" \
      && env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g \
-        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.10\"" \
+        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.11\"" \
         -I../deps/sqlite -Ivendor -Isrc ${ossl_cflags[@]+"${ossl_cflags[@]}"} \
         -c src/logging.cpp -o "$logobj" \
      && env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$CC" -std=c99 -O1 -g -fPIC \
@@ -7637,6 +7823,112 @@ gate_42_concurrency_probe() {
   fi
 }
 
+# ----------------------------------------------------------------------
+# gate 43: industry kits (demo/demo-vertical-*.sql, the twenty-nine newer
+# automotive / aerospace / telecom / climate-tech / RF kits).  Each is
+# run end to end through a fresh in-memory connection with the mock
+# reasoning plugin configured, and must (a) exist, (b) raise no SQL
+# error beyond the one documented exception (the scenario-planning kit's
+# plan_explore call needs a real embedding endpoint), (c) print no NaN,
+# and (d) reproduce its headline claim -- the fixtures are deterministic
+# (no random()), so the claim is checked against fixed numbers.
+# ----------------------------------------------------------------------
+# kit_shape_ok <output> <min>: the 13 original kits print no HEADLINE line and seed random(), so
+# their numbers are not pinned. What a regression does change is the SHAPE of the output: a step
+# that silently returns no rows drops data lines. Count the lines that are neither errors, the
+# .timer "Run Time:" lines nor blank and require <min> (three quarters of a clean run).
+kit_shape_ok() {
+  local n
+  n=$(grep -vcE '^(Runtime error|Parse error|Error[: ]|Run Time:|$)' <<< "$1")
+  [[ "$n" -ge "$2" ]]
+}
+
+gate_43_kits() {
+  if [[ ! -d demo ]]; then
+    skip "43 kits (demo/ not present)"; return
+  fi
+  local tmp="$PDIR/kits"; rm -rf "$tmp"; mkdir -p "$tmp"
+  local kits=(ev-battery-lifecycle adas-safety-validation v2x-warranty-triage
+    critical-inventory-routing heavy-industry-predictive-maintenance
+    climatech-grid-balancing hazmat-occupational-triage
+    scenario-planning-simulation avionics-fault-prediction
+    satellite-constellation-coverage telecom-account-anomaly-screening
+    telecom-traffic-routing climatech-emissions-monitoring
+    climatech-risk-exposure rf-spectrum-sensing
+    event-stream-anomaly-triage outlier-interception-footprint agentic-budget-reallocation
+    stalled-process-triage intent-matching-discovery
+    agentic-next-action-ranking document-risk-drift
+    coordinated-record-detection sensor-telemetry-allocation simulated-economy-drift
+    multi-series-replenishment periodicity-portfolio-selection
+    agentic-recall-recommendation spatial-footprint-portfolio-risk
+    agentic-customer-support agentic-edge-swarm agentic-fintech-mcts
+    agentic-ops-devops biotech-genomics cybersecurity-threat-detection
+    fleet-logistics maritime-defense medtech-clinical quant-finance
+    recommendation-search smart-cities-iot sovereign-edge-ai)
+  local k f out nerr want ok kitabs extabs
+  for k in "${kits[@]}"; do
+    f="demo/demo-vertical-$k.sql"
+    if [[ ! -f "$f" ]]; then
+      fail "43 kits: $f is missing"; continue
+    fi
+    kitabs="$(wpath "$PWD/$f")"
+    # The kit runs from a scratch directory (it may spool a teardown
+    # file), so the extension path must be absolute.
+    extabs="$(wpath "$(cd "$(dirname "$EXT")" && pwd)/$(basename "$EXT")")"
+    out=$(cd "$tmp" && "$SQLITE3" -batch \
+            -cmd ".load $extabs" \
+            -cmd "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+            :memory: ".read $kitabs" 2>&1)
+    nerr=$(grep -ciE '^(Runtime|Parse) error|^Error[: ]' <<< "$out")
+    want=0; [[ "$k" == scenario-planning-simulation ]] && want=1; [[ "$k" == periodicity-portfolio-selection ]] && want=1
+    case "$k" in agentic-fintech-mcts) want=1 ;; agentic-ops-devops) want=2 ;; esac   # fractal_embed with no embedding endpoint
+    if [[ "$nerr" -ne "$want" ]]; then
+      fail "43 kits: $k raised $nerr SQL error(s), expected $want: $(grep -iE '^(Runtime|Parse) error|^Error[: ]' <<< "$out" | head -2 | tr '\n' ' ')"
+      continue
+    fi
+    if grep -qiwE 'nan|inf' <<< "$out"; then
+      fail "43 kits: $k printed a NaN/inf cell"; continue
+    fi
+    ok=0
+    case "$k" in
+      event-stream-anomaly-triage|outlier-interception-footprint|agentic-budget-reallocation|stalled-process-triage|intent-matching-discovery|agentic-next-action-ranking|document-risk-drift|coordinated-record-detection|sensor-telemetry-allocation|simulated-economy-drift|multi-series-replenishment|periodicity-portfolio-selection|agentic-recall-recommendation|spatial-footprint-portfolio-risk) grep -q "HEADLINE kit=$k ok" <<< "$out" && ok=1 ;;
+      agentic-customer-support) kit_shape_ok "$out" 22 && ok=1 ;;
+      agentic-edge-swarm) kit_shape_ok "$out" 21 && ok=1 ;;
+      agentic-fintech-mcts) kit_shape_ok "$out" 17 && ok=1 ;;
+      agentic-ops-devops) kit_shape_ok "$out" 28 && ok=1 ;;
+      biotech-genomics) kit_shape_ok "$out" 12 && ok=1 ;;
+      cybersecurity-threat-detection) kit_shape_ok "$out" 42 && ok=1 ;;
+      fleet-logistics) kit_shape_ok "$out" 33 && ok=1 ;;
+      maritime-defense) kit_shape_ok "$out" 35 && ok=1 ;;
+      medtech-clinical) kit_shape_ok "$out" 24 && ok=1 ;;
+      quant-finance) kit_shape_ok "$out" 26 && ok=1 ;;
+      recommendation-search) kit_shape_ok "$out" 39 && ok=1 ;;
+      smart-cities-iot) kit_shape_ok "$out" 24 && ok=1 ;;
+      sovereign-edge-ai) kit_shape_ok "$out" 33 && ok=1 ;;
+      ev-battery-lifecycle) awk -F'|' '$1=="EV-203" && $2+0>0.5 && $3+0>1.5 {a=1} $1=="EV-101" && $2+0<0 && $3+0<1 {b=1} END{exit !(a&&b)}' <<< "$out" && ok=1 ;;
+      adas-safety-validation) awk -F'|' '$1 ~ /^P1 firm/ && $4==1 {a=1} $1 ~ /^P2 steady/ && $4==0 {b=1} $1 ~ /^P3 gentle/ && $4==1 {c=1} END{exit !(a&&b&&c)}' <<< "$out" && ok=1 ;;
+      v2x-warranty-triage) grep -q '^battery-thermal-service|0\.99' <<< "$out" && ok=1 ;;
+      critical-inventory-routing) awk -F'|' '$1==4 && $2=="west" && $5+0>1.2 {a=1} END{exit !a}' <<< "$out" && ok=1 ;;
+      heavy-industry-predictive-maintenance) awk -F'|' '$1=="PUMP-07" && $2+0>0.5 && $3+0>1.5 {a=1} $1=="PUMP-03" && $2+0<0 {b=1} END{exit !(a&&b)}' <<< "$out" && ok=1 ;;
+      climatech-grid-balancing) awk -F'|' '$1=="AREA-C" && $2+0>0.5 && $3+0>1.2 {a=1} $1=="AREA-A" && $2+0<0 {b=1} END{exit !(a&&b)}' <<< "$out" && ok=1 ;;
+      hazmat-occupational-triage) awk -F'|' '($1==7||$1==15||$1==31) && $2=="reactor-bay" && $3=="night" && $4+0<0.001 {n++} END{exit !(n>=3)}' <<< "$out" && ok=1 ;;
+      scenario-planning-simulation) [[ $(grep -c 'variant' <<< "$out") -ge 6 ]] && ok=1 ;;
+      avionics-fault-prediction) grep -q '^AC-09|0\.2' <<< "$out" && ok=1 ;;
+      satellite-constellation-coverage) awk -F'|' '$1=="healthy" && NF==3 {h=$3+0} $1=="degraded" && NF==3 {d=$3+0} END{exit !(h>0 && d>h)}' <<< "$out" && ok=1 ;;
+      telecom-account-anomaly-screening) awk -F'|' '$1 ~ /^E1 swap/ && $4==1 {a=1} $1 ~ /^E2 routine/ && $4==0 {b=1} $1 ~ /^E4 faint/ && $4==1 {c=1} END{exit !(a&&b&&c)}' <<< "$out" && ok=1 ;;
+      telecom-traffic-routing) grep -q '^R3 mobile handover burst|edge-mobile-hub|' <<< "$out" && grep -q '^R3 mobile handover burst|edge-backup-west$' <<< "$out" && ok=1 ;;
+      climatech-emissions-monitoring) awk -F'|' '$1=="CH4-02" && $2+0>0.5 && $3+0>1.5 {a=1} $1=="CH4-01" && $2+0<0 {b=1} END{exit !(a&&b)}' <<< "$out" && ok=1 ;;
+      climatech-risk-exposure) awk -F'|' '$1=="dry season" && NF==3 {a=1} $1=="wet season" && NF==3 {b=1} END{exit !(a&&b)}' <<< "$out" && ok=1 ;;
+      rf-spectrum-sensing) grep -q '^CH-A|{"indices":\[9\]}' <<< "$out" && grep -q '^CH-B|{"indices":\[\]}' <<< "$out" && grep -q '^CH-C|{"indices":\[\]}' <<< "$out" && ok=1 ;;
+    esac
+    if [[ "$ok" -eq 1 ]]; then
+      pass "43 kits: demo-vertical-$k.sql runs clean and reproduces its headline result"
+    else
+      fail "43 kits: demo-vertical-$k.sql did not reproduce its headline result"
+    fi
+  done
+}
+
 # ======================================================================
 # Runner
 # ======================================================================
@@ -7670,6 +7962,7 @@ gate_title() {
     40) echo "vectors_probe" ;;
     41) echo "db_probe" ;;
     42) echo "concurrency_probe" ;;
+    43) echo "kits" ;;
   esac
 }
 
@@ -7702,6 +7995,7 @@ run_gate() {
     40) gate_40_vectors_probe ;;
     41) gate_41_db_probe ;;
     42) gate_42_concurrency_probe ;;
+    43) gate_43_kits ;;
   esac
 }
 

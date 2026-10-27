@@ -8,7 +8,7 @@ Driven by build_test.sh's gate_37_mcp_smoke (and the matching PowerShell
 gate): spawns the MCP server binary and mechanically enforces the
 accessibility invariant across the whole registered surface. Four phases,
 each with its own server lifecycle:
-  1. the stdio session: locks, the 81-tool catalog, real tools/call round
+  1. the stdio session: locks, the 82-tool catalog, real tools/call round
      trips per tier including error paths, cancellation, resources and
      prompts (full catalogs), wire-framing edge lines, and a full-catalog
      coverage sweep (every tool answers: a result or its documented clean
@@ -61,6 +61,108 @@ import threading
 import time
 
 _failures = 0
+
+
+# Hand-maintained safety classification, deliberately NOT generated from the server
+# and NOT the same file as mcp/.mcp-safety-annotations-lock: regenerating that lock
+# records whatever a new tool declares, so it cannot force anyone to decide. This table
+# can: tools/list is checked against it, and a tool missing from it, or whose hints
+# differ from it, fails the smoke test. Edit it by hand when you add a tool.
+#   read        readOnlyHint (no state changed)
+#   write       changes state, but is not destructive (additive / recomputable)
+#   destructive can discard or overwrite data or configuration; refused by FSQL_MCP_READ_ONLY
+# The bool is openWorldHint: True if the tool reaches outside this DB connection
+# (e.g. sends text to the embedding or reasoning provider).
+EXPECTED_SAFETY = {
+    "fractal_agent_allocate": ("write", True),
+    "fractal_agent_anomaly_triage": ("write", True),
+    "fractal_agent_data_analyst": ("write", True),
+    "fractal_agent_detect_loop": ("read", False),
+    "fractal_agent_detour_classify": ("write", True),
+    "fractal_agent_diverse_portfolios": ("write", True),
+    "fractal_agent_feedback_audit": ("write", False),
+    "fractal_agent_network_coverage_alert": ("write", True),
+    "fractal_agent_outlier_intercept": ("write", True),
+    "fractal_agent_patient_deterioration_triage": ("write", True),
+    "fractal_agent_plan_explore": ("write", True),
+    "fractal_agent_rebalance_sibling": ("write", True),
+    "fractal_agent_recall_hybrid": ("read", False),
+    "fractal_agent_recommend_diverse": ("write", False),
+    "fractal_agent_regime_triage": ("write", True),
+    "fractal_agent_route_task": ("write", True),
+    "fractal_agent_schedule_workload": ("write", True),
+    "fractal_agent_track_anomaly": ("write", True),
+    "fractal_agent_trajectory_predict": ("write", False),
+    "fractal_audit_log": ("write", False),
+    "fractal_audit_unpack": ("read", False),
+    "fractal_change_point_detect": ("read", False),
+    "fractal_cortical_folding": ("read", False),
+    "fractal_cross_modal_search": ("read", False),
+    "fractal_cycle_detect": ("read", False),
+    "fractal_detect_collapse": ("read", False),
+    "fractal_dimension_boxcount": ("read", False),
+    "fractal_dimension_dfa": ("read", False),
+    "fractal_dimension_drift": ("read", False),
+    "fractal_diversify_disable": ("write", False),
+    "fractal_diversify_enable": ("write", False),
+    "fractal_diversify_set_params": ("write", False),
+    "fractal_embed": ("write", True),
+    "fractal_explain_result": ("read", False),
+    "fractal_feedback_report": ("write", False),
+    "fractal_hybrid_clinical_search": ("read", False),
+    "fractal_isolate_background": ("write", False),
+    "fractal_ledger_compact": ("destructive", False),
+    "fractal_ledger_flush": ("destructive", False),
+    "fractal_ledger_load": ("write", False),
+    "fractal_ledger_reset_hard": ("destructive", False),
+    "fractal_ledger_reset_soft": ("destructive", False),
+    "fractal_ledger_shadow_count": ("read", False),
+    "fractal_ledger_truth_count": ("read", False),
+    "fractal_ledger_verify": ("read", False),
+    "fractal_mine_topology_negatives": ("read", False),
+    "fractal_morphological_complexity": ("read", False),
+    "fractal_nerve_plexus_metric": ("read", False),
+    "fractal_optimize_portfolio": ("read", False),
+    "fractal_optimize_portfolio_multimodal": ("read", False),
+    "fractal_optimize_portfolio_multimodal_pareto": ("read", False),
+    "fractal_optimize_subset": ("read", False),
+    "fractal_periodogram": ("read", False),
+    "fractal_rag_agent": ("write", True),
+    "fractal_reason": ("write", True),
+    "fractal_schema_context": ("read", False),
+    "fractal_search": ("read", False),
+    "fractal_search_agent": ("write", True),
+    "fractal_search_debug": ("read", False),
+    "fractal_search_explore": ("read", False),
+    "fractal_search_telemetry": ("read", False),
+    "fractal_search_trajectory": ("read", False),
+    "fractal_spectrogram_entropy": ("read", False),
+    "fractal_sql_agent": ("write", True),
+    "fractal_state_fingerprint": ("read", False),
+    "fractal_store_morphology": ("write", False),
+    "fractal_tda_persistence_diagram": ("read", False),
+    "fractal_text_to_sql": ("write", True),
+    "fractal_vascular_network": ("read", False),
+    "fractal_vector_hamming_distance": ("read", False),
+    "fractal_vector_lp_distance": ("read", False),
+    "fractal_vector_quantize_binary": ("read", False),
+    "fractal_vector_quantize_int8": ("read", False),
+    "fractal_vectorizer_create": ("write", False),
+    "fractal_vectorizer_drop": ("destructive", False),
+    "fractal_vectorizer_pause": ("write", False),
+    "fractal_vectorizer_process_queue": ("write", False),
+    "fractal_vectorizer_resume": ("write", False),
+    "fractalsql_configure_reasoning": ("destructive", False),
+    "fractalsql_get_config": ("read", False),
+    "fractalsql_get_version": ("read", False),
+    "fractalsql_set_config": ("destructive", False),
+}
+
+
+def _safety_kind(a):
+    if a.get("readOnlyHint") and a.get("destructiveHint"):
+        return "contradiction"
+    return "destructive" if a.get("destructiveHint") else ("read" if a.get("readOnlyHint") else "write")
 
 
 def check(label: str, cond: bool) -> bool:
@@ -238,8 +340,8 @@ def main() -> int:  # noqa: ANN201
         # the accessibility invariant, mechanically
         send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         listed = recv()["result"]["tools"]
-        check("tools/list: the full engine-filtered catalog (81 tools)",
-              len(listed) == 81)
+        check("tools/list: the full engine-filtered catalog (82 tools)",
+              len(listed) == 82)
         anonymous = [t["name"] for t in listed
                      if not (t.get("description") or "").strip()
                      or "properties" not in t["inputSchema"]]
@@ -258,13 +360,35 @@ def main() -> int:  # noqa: ANN201
               "on SQLite (11.2's requirement, not a placeholder)",
               classes == {"cheap", "expensive"}
               and all("x-fractalsql-retry-tier" not in t["_meta"] for t in listed))
-        annotated = {t["name"] for t in listed if t.get("annotations")}
+        annotated = {t["name"] for t in listed
+                     if (t.get("annotations") or {}).get("destructiveHint") is True}
         heavy = [n for n in ["fractal_ledger_reset_hard", "fractal_ledger_flush",
                              "fractal_vectorizer_drop","fractalsql_set_config"]
                  if n in annotated]
         check("15.2/6: destructiveHint present on the heavy/destructive tools",
               len(heavy) >= 3)
         tools_by_name = {t["name"]: t for t in listed}
+        # safety table: every tool's hints must match EXPECTED_SAFETY
+        explicit = ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint")
+        check("EXPECTED_SAFETY classifies exactly the tools served (a new tool "
+              "needs a row there): unclassified="
+              + str(sorted(set(tools_by_name) - set(EXPECTED_SAFETY)))[:160]
+              + " stale=" + str(sorted(set(EXPECTED_SAFETY) - set(tools_by_name)))[:160],
+              set(EXPECTED_SAFETY) == set(tools_by_name))
+        check("every tool sends all four hints explicitly (an omitted hint "
+              "defaults to destructive/open-world in the MCP spec)",
+              all(all(isinstance((t.get("annotations") or {}).get(k), bool) for k in explicit)
+                  for t in listed))
+        safety_drift = {n: [(_safety_kind(t.get("annotations") or {}),
+                             (t.get("annotations") or {}).get("openWorldHint")),
+                            EXPECTED_SAFETY.get(n)]
+                        for n, t in tools_by_name.items()
+                        if (_safety_kind(t.get("annotations") or {}),
+                            (t.get("annotations") or {}).get("openWorldHint"))
+                        != EXPECTED_SAFETY.get(n)}
+        check("every tool's hints match EXPECTED_SAFETY (got, expected)"
+              + (": " + str(dict(list(safety_drift.items())[:3])) if safety_drift else ""),
+              not safety_drift)
         reasoning_tools = [n for n in ["fractal_reason", "fractal_agent_anomaly_triage",
                                        "fractal_sql_agent"] if n in tools_by_name]
         check("15.2: idempotentHint/openWorldHint/secretHint on the "
@@ -391,6 +515,21 @@ def main() -> int:  # noqa: ANN201
               "strings", r is not None and r["result"].get("isError")
               is not True and isinstance(
                   r["result"]["structuredContent"].get("value"), int))
+
+        # analytics.cpp: fractal_spectrogram_entropy -- a tone then noise
+        # series; the adapter wraps the bare SQL array as {"entropy":[...]}.
+        import math as _m
+        tone = [_m.sin(i * 0.9) for i in range(96)]
+        r = call("fractal_spectrogram_entropy",
+                 {"series": tone, "window": 32, "hop": 16})
+        ent = (r["result"]["structuredContent"].get("entropy")
+               if r is not None and not r["result"].get("isError") else None)
+        check("analytics.cpp: spectrogram_entropy returns an in-range "
+              "per-frame array", isinstance(ent, list) and len(ent) == 5
+              and all(0.0 <= v <= 1.0 for v in ent))
+        r = call("fractal_spectrogram_entropy", {"series": tone, "window": 4})
+        check("analytics.cpp: spectrogram_entropy rejects window < 8",
+              r is not None and r["result"].get("isError") is True)
 
         # Cognition tier (against the harness's mock reasoning)
         r = call("fractal_reason",
@@ -878,7 +1017,7 @@ def main() -> int:  # noqa: ANN201
 
         # full-catalog coverage sweep: every registered tool answers through
         # its own adapter at least once, so the smoke exercises the whole
-        # 81-tool surface rather than a representative subset. Acceptance is
+        # 82-tool surface rather than a representative subset. Acceptance is
         # generous by design: either a result or a documented clean-error
         # condition (isError + a 1.6 taxonomy error_class + actionable text)
         # counts; a hang, a protocol-level error, a crash, or an error
@@ -981,7 +1120,7 @@ INIT_PARAMS = {"protocolVersion": "2025-06-18",
                "clientInfo": {"name": "gate37", "version": "0"}}
 
 
-def quick_stdio(json_lines, env_extra, timeout=60):
+def quick_stdio(json_lines, env_extra, timeout=60, stderr_file=None):
     """A short-lived stdio session driven like the main one: send each
     request, wait for its id-matched response, then stdin EOF. Writing a
     batch and closing stdin in one breath is NOT equivalent: EOF begins
@@ -992,7 +1131,8 @@ def quick_stdio(json_lines, env_extra, timeout=60):
     env.update(env_extra)
     proc = subprocess.Popen(
         [os.environ["MCP_SERVER_EXE"]], stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=open(stderr_file, "w", encoding="utf-8") if stderr_file else subprocess.DEVNULL,
         cwd=os.environ["MCP_SERVER_CWD"], env=env, text=True, bufsize=1)
     queue = []  # via a reader thread, so requests and responses interleave
 
@@ -1073,8 +1213,17 @@ def run_http_and_cli_phase() -> None:
          "params": {"name": "fractalsql_set_config",
                     "arguments": {"key": "max_rows_ceiling", "value": "5"}}},
     ]
-    resps, code = quick_stdio(ro_lines, {"FSQL_MCP_READ_ONLY": "true"})
+    # A harmless read first, so the server really opens its DB connection (and
+    # applies the engine-side destructive latch) before the refused call.
+    ro_lines.insert(len(ro_lines) - 1,
+        {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+         "params": {"name": "fractalsql_get_version", "arguments": {}}})
+    ro_stderr = os.path.join(os.environ["MCP_SERVER_CWD"], "mcp_readonly_stderr.log")
+    resps, code = quick_stdio(ro_lines, {"FSQL_MCP_READ_ONLY": "true"},
+                              stderr_file=ro_stderr)
     ro = next((x for x in resps if x and x.get("id") == 3), None)
+    ro_read = next((x for x in resps if x and x.get("id") == 4), None)
+    ro_log = open(ro_stderr, encoding="utf-8", errors="replace").read()
     # the read-only refusal is a DISPATCH-level rejection, so it surfaces
     # as a top-level JSON-RPC error (like unknown-tool), before any adapter
     # or engine code runs
@@ -1083,6 +1232,11 @@ def run_http_and_cli_phase() -> None:
           "dispatch layer (15.4's stop switch)",
           code == 0 and ro_err.get("code") == -32602
           and "read-only mode" in str(ro_err.get("message", "")))
+
+    check("env: read-only mode still serves reads, and the server applied the "
+          "engine-side destructive latch (no 'latch not applied' warning)",
+          bool(ro_read) and not (ro_read.get("result") or {}).get("isError")
+          and "destructive latch not applied" not in ro_log)
 
     # CLI direct runs (each exits cleanly, so any live coverage data from
     # these processes also flushes)
@@ -1093,7 +1247,7 @@ def run_http_and_cli_phase() -> None:
                               input="")
     r = cli_run(["--version"])
     check("CLI: --version prints the release banner",
-          r.returncode == 0 and "2.0.10" in r.stdout)
+          r.returncode == 0 and "2.0.11" in r.stdout)
     r = cli_run(["--help"])
     check("CLI: --help prints the flag table",
           r.returncode == 0 and "--tool" in r.stdout)
@@ -1298,7 +1452,7 @@ def run_http_and_cli_phase() -> None:
         http_tools = (json.loads(b)["result"]["tools"]
                       if s == 200 and b.startswith("{") else [])
         check("HTTP: tools/list over the session matches the stdio "
-              "catalog (81)", s == 200 and len(http_tools) == 81)
+              "catalog (82)", s == 200 and len(http_tools) == 82)
         s, _, b = rpc({"jsonrpc": "2.0", "id": 6, "method": "tools/call",
                        "params": {"name": "fractalsql_get_version",
                                   "arguments": {}}}, sess=minted)
@@ -1611,6 +1765,19 @@ if __name__ == "__main__":
         code = main()
     except SystemExit as exc:
         code = int(exc.code or 0)
+    # Engine-agnostic robustness probes (mcp_robustness.py, same directory): odd
+    # and malformed request lines, non-object bodies over stdio and HTTP,
+    # explicit-null optionals and very long strings across the whole tool
+    # catalog, read-only refusal, and the sanitizeSecrets differential probe.
+    # They ride this client, so the existing gate (POSIX and PowerShell) runs them.
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import mcp_robustness
+        mcp_robustness.run(check)
+    except ImportError:
+        print("SKIP robustness probes (mcp_robustness.py not present)")
+    if _failures and code == 0:
+        code = 1
     print(f"gate37-client: {'ALL GREEN' if code == 0 else 'FAILED'}; "
           f"{_failures} failure(s)")
     sys.exit(code)

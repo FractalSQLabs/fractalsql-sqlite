@@ -26,6 +26,21 @@ Calculates the scaling exponent ($\alpha$) of a time-ordered series to distingui
 **Signature**: `fractal_dimension_dfa(series) RETURNS REAL` — `series` is a CSV/JSON TEXT array or packed float32 BLOB.
 **Requirement**: $\ge 16$ points.
 
+
+#### Using the DFA exponent as a Hurst exponent
+
+There is deliberately no separate Hurst function: the DFA exponent *is* the Hurst exponent for noise-like input.
+
+- For a series of **increments** (returns, differences): $H = \alpha$. $\alpha < 0.5$ is mean-reverting (anti-persistent), $\alpha \approx 0.5$ a random walk, $\alpha > 0.5$ trending (persistent).
+- For a series of **levels** (prices, a cumulative sum): $H = \alpha - 1$.
+
+On synthetic fractional Gaussian noise with known $H$ from 0.3 to 0.9, DFA had an overall RMSE of 0.036 at $n = 1024$ (0.068 at $n = 256$), against 0.070 (0.094 at $n = 256$) for classic and bias-corrected rescaled-range (R/S) estimators. On random-walk returns with heavy tails or volatility clustering, DFA called 0-2% of series trending or mean-reverting at a $\pm 0.1$ band, against 7-11% for raw R/S. (Synthetic tests, not market data.)
+
+Caveats:
+
+- **Sampling noise.** The estimate has a standard deviation of about 0.03 at $n = 1024$ and 0.05-0.07 at $n = 256$. Do not classify a regime from one value near 0.5 on a short series.
+- **Short-memory autocorrelation inflates $\alpha$.** DFA's smallest box is 4 samples, so a series with only lag-1 momentum (AR(1), $\varphi = 0.3$) reads about 0.61 although its long-run $H$ is 0.5. In testing, raising the smallest box to 32 brought that to 0.52 while genuinely persistent (0.7) and anti-persistent (0.3) series stayed put, at the price of a larger standard deviation. This function does not expose the box size yet.
+
 ### `fractal_dimension_boxcount`
 **Minkowski-Bouligand Dimension**
 Measures the spatial complexity of a point cloud using box-counting.
@@ -58,6 +73,29 @@ Power at each positive Fourier frequency, computed by direct $O(n^2)$ DFT (exact
 
 **Signature**: `fractal_periodogram(series [, max_peaks]) RETURNS TEXT (JSON)` — `max_peaks` defaults to 8 (arity 1 or 2).
 **Return**: `{"freqs":[..],"power":[..]}` — only the `max_peaks` bins with highest power, sorted descending. Each `freqs` entry is cycles per sample in $(0, 0.5]$; `1.0/freq` is samples per cycle. Useful for network-beaconing and retry-loop cadence detection that DFA alone is blind to. Requires at least 4 points.
+
+### `fractal_spectrogram_entropy`
+**Short-Time Spectral Entropy**
+`fractal_periodogram` says which frequencies dominate a whole series; this says *how ordered* the frequency content is, window by window, and so *when* it changes. A window slides over the series; each frame has its mean removed, is tapered with a periodic Hann window, and is transformed by a direct DFT. The Shannon entropy of the frame's normalized power spectrum is divided by $\ln(\text{window}/2)$, so every value lies in $[0, 1]$.
+
+**Signature**: `fractal_spectrogram_entropy(series [, window [, hop [, max_frames]]]) RETURNS TEXT (JSON)` — `series` is a CSV/JSON TEXT array or packed float32 BLOB; `window` defaults to 64, `hop` to 32 and `max_frames` to 4096 (registered at arities 1 to 4). A NULL series returns NULL.
+**Return**: a bare JSON array with one entropy value per frame, e.g. `[0.2503,0.2505,...]`. It is a bare array, not an object, so it pipes straight into `fractal_change_point_detect` or `fractal_dimension_dfa`. Frame `f` covers `series[f*hop .. f*hop + window - 1]` (0-based); there are `floor((n - window)/hop) + 1` frames and the first `max_frames` are returned.
+
+| Value | Meaning |
+|---|---|
+| near 0 | energy concentrated in a few frequencies: a beacon, a retry loop, a locked carrier |
+| near 1 | energy spread across the band: noise-like, jammed, or a signal that has lost its structure |
+
+Calibration: a pure tone reads about 0.2 to 0.3 (the Hann taper spreads it over a few bins), white noise about 0.9, not 1.0 (a noise periodogram is itself randomly distributed). A constant frame has no spectral energy and reports exactly `0.0`, never NaN.
+
+Limits: `window` in $[8, 512]$, `hop >= 1`, `max_frames` in $[1, 4096]$, `n >= window`, all samples finite; anything else is a clean SQL error. Cost is $O(\text{frames} \times \text{window}^2 / 2)$.
+
+```sql
+-- where does a signal's spectral order change? boundary indices are FRAME indices
+SELECT fractal_change_point_detect(
+         fractal_spectrogram_entropy(samples, 64, 32), 4, 2.0, 8)
+  FROM rf_capture WHERE capture_id = 7;
+```
 
 ### `fractal_tda_persistence_diagram`
 **Topological Persistence**

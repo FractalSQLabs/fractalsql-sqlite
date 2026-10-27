@@ -352,8 +352,10 @@ typedef struct fsql_diversify_params {
     double    repulsion_sigma;        /* Gaussian σ; default = f(dim)    */
     double    repulsion_weight;       /* global scalar on shadow penalty */
     uint32_t  max_shadows_considered; /* per-query; default 64           */
-    uint32_t  tail_buffer_cap;        /* Shadow tail before compact;     */
-                                      /* required; default 256, max 1024 */
+    uint32_t  tail_buffer_cap;        /* RESERVED: range-checked [1,1024]*/
+                                      /* and stored, no effect in v2.0.x */
+                                      /* (future shadow-index tail size);*/
+                                      /* default 256                     */
 } fsql_diversify_params_t;
 
 FSQL_API int fsql_diversify_set_params(fsql_ctx                      *ctx,
@@ -487,6 +489,15 @@ FSQL_API int fsql_audit_unpack(const void *blob, size_t blob_len,
  * ~= 1.0 1/f "pink" noise, ~= 1.5 Brownian motion / random walk,
  * < 0.5 anti-correlated. Requires n >= 16.
  *
+ * Hurst exponent: there is deliberately no separate Hurst function. For a
+ * series of increments (returns) alpha IS the Hurst exponent H; for a series
+ * of levels (prices) H = alpha - 1. On synthetic fractional Gaussian noise
+ * (H 0.3-0.9) this had RMSE 0.036 at n=1024 versus 0.070 for classic and
+ * bias-corrected R/S. Caveats: the estimate's std is ~0.03 at n=1024 (~0.06
+ * at n=256); and short-memory autocorrelation inflates alpha because the
+ * smallest box is 4 samples (AR(1) phi=0.3 reads ~0.61, true long-run H is
+ * 0.5; a smallest box of 32 gives ~0.52 at the cost of higher variance).
+ *
  * Returns FSQL_OK on success (writes *out_alpha), FSQL_ERR_INVALID
  * on a NULL/too-short series, FSQL_ERR_OOM on allocation failure. */
 FSQL_API int fsql_dimension_dfa(const double *series, size_t n,
@@ -541,6 +552,40 @@ FSQL_API int fsql_change_point_detect(const double *series, size_t n, size_t win
 FSQL_API int fsql_periodogram(const double *series, size_t n,
                               double *out_freqs, double *out_power,
                               size_t max_peaks, size_t *out_n_peaks);
+
+/* Short-time spectral entropy: HOW ORDERED is the frequency content of a
+ * series, and WHEN does that change. The periodogram above says which
+ * frequencies dominate the whole series; this slides a window over it and
+ * reports, per frame, the Shannon entropy of that frame's power spectrum.
+ *
+ *   low  (toward 0)  energy concentrated in a few frequencies -- a beacon,
+ *                    a retry loop, a locked carrier
+ *   high (toward 1)  energy spread across the band -- noise-like, jammed,
+ *                    or a signal that has lost its structure
+ *
+ * Frame f covers series[f*hop .. f*hop+window). Each frame has its mean
+ * removed, is tapered with a periodic Hann window, and is transformed by a
+ * direct DFT at bins 1..window/2; p_k = power_k / total power, and the
+ * result is -sum(p_k ln p_k) / ln(window/2), so every value lies in [0, 1]
+ * (white noise lands near 0.9, not 1.0: a noise periodogram is itself
+ * randomly distributed; a pure tone lands near 0.2 because the Hann taper
+ * spreads it over a few bins). A frame with no spectral energy (a constant
+ * signal) reports 0.0, never NaN, so the output can be fed straight into
+ * fsql_change_point_detect or fsql_dimension_dfa.
+ *
+ * Bounds (cost is O(frames * window^2 / 2), at most ~5e8 multiply-adds):
+ * window in [8, 512], max_frames in [1, 4096], hop >= 1, n >= window.
+ * The number of frames available is floor((n-window)/hop)+1; the first
+ * min(available, max_frames) are written to out_entropy (caller-owned,
+ * max_frames doubles) and counted in *out_n_frames.
+ *
+ * Returns FSQL_OK on success, FSQL_ERR_INVALID on NULL input, bad window /
+ * hop / max_frames, n < window, or any non-finite sample, FSQL_ERR_OOM on
+ * allocation failure. *out_n_frames is 0 on every non-OK return. */
+FSQL_API int fsql_spectrogram_entropy(const double *series, size_t n,
+                                      size_t window, size_t hop,
+                                      double *out_entropy, size_t max_frames,
+                                      size_t *out_n_frames);
 
 /* ----- Topological Data Analysis (experimental) ---------------------
  *

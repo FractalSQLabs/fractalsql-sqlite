@@ -315,10 +315,11 @@ SELECT json_extract(value, '$.doc_id') AS doc_id,
 
 -- ------------------------------------------------------------------
 -- 10. Time-series / topology / fingerprints + vector quantization
---     (10 functions)
+--     (11 functions)
 -- ------------------------------------------------------------------
 .print
 .print === Analytics: fractal_change_point_detect, fractal_periodogram, ===
+.print === fractal_spectrogram_entropy, ===
 .print === fractal_tda_persistence_diagram, fractal_state_fingerprint, ===
 .print === fractal_cycle_detect, fractal_optimize_subset ===
 
@@ -340,6 +341,16 @@ SELECT fractal_periodogram(
         (SELECT printf('%.6f', sin(t * 0.52359878) + 0.5 * sin(t * 1.25663706)) AS x
            FROM gs)),
     3) AS periodogram;
+
+-- Short-time spectral entropy of the same 120-point composite: 6 frames
+-- of window 32 / hop 16, each reading how ordered that frame's spectrum
+-- is (a bare JSON array, so it could feed fractal_change_point_detect).
+WITH RECURSIVE gs(t) AS (SELECT 1 UNION ALL SELECT t + 1 FROM gs WHERE t < 120)
+SELECT fractal_spectrogram_entropy(
+    (SELECT '[' || group_concat(x) || ']' FROM
+        (SELECT printf('%.6f', sin(t * 0.52359878) + 0.5 * sin(t * 1.25663706)) AS x
+           FROM gs)),
+    32, 16) AS spectrogram_entropy;
 
 -- 16-point 2D square-ring lattice (a closed perimeter -- the cycle the
 -- graph cycle-rank Betti-1 should flag). The l2 branch of this section

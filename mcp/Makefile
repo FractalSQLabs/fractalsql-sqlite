@@ -29,7 +29,16 @@ CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra
 # one plain-C translation unit (sqlite3.o) matches the C++ objects'
 # -arch instead of silently compiling for the host architecture.
 CFLAGS   ?=
-DEFS     := -DFSQL_MCP_VERSION="\"2.0.10\""
+DEFS     := -DFSQL_MCP_VERSION="\"2.0.11\""
+
+# src/vectors.cpp uses std::to_chars on a double (shortest round-trip form), which
+# Apple's libc++ marks unavailable before macOS 13.3. CI exports
+# MACOSX_DEPLOYMENT_TARGET=11.0 for the extension; the MCP server is a separate
+# binary, so it carries its own, newer minimum (as package-darwin.sh does).
+ifeq ($(shell uname -s),Darwin)
+  CXXFLAGS += -mmacosx-version-min=13.3
+  CFLAGS   += -mmacosx-version-min=13.3   # sqlite3.o: same floor, or ld warns when built on a newer macOS
+endif
 
 # Coverage builds (build_test.sh --coverage): same posture as the
 # top-level Makefile's own COVERAGE block: gcov instrumentation on

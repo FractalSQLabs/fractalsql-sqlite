@@ -1,1 +1,1 @@
-core v2.0.25 9e61f5b781fd5bcc883768e685ac6d13a345e862  2026-09-21T06:20:22Z  release (multi-platform CI drop)
+core 196be156ca27609c1ac7e529be999e9a757a88ba  2026-10-26T01:19:15Z  rhel9 glibc-2.34 gcc-11 native-only

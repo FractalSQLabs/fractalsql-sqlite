@@ -273,7 +273,7 @@ fractal_diversify_set_params(params_json TEXT)
 | `repulsion_sigma` | Gaussian width of each shadow's repulsion field. |
 | `repulsion_weight` | Overall strength of the repulsion penalty. |
 | `max_shadows_considered` | Cap on how many recorded shadows influence a search. |
-| `tail_buffer_cap` | Cap on the tail buffer of recent results. |
+| `tail_buffer_cap` | **Reserved.** Reserved for a future shadow-index release: the value is range-checked (1-1024) and stored, but has no effect on search or the ledger in v2.0.x. |
 
 Takes effect on the next `fractal_search` call.
 

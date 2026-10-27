@@ -613,7 +613,10 @@ namespace fsqlmcp
 
                     Json bodyJson = Json::parse( req.body, nullptr, false );
                     const bool parsed = !bodyJson.is_discarded() && bodyJson.is_object();
-                    const std::string method = parsed ? bodyJson.value( "method", "" ) : "";
+                    // value() throws type_error.302 on a non-string "method"; on this
+                    // connection thread that is std::terminate for the whole server.
+                    const std::string method = ( parsed && bodyJson.contains( "method" ) && bodyJson[ "method" ].is_string() )
+                        ? bodyJson[ "method" ].get<std::string>() : std::string();
                     const bool isRequest = parsed && bodyJson.contains( "id" );
                     const bool isInitialize = method == "initialize";
                     const bool isCancel = ( method == "notifications/cancelled" || method == "$/cancel" );

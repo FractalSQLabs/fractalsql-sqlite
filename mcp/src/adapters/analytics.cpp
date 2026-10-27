@@ -64,6 +64,25 @@ namespace fsqlmcp
             "'power':[...]}: top max_peaks bins, descending power. Catches network-beaconing/retry-cadence DFA "
             "alone misses.";
 
+        t.push_back( ToolSpec{ "fractal_spectrogram_entropy", "Analytics", ToolClass::Cheap,
+            { Vec("series", true, "Time-ordered series (n >= window)."),
+              Int("window", false, "Frame length, 8..512.", 64),
+              Int("hop", false, "Samples between frame starts, >= 1.", 32),
+              Int("max_frames", false, "Max frames returned, 1..4096.", 4096) },
+            std::nullopt, false, true,
+            [&db]( const Json& a, CallCtx& ) {
+                Json frames = parseJsonStrict( db.callScalar(
+                    "SELECT fractal_spectrogram_entropy(?, ?, ?, ?)",
+                    { vectors::vectorParamToText( a.at("series"), "series" ), a.value( "window", 64 ),
+                      a.value( "hop", 32 ), a.value( "max_frames", 4096 ) } ) );
+                return Json{ { "entropy", frames } };
+            } } );
+        t.back().description = "Short-time spectral entropy: slides a window over a series and returns, per frame, "
+            "the normalized Shannon entropy (0..1) of its power spectrum (mean removed, Hann tapered). Low = energy "
+            "in a few frequencies (beacon, retry loop, locked carrier); high = spread across the band (noise, "
+            "jamming, lost structure). A constant frame reports 0.0, never NaN. Returns {'entropy':[...]}, one "
+            "value per frame; feed it to fractal_change_point_detect to localize WHEN the structure changed.";
+
         t.push_back( ToolSpec{ "fractal_tda_persistence_diagram", "Analytics", ToolClass::Cheap,
             { Vec("points", true, "Point cloud (capped at 512 points)."), Int("dim", true, "Spatial dimension."),
               Int("max_dim", false, "0 (H0 only) or 1 (H0 + Betti-1 graph-cycle-rank estimate).", 0),

@@ -113,6 +113,7 @@ The final tier provides mathematical primitives for analyzing the "shape" of dat
 - **Drift (`fractal_dimension_drift`)**: Detects regime changes by comparing the DFA exponent of a recent window against a baseline.
 - **Change-Point Localization (`fractal_change_point_detect`)**: Localizes where a series' mean or variance shifted, complementing DFA's overall characterization.
 - **Periodogram (`fractal_periodogram`)**: Exact power spectrum (direct DFT) for cadence detection such as beaconing or retry loops.
+- **Spectral entropy (`fractal_spectrogram_entropy`)**: Per-window Shannon entropy of the power spectrum (0 = ordered tone, ~0.9 = noise); pair with `fractal_change_point_detect` to find when order is lost.
 
 ### Topology and State Fingerprints
 - **Persistence (`fractal_tda_persistence_diagram`)**: Exact 0-dimensional persistence over a point cloud's Vietoris-Rips filtration, plus the graph cycle rank as an informational Betti-number estimate.
@@ -177,6 +178,7 @@ Storing vectors as the canonical `fractal_vector` BLOB (u16 dim LE + u16 reserve
 - `fractal_dimension_drift(series, win)`: Regime change detection. $\rightarrow$ **[api-analytics.md](api-analytics.md)**
 - `fractal_change_point_detect(series, win, ...)`: Change-point localization. $\rightarrow$ **[api-analytics.md](api-analytics.md)**
 - `fractal_periodogram(series, max_peaks?)`: Exact power spectrum. $\rightarrow$ **[api-analytics.md](api-analytics.md)**
+- `fractal_spectrogram_entropy(series, window?, hop?, max_frames?)`: Short-time spectral entropy per frame. $\rightarrow$ **[api-analytics.md](api-analytics.md)**
 - `fractal_tda_persistence_diagram(points, dim, ...)`: Point-cloud persistence. $\rightarrow$ **[api-analytics.md](api-analytics.md)**
 - `fractal_state_fingerprint(v, ...)` / `fractal_cycle_detect(fingerprints, ...)`: SimHash + Brent cycle detection. $\rightarrow$ **[api-analytics.md](api-analytics.md)**
 - `fractal_vector_lp_distance(a, b, p)` / `fractal_vector_quantize_int8(v)` / `_binary(v)`: Vector math and quantization. $\rightarrow$ **[api-analytics.md](api-analytics.md)**

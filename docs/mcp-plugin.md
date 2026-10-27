@@ -209,7 +209,7 @@ matrix even when the patch version moves.
 
 ## Tool catalog
 
-81 tools, grouped the same way the API docs group them. Optional
+82 tools, grouped the same way the API docs group them. Optional
 arguments carry their documented defaults in each tool's schema; vector
 arguments are plain JSON arrays of numbers at the MCP boundary and are
 converted to the engine's CSV/JSON TEXT convention for you. Tool names
@@ -288,11 +288,12 @@ covered (there the reasoning call *is* the result), and an unconfigured
 | `fractal_agent_trajectory_predict` | `{predicted_state_vector, projected_drift_delta, risk_threshold_exceeded}` |
 | `fractal_agent_detect_loop` | `{agent_id, dfa_exponent, is_loop_detected[, cycle_len, at_index]}`: SimHash + Brent + DFA drift |
 
-### Analytics (22)
+### Analytics (23)
 
 Fractal dimensions (`fractal_dimension_dfa` / `_boxcount` / `_drift`),
 time-series and topology (`fractal_change_point_detect`,
-`fractal_periodogram`, `fractal_tda_persistence_diagram`),
+`fractal_periodogram`, `fractal_spectrogram_entropy`,
+`fractal_tda_persistence_diagram`),
 fingerprinting (`fractal_state_fingerprint`, `fractal_cycle_detect`),
 vector math (`fractal_vector_lp_distance`,
 `fractal_vector_quantize_int8`, `fractal_vector_quantize_binary`,
@@ -467,6 +468,25 @@ exception reaches a log line.
 - Enterprise write-path tools and destructive vectorizer operations
   carry `destructiveHint` annotations; reasoning-config changes are
   similarly flagged and always logged with old + new values.
+- **Every hint is sent explicitly.** Each tool sends all four standard
+  hints (`readOnlyHint`, `destructiveHint`, `idempotentHint`,
+  `openWorldHint`), true or false. In the MCP spec an omitted
+  `destructiveHint` or `openWorldHint` defaults to true, so leaving a false
+  one out would make a closed-world, non-destructive tool look destructive
+  and open-world to a spec-following client. A tool nobody classified is
+  destructive by default, and `mcp/tests/mcp_smoke_client.py` checks every
+  served tool against a hand-maintained table (`EXPECTED_SAFETY`): a new
+  tool must be classified there by a person, which regenerating the
+  safety lock alone does not force.
+- **Read-only mode also latches the engine.** With `FSQL_MCP_READ_ONLY=true`
+  the server calls `fractal_lock_destructive()` on every connection it opens: a
+  one-way, per-connection latch after which the engine itself refuses
+  `fractal_ledger_flush`, `_compact`, `_reset_soft` and `_reset_hard`, so a
+  mis-annotated tool, or SQL a reasoning agent generated, cannot wipe the ledger
+  either. The four functions are also `SQLITE_DIRECTONLY` (a trigger or view
+  cannot call them). If the engine is older than the plugin and lacks the
+  function, the server logs a `startup_warning` and keeps its own refusal in
+  force. See [enterprise.md](enterprise.md).
 - **"Reaches outside the database" is annotated per tool.** `openWorldHint`
   marks the tools whose call actually crosses the server boundary — a
   chat-LLM or embedding-provider dispatch (`fractal_reason`,
