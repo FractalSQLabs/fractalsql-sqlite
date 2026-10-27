@@ -31,10 +31,18 @@ namespace fsqlmcp
         return !out.empty();
     }
 
+    // One response, one line, one write. Workers answer concurrently; with separate
+    // fputs + fputc calls two responses could interleave on stdout (A, B, '\n', '\n'),
+    // gluing two JSON objects onto one line and corrupting the client's framing.
     static void writeLine( const std::string& response )
     {
-        std::fputs( response.c_str(), stdout );
-        std::fputc( '\n', stdout );
+        static std::mutex outMu;
+        std::string line;
+        line.reserve( response.size() + 1 );
+        line += response;
+        line += '\n';
+        std::lock_guard<std::mutex> lk( outMu );
+        std::fwrite( line.data(), 1, line.size(), stdout );
         std::fflush( stdout );
     }
 

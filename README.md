@@ -33,7 +33,7 @@ and hands off to the next. You don't need to read everything; follow the path.
 
 1. **What is this and why do I care?**: you are here. Sovereign Data Intelligence, in one page.
 2. **How do I get the extension running in 60 seconds?** → [Getting Started](docs/getting-started.md) (`.load` the extension, then your first Scout search).
-3. **How do I apply this to my industry?** → [Starter Kits](docs/starter-kits.md): runnable, industry-specific SQL scripts (SOC, FinTech, MedTech, Fleet, Smart-Cities, …).
+3. **How do I apply this to my industry?** → [Starter Kits](docs/starter-kits.md): runnable, industry-specific SQL scripts (SOC, FinTech, MedTech, Fleet, Smart-Cities, automotive, aerospace, telecom, climate tech, RF, …).
 4. **How does a specific agent work and what are its inputs?** → [Agent Recipes](docs/api-agency.md): the built-in agents, each as a recipe.
 5. **How do I use this from my AI client instead of SQL?** → [MCP Plugin](docs/mcp-plugin.md): the `fractalsql-sqlite-mcp` server exposes the whole function surface as MCP tools for Claude Desktop, Cursor, Windsurf, Claude Code, LangChain, LlamaIndex, CrewAI, or any MCP client.
 6. **How do I build a proprietary agent that isn't in the box?** → [Composition Guide](docs/composition-guide.md): the design patterns behind the recipes.
@@ -78,7 +78,7 @@ Plus SQLite-native plumbing: `fractal_vector` as a canonical BLOB type,
 runnable examples lives in [sql/fractalsql--1.0.sql](sql/fractalsql--1.0.sql).
 
 Everything above ships as a ready-made tool surface too: the bundled
-`fractalsql-sqlite-mcp` MCP server turns the function catalog into 81 typed
+`fractalsql-sqlite-mcp` MCP server turns the function catalog into 82 typed
 tools (the same engine-filtered surface every release verifies against committed
 integrity locks). It speaks standard MCP over stdio or HTTP, so it drops into
 any client or framework that does the same -- Claude Desktop, Cursor, Windsurf,

@@ -106,6 +106,8 @@
 --   fractal_change_point_detect(series, window, threshold
 --     [, max_points])                                    -> TEXT JSON
 --   fractal_periodogram(series[, max_peaks])             -> TEXT JSON
+--   fractal_spectrogram_entropy(series[, window[, hop
+--     [, max_frames]]])                                  -> TEXT JSON array
 --   fractal_tda_persistence_diagram(points, dim, max_dim,
 --     max_thresh[, max_h0_bars])                         -> TEXT JSON
 --   fractal_state_fingerprint(vec, n_bits[, seed])       -> BLOB

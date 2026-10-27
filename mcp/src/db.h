@@ -23,8 +23,8 @@ namespace fsqlmcp
     // The plugin's own version, and the engine surface version it was
     // built and tested against (version numbers track the engine).
     static const char* const kMcpPluginName       = "fractalsql-sqlite-mcp";
-    static const char* const kMcpPluginVersion    = "2.0.10";
-    static const char* const kEngineVersionExpect = "2.0.10";
+    static const char* const kMcpPluginVersion    = "2.0.11";
+    static const char* const kEngineVersionExpect = "2.0.11";
 
     using SqlValue = std::variant<std::nullptr_t, std::int64_t, double, std::string,
                                   std::vector<std::uint8_t>>;
@@ -91,7 +91,7 @@ namespace fsqlmcp
 
         void connect( const std::string& dbPath, const std::string& extensionPath,
                       const std::string& bootstrapSql, const std::string& engineVersionExpected,
-                      bool agentPartialReasoningFail = true )
+                      bool agentPartialReasoningFail = true, bool lockDestructive = false )
         {
             openDatabase( dbPath );
             // Every engine call binds parameters. The only statements
@@ -101,6 +101,7 @@ namespace fsqlmcp
             loadExtensionLockedDown( extensionPath );
             runBootstrap( bootstrapSql );
             if( agentPartialReasoningFail ) applyAgentPartialReasoningFail();
+            if( lockDestructive ) applyDestructiveLatch();
             checkVersionSkew( engineVersionExpected );
         }
 
@@ -281,6 +282,31 @@ namespace fsqlmcp
             }
         }
 
+        // FSQL_MCP_READ_ONLY=true: latch the engine's destructive ledger
+        // functions on this connection (fractal_lock_destructive(), one-way:
+        // nothing in SQL can undo it). The server already refuses the
+        // destructiveHint tools before they reach the engine; this is the
+        // second line, so a mis-annotated tool, or SQL a reasoning agent
+        // generated, still cannot wipe the ledger. Not fatal if the engine is
+        // older than the plugin and lacks the function: the server-side refusal
+        // stays in force and the gap is recorded as a startup warning, the same
+        // posture as the version-skew guard.
+        void applyDestructiveLatch()
+        {
+            try
+            {
+                exec( "SELECT fractal_lock_destructive()" );
+            }
+            catch( const std::exception& e )
+            {
+                warnings_.push_back( std::string(
+                    "FSQL_MCP_READ_ONLY: engine-side destructive latch not applied "
+                    "(server-side refusal still active): " ) + e.what() );
+                logging::event( "startup_warning", Json{ { "note", warnings_.back() } } );
+            }
+            catch( ... ) { /* non-fatal */ }
+        }
+
         // Version-skew guard: warn, never hard-fail (the strict flag
         // governs the tool-surface hash, not this).
         void checkVersionSkew( const std::string& engineVersionExpected )
@@ -432,6 +458,7 @@ namespace fsqlmcp
             std::string extensionPath;   // FRACTALSQL_EXTENSION_PATH
             std::string bootstrapSql;    // FRACTALSQL_BOOTSTRAP_SQL (easy_install.sh's snippet)
             bool        agentPartialReasoningFail = true;   // FSQL_MCP_AGENT_PARTIAL
+            bool        lockDestructive = false;            // FSQL_MCP_READ_ONLY: latch the engine's destructive ledger functions
         };
 
         void configure( ConnectConfig cfg ) { cfg_ = std::move( cfg ); }
@@ -514,7 +541,7 @@ namespace fsqlmcp
             {
                 auto c = std::make_shared<DbConnection>();
                 c->connect( cfg_.dbPath, cfg_.extensionPath, cfg_.bootstrapSql,
-                            kEngineVersionExpect, cfg_.agentPartialReasoningFail );
+                            kEngineVersionExpect, cfg_.agentPartialReasoningFail, cfg_.lockDestructive );
                 connections_[ key ] = c;
                 for( const std::string& w : c->startupWarnings() )
                     logging::event( "session_startup_warning", Json{ { "session", key }, { "note", w } } );

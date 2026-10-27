@@ -49,12 +49,7 @@ namespace fsqlmcp
 
     static Json annotationsOf( const ToolSpec& t )
     {
-        Json annotations;
-        if( t.destructiveHint ) annotations[ "destructiveHint" ] = true;
-        if( t.readOnlyHint )    annotations[ "readOnlyHint" ]    = true;
-        if( t.idempotentHint )  annotations[ "idempotentHint" ]  = true;   // 15.2
-        if( t.openWorldHint )   annotations[ "openWorldHint" ]   = true;   // 15.2
-        if( t.secretHint )      annotations[ "secretHint" ]      = true;   // 15.2
+        Json annotations = toolAnnotations( t );
         if( t.retryTier )       annotations[ "x-fractalsql-retry-tier" ] = std::string( *t.retryTier );
         return annotations;
     }

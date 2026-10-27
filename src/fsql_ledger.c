@@ -885,6 +885,28 @@ static int ledger_verify_tip(const FsqlLedgerCtx *lc, int kind,
 /* fractal_ledger_truth_count / shadow_count                           */
 /* ------------------------------------------------------------------ */
 
+/* The destructive ledger functions refuse once fractal_lock_destructive()
+ * has latched this connection. Checked BEFORE the enterprise core is
+ * resolved, so Community and Enterprise builds refuse identically. */
+static int ledger_destructive_blocked(sqlite3_context *sctx, const FsqlState *st) {
+    if (!st->destructive_locked) return 0;
+    sqlite3_result_error(sctx,
+        "fractalsql: destructive ledger operations are locked on this connection "
+        "(fractal_lock_destructive() was called; it cannot be undone)", -1);
+    return 1;
+}
+
+/* fractal_lock_destructive(): one-way latch, see FsqlState.destructive_locked.
+ * There is deliberately no unlock function. */
+static void ledger_lock_destructive_fn(sqlite3_context *sctx, int argc,
+                                       sqlite3_value **argv) {
+    (void)argc; (void)argv;
+    FsqlState *st = ledger_state_of(sctx);
+    if (!st) return;
+    st->destructive_locked = 1;
+    sqlite3_result_text(sctx, "locked", -1, SQLITE_STATIC);
+}
+
 /* flush(): core flush (drives write_entry into the buffer), then
  * materialize the buffer into fractalsql_ledger in one transaction. */
 static void ledger_flush_fn(sqlite3_context *sctx, int argc,
@@ -892,6 +914,7 @@ static void ledger_flush_fn(sqlite3_context *sctx, int argc,
     (void)argc; (void)argv;
     FsqlState *st = ledger_state_of(sctx);
     if (!st) return;
+    if (ledger_destructive_blocked(sctx, st)) return;
     if (ledger_ensure_ent(st, sctx) != 0) return;
     FsqlLedgerCtx *lc = ledger_ctx_of(st->ledger_ctx);
     if (!lc) {
@@ -1090,6 +1113,7 @@ static void ledger_compact_fn(sqlite3_context *sctx, int argc,
     (void)argc; (void)argv;
     FsqlState *st = ledger_state_of(sctx);
     if (!st) return;
+    if (ledger_destructive_blocked(sctx, st)) return;
     if (ledger_ensure_ent(st, sctx) != 0) return;
     /* Compact drops decayed/evicted shadow entries, no slot clearing
      * (the surviving blob stays authoritative). */
@@ -1101,6 +1125,7 @@ static void ledger_reset_soft_fn(sqlite3_context *sctx, int argc,
     (void)argc; (void)argv;
     FsqlState *st = ledger_state_of(sctx);
     if (!st) return;
+    if (ledger_destructive_blocked(sctx, st)) return;
     if (ledger_ensure_ent(st, sctx) != 0) return;
     ledger_reset_common(sctx, st->ent.ledger_reset_soft,
                         "fsql_ledger_reset_soft",
@@ -1112,6 +1137,7 @@ static void ledger_reset_hard_fn(sqlite3_context *sctx, int argc,
     (void)argc; (void)argv;
     FsqlState *st = ledger_state_of(sctx);
     if (!st) return;
+    if (ledger_destructive_blocked(sctx, st)) return;
     if (ledger_ensure_ent(st, sctx) != 0) return;
     ledger_reset_common(sctx, st->ent.ledger_reset_hard,
                         "fsql_ledger_reset_hard",
@@ -1586,29 +1612,38 @@ static void ledger_verify_fn(sqlite3_context *sctx, int argc,
  *     library symbols, not SQL functions; they are not registered here.
  */
 int fsql_ledger_register(sqlite3 *db, FsqlState *st) {
-    const int flags = SQLITE_UTF8 | SQLITE_INNOCUOUS;  /* stateful: NOT deterministic */
+    /* Stateful: NOT deterministic. The destructive functions are DIRECTONLY,
+     * not INNOCUOUS: SQLite then refuses to run them from a trigger, a view,
+     * a CHECK constraint or a generated column, so a hostile or careless
+     * schema cannot make an ordinary statement wipe the ledger. A top-level
+     * statement still calls them as before. */
+    const int flags_safe   = SQLITE_UTF8 | SQLITE_INNOCUOUS;
+    const int flags_direct = SQLITE_UTF8 | SQLITE_DIRECTONLY;
 
     static const struct {
         const char *name;
         void (*fn)(sqlite3_context *, int, sqlite3_value **);
         int nargs;
+        int direct;     /* 1 = SQLITE_DIRECTONLY */
     } FUNCS[] = {
-        { "fractal_ledger_flush",        ledger_flush_fn,        0 },
-        { "fractal_ledger_load",         ledger_load_fn,         0 },
-        { "fractal_ledger_compact",      ledger_compact_fn,      0 },
-        { "fractal_ledger_reset_soft",   ledger_reset_soft_fn,   0 },
-        { "fractal_ledger_reset_hard",   ledger_reset_hard_fn,   0 },
-        { "fractal_ledger_truth_count",  ledger_truth_count_fn,  0 },
-        { "fractal_ledger_shadow_count", ledger_shadow_count_fn, 0 },
-        { "fractal_audit_unpack",        ledger_audit_unpack_fn, 1 },
-        { "fractal_audit_log",           ledger_audit_log_fn,    2 },
-        { "fractal_ledger_verify",       ledger_verify_fn,       0 },
-        { "fractal_ledger_verify",       ledger_verify_fn,       1 },
+        { "fractal_ledger_flush",        ledger_flush_fn,        0, 1 },
+        { "fractal_ledger_load",         ledger_load_fn,         0, 0 },
+        { "fractal_ledger_compact",      ledger_compact_fn,      0, 1 },
+        { "fractal_ledger_reset_soft",   ledger_reset_soft_fn,   0, 1 },
+        { "fractal_ledger_reset_hard",   ledger_reset_hard_fn,   0, 1 },
+        { "fractal_lock_destructive",    ledger_lock_destructive_fn, 0, 1 },
+        { "fractal_ledger_truth_count",  ledger_truth_count_fn,  0, 0 },
+        { "fractal_ledger_shadow_count", ledger_shadow_count_fn, 0, 0 },
+        { "fractal_audit_unpack",        ledger_audit_unpack_fn, 1, 0 },
+        { "fractal_audit_log",           ledger_audit_log_fn,    2, 0 },
+        { "fractal_ledger_verify",       ledger_verify_fn,       0, 0 },
+        { "fractal_ledger_verify",       ledger_verify_fn,       1, 0 },
     };
 
     for (size_t i = 0; i < sizeof(FUNCS) / sizeof(FUNCS[0]); i++) {
         int rc = sqlite3_create_function_v2(db, FUNCS[i].name, FUNCS[i].nargs,
-                                            flags, st, FUNCS[i].fn,
+                                            FUNCS[i].direct ? flags_direct : flags_safe,
+                                            st, FUNCS[i].fn,
                                             NULL, NULL, NULL);
         if (rc != SQLITE_OK) return rc;
     }

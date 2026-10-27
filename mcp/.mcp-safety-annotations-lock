@@ -60,6 +60,7 @@ fractal_search_debug destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
 fractal_search_explore destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
 fractal_search_telemetry destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
 fractal_search_trajectory destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
+fractal_spectrogram_entropy destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
 fractal_sql_agent destructive=0 readOnly=0 idempotent=0 openWorld=1 secret=1
 fractal_state_fingerprint destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
 fractal_store_morphology destructive=0 readOnly=0 idempotent=0 openWorld=0 secret=0

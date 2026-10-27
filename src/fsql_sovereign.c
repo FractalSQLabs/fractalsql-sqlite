@@ -36,6 +36,8 @@
  *   fractal_change_point_detect(series, window,          -> TEXT (JSON)
  *         threshold [, max_points])
  *   fractal_periodogram(series [, max_peaks])            -> TEXT (JSON)
+ *   fractal_spectrogram_entropy(series [, window [, hop  -> TEXT (JSON array)
+ *         [, max_frames]]])
  *   fractal_optimize_subset(item_values, upper_bounds, k -> TEXT (JSON)
  *         [, prev_weights [, turnover_penalty [, seed]]])
  *   fractal_state_fingerprint(vec, n_bits [, seed])       -> BLOB
@@ -1678,6 +1680,65 @@ static void periodogram_fn(sqlite3_context *ctx, int argc,
     sb_result(ctx, &out);
 }
 
+/* fractal_spectrogram_entropy(series [, window [, hop [, max_frames]]]) -> TEXT JSON
+ * Bare JSON array of per-frame normalized spectral entropy in [0,1]
+ * (window default 64, hop default 32, max_frames default 4096). A bare
+ * array, not an object, so the result pipes straight into
+ * fractal_change_point_detect / fractal_dimension_dfa. */
+static void spectrogram_entropy_fn(sqlite3_context *ctx, int argc,
+                                   sqlite3_value **argv) {
+    if (sqlite3_value_type(argv[0]) == SQLITE_NULL) {
+        sqlite3_result_null(ctx); return;
+    }
+
+    double *series = NULL;
+    int n = 0;
+    if (decode_series(argv[0], &series, &n) != 0) {
+        sqlite3_result_error(ctx,
+            "fractalsql: malformed series (expect CSV/JSON text or "
+            "float32 BLOB)", -1);
+        return;
+    }
+    int window     = opt_int(argc, argv, 1, 64);
+    int hop        = opt_int(argc, argv, 2, 32);
+    int max_frames = opt_int(argc, argv, 3, 4096);
+    if (window < 8 || window > 512 || hop < 1 ||
+        max_frames < 1 || max_frames > 4096 || n < window) {
+        free(series);
+        sqlite3_result_error(ctx,
+            "fractalsql: fractal_spectrogram_entropy needs window in "
+            "[8,512], hop >= 1, max_frames in [1,4096], and "
+            "n >= window", -1);
+        return;
+    }
+
+    double *out_entropy = (double *)malloc((size_t)max_frames * sizeof(double));
+    if (!out_entropy) { free(series); sqlite3_result_error_nomem(ctx); return; }
+    size_t out_n_frames = 0;
+    int rc = fsql_spectrogram_entropy(series, (size_t)n, (size_t)window,
+                                      (size_t)hop, out_entropy,
+                                      (size_t)max_frames, &out_n_frames);
+    free(series);
+    if (rc != FSQL_OK) {
+        free(out_entropy);
+        char buf[128];
+        snprintf(buf, sizeof buf,
+                 "fractalsql: fractal_spectrogram_entropy rc=%d "
+                 "(non-finite sample or bad window/hop)", rc);
+        sqlite3_result_error(ctx, buf, -1);
+        return;
+    }
+
+    SB out; memset(&out, 0, sizeof out);
+    int bad = sb_append(&out, "[");
+    for (size_t i = 0; i < out_n_frames && !bad; i++)
+        bad = sb_appendf(&out, "%s%.10f", i ? "," : "", out_entropy[i]);
+    if (!bad) bad = sb_append(&out, "]");
+    free(out_entropy);
+    if (bad) { free(out.s); sqlite3_result_error_nomem(ctx); return; }
+    sb_result(ctx, &out);
+}
+
 /* Hardcoded SQL-level objective for fractal_optimize_subset: maximize
  * sum(weight[i] * item_value[i]) -- value-weighted allocation, the
  * natural generic use of this primitive (per-item "how much is this
@@ -2095,6 +2156,7 @@ int fsql_sovereign_register(sqlite3 *db, FsqlState *st) {
      * is a pure function of its own TEXT argument, not table state). */
     static const int change_point_arities[] = { 3, 4 };
     static const int periodogram_arities[]  = { 1, 2 };
+    static const int spectrogram_arities[]  = { 1, 2, 3, 4 };
     static const int subset_arities[]       = { 3, 4, 5, 6 };
     static const int fingerprint_arities[]  = { 2, 3 };
     static const int cycle_detect_arities[] = { 2, 3 };
@@ -2108,6 +2170,11 @@ int fsql_sovereign_register(sqlite3 *db, FsqlState *st) {
     for (size_t i = 0; i < sizeof(periodogram_arities) / sizeof(int); i++) {
         rc = reg_fn(db, "fractal_periodogram", periodogram_arities[i],
                     f_pure, st, (void *)&periodogram_fn);
+        if (rc != SQLITE_OK) return rc;
+    }
+    for (size_t i = 0; i < sizeof(spectrogram_arities) / sizeof(int); i++) {
+        rc = reg_fn(db, "fractal_spectrogram_entropy", spectrogram_arities[i],
+                    f_pure, st, (void *)&spectrogram_entropy_fn);
         if (rc != SQLITE_OK) return rc;
     }
     for (size_t i = 0; i < sizeof(subset_arities) / sizeof(int); i++) {

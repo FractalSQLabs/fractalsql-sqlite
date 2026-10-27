@@ -248,7 +248,7 @@ for history, not the recommended starting point.
 
 ## Industry vertical demos
 
-Thirteen runnable walkthroughs — ten **industry verticals** and three
+Forty-two runnable walkthroughs — twenty-seven **domain kits** and fifteen
 **agentic verticals** — each with its own synthetic dataset and its own
 subset of the function surface chosen for genuine domain fit, not forced
 coverage. Every one ends with a `fractal_reason()` narrative call over
@@ -257,9 +257,9 @@ two newest verticals, Biotech/Genomics and Agentic Edge Swarm, which are
 raw-primitive showcases and run with no reasoning endpoint at all. Same
 prerequisites as `demo.sql` (extension loaded; the final reasoning
 section in each needs [reasoning configured](../docs/reasoning-setup.md)
-— every earlier section runs without it). All thirteen are also wired
+— every earlier section runs without it). All forty-two are also wired
 into the Docker demo — see [the Learning Path](../docs/docker-demo.md#docker-demo-the-learning-path),
-including `run_demo.sh` to run all thirteen (plus every other demo in
+including `run_demo.sh` to run all forty-two (plus every other demo in
 this directory) in one pass instead of one `.read` per file.
 Five (MedTech, Maritime, Fleet, Cybersecurity, Biotech/Genomics) store their vector
 columns as the native **`fractal_vector`** BLOB type instead of
@@ -423,6 +423,71 @@ plugin not configured" hint and the shell moves on).
   `fractal_agent_recall_hybrid`, `fractal_agent_recommend_diverse`, and
   the `fractal_diversify_enable` stateful-diversity loop.
 
+
+### Newer verticals (automotive, aerospace, telecom, climate tech, RF)
+
+- **[demo-vertical-ev-battery-lifecycle.sql](demo-vertical-ev-battery-lifecycle.sql)** —
+  EV Battery Lifecycle (agentic kit). 3 vehicles x 96 readings (state of health, pack temperature, cell voltage); one vehicle develops an accelerating thermal ramp and SoH fade. Chains `fractal_agent_patient_deterioration_triage` (cohort search plus baseline-vs-current trajectory drift: a vehicle's intake baseline plays the patient's admission baseline) with `fractal_agent_anomaly_triage` (the DFA drift exponent of the temperature series), each shown hand-composed first and then as the shipped one-call agent, closing with one maintenance / safety recommendation.
+- **[demo-vertical-adas-safety-validation.sql](demo-vertical-adas-safety-validation.sql)** —
+  ADAS Safety Validation (agentic kit). A pre-commit safety barrier. `fractal_agent_outlier_intercept` screens three proposed maneuvers against a history of known-bad states (cosine by default, exact Euclidean when magnitude should count: a gentle lane change is intercepted by cosine but allowed by l2), and `fractal_search_trajectory` flags a vehicle whose routing vector has strayed from the fleet baseline. Closes with one go / no-go verdict.
+- **[demo-vertical-v2x-warranty-triage.sql](demo-vertical-v2x-warranty-triage.sql)** —
+  V2X Warranty Triage (agentic kit). Routes an incoming diagnostic-trouble-code event to the best-capable repair workflow under a token budget (`fractal_agent_route_task`), then recalls similar historical warranty claims with a strict metadata filter (`fractal_agent_recall_hybrid`; a two-predicate model-year-and-component cohort is shown with `fractal_hybrid_clinical_search`). Closes with a dispatch + claim-context summary.
+- **[demo-vertical-critical-inventory-routing.sql](demo-vertical-critical-inventory-routing.sql)** —
+  Critical Inventory Routing (agentic kit). Six depots x 64 days of consumption. `fractal_dimension_dfa` finds the depot whose demand is accelerating (non-linear) rather than merely high; `fractal_optimize_portfolio` picks which 3 depots get the scheduled replenishment run with the risk matrix inflated by the DFA exponent; the bursty depot is flagged for expedited restock instead. `fractal_agent_allocate` is the shipped one-call form of the optimizer step. Closes with the rebalancing rationale.
+- **[demo-vertical-heavy-industry-predictive-maintenance.sql](demo-vertical-heavy-industry-predictive-maintenance.sql)** —
+  Heavy-Industry Predictive Maintenance (agentic kit). Four pumps and drives x 96 readings; one pump develops an accelerating bearing-vibration defect. `fractal_agent_anomaly_triage` flags the vibration regime shift and `fractal_agent_patient_deterioration_triage` measures drift from the asset's intake baseline with a same-class cohort search (an asset plays the patient). Closes with a maintenance-window recommendation. This is the wear / lifecycle half of heavy-industry monitoring.
+- **[demo-vertical-climatech-grid-balancing.sql](demo-vertical-climatech-grid-balancing.sql)** —
+  Climate Tech: Grid Balancing (agentic kit). Grid-frequency telemetry for three balancing areas; one loses damping and its oscillation envelope grows. `fractal_dimension_drift` (the volatility-regime recipe from the quant-finance kit, applied to a grid) detects it, and `fractal_optimize_portfolio` chooses the 4 of 6 generation and storage resources that carry the response, with a ramp-risk matrix in which solar and wind share weather risk. `fractal_agent_anomaly_triage` and `fractal_agent_allocate` are the shipped one-call forms. Closes with the dispatch-plan rationale.
+- **[demo-vertical-hazmat-occupational-triage.sql](demo-vertical-hazmat-occupational-triage.sql)** —
+  Hazmat / Occupational Exposure (domain kit). 36 workers across work zones and shifts; a reactor-bay night-shift crew shows elevated dose rate, temperature and heart rate. `fractal_agent_patient_deterioration_triage` is reused verbatim (cohort search plus baseline-vs-current drift, with exposure columns in place of clinical vitals). Closes with a medical-countermeasure dispatch recommendation.
+- **[demo-vertical-scenario-planning-simulation.sql](demo-vertical-scenario-planning-simulation.sql)** —
+  Scenario Planning & Simulation (domain kit). 24 candidate continuity scenarios in four clusters. Scout (`fractal_search_explore`) picks six deliberately different ones with no model; `fractal_agent_plan_explore` (MCTS-style exploration, needs an embedding endpoint) generates scenario variants from a seed state description. Closes with a summary of the scenario set.
+- **[demo-vertical-avionics-fault-prediction.sql](demo-vertical-avionics-fault-prediction.sql)** —
+  Avionics Fault Prediction (domain kit). A 12-aircraft fleet with planned-path and current-state vectors in 3D; one flight has drifted far off plan and has erratic heading changes. `fractal_agent_track_anomaly` generalizes straight from the maritime kit's 2D tracks to 3D flight paths (trajectory deviation search plus the heading-change DFA exponent). Closes with a reasoned classification of the deviation.
+- **[demo-vertical-satellite-constellation-coverage.sql](demo-vertical-satellite-constellation-coverage.sql)** —
+  Satellite Constellation Coverage (domain kit). A 20 x 20 footprint lattice, healthy vs a copy missing an 8 x 8 dead zone (the gap raises lacunarity). `fractal_agent_network_coverage_alert` combines the footprint morphology with link-quality telemetry drift; `fractal_agent_schedule_workload` models launch-slot scheduling for the replacement payload. Coverage-gap angle only: orbital drift and collision detection are a different problem.
+- **[demo-vertical-telecom-account-anomaly-screening.sql](demo-vertical-telecom-account-anomaly-screening.sql)** —
+  Telecom Account-Anomaly Screening (domain kit). Screens proposed account changes (SIM swap, port-out, new device, location jump) against a history of known-anomalous patterns with `fractal_agent_outlier_intercept`, reused verbatim: the same shape as the ADAS kit. Shows cosine (shape of the event) against exact Euclidean (intensity counts). A general pre-commit safety check, not a fraud-specific product.
+- **[demo-vertical-telecom-traffic-routing.sql](demo-vertical-telecom-traffic-routing.sql)** —
+  Telecom Traffic Routing (domain kit). Five session requests dispatched to the best-capable of four network nodes under a token budget with `fractal_agent_route_task`, reused verbatim; then re-routed over only the nodes with headroom so a loaded node's request is re-homed. Nearest-capable-node dispatch, not multi-hop rerouting around a failed node.
+- **[demo-vertical-climatech-emissions-monitoring.sql](demo-vertical-climatech-emissions-monitoring.sql)** —
+  Climate Tech: Emissions Monitoring (domain kit). Methane, CO2 and pipeline-pressure sensors; one methane sensor starts leaking (an accelerating concentration ramp). `fractal_agent_anomaly_triage` is reused verbatim to flag the shift into a leak regime; the same call screens a water-distribution pressure series. Closes with a leak narrative and field response.
+- **[demo-vertical-climatech-risk-exposure.sql](demo-vertical-climatech-risk-exposure.sql)** —
+  Climate Tech: Risk Exposure (domain kit). A 20 x 20 hazard-sensor grid with dry-season and wet-season fuel-moisture deficit indices. `fractal_agent_network_coverage_alert` is reused verbatim: morphology of the elevated-hazard region plus telemetry drift, shaped like the smart-cities kit's sensor grid. Closes with an exposure narrative for an insured portfolio.
+- **[demo-vertical-rf-spectrum-sensing.sql](demo-vertical-rf-spectrum-sensing.sql)** —
+  RF Spectrum Sensing (domain kit). Three channels x 256 samples: a beacon that gets jammed partway through, an empty noise channel and a steady carrier. `fractal_periodogram` says which frequencies dominate, the new `fractal_spectrogram_entropy` says how ordered the spectrum is window by window, and `fractal_change_point_detect` localizes when the order was lost, straight from the entropy series. A raw-primitive showcase: no agents and no model until the closing triage narrative.
+
+
+### Event-stream, document, spatial and allocation kits
+
+- **[demo-vertical-event-stream-anomaly-triage.sql](demo-vertical-event-stream-anomaly-triage.sql)** —
+  Event-Stream Anomaly Triage (domain kit). Four endpoints x 96 one-minute intervals of request latency; one endpoint (EP-C) develops an accelerating latency ramp (a timeout cascade) and a second (EP-B) has a retry-storm oscillation in its request rate. `fractal_agent_anomaly_triage` flags the latency regime shift, `fractal_periodogram` finds the retry-storm period, and `fractal_search_trajectory` finds which endpoints' success-rate / latency / timeout / fill health has moved the same way EP-C's did.
+- **[demo-vertical-outlier-interception-footprint.sql](demo-vertical-outlier-interception-footprint.sql)** —
+  Outlier Interception & Footprint Analysis (domain kit). Screens proposed traffic sessions against a history of known-abuse signatures with `fractal_agent_outlier_intercept` (cosine by default, exact Euclidean when magnitude should count), then uses `fractal_dimension_boxcount` on click-coordinate clouds: organic traffic fills the page (a high box-counting dimension) while an automated farm hammering a handful of targets collapses onto a line (a dimension near 1).
+- **[demo-vertical-agentic-budget-reallocation.sql](demo-vertical-agentic-budget-reallocation.sql)** —
+  Agentic Budget Reallocation (agentic kit). Six channels x 64 days of attributed outcomes. `fractal_dimension_dfa` finds the channel whose response is accelerating (a non-linear surge a plain average would hide); `fractal_optimize_portfolio` picks which 3 channels receive the scheduled budget increase with the risk matrix inflated by the DFA exponent; the surging channel is flagged for a capped, monitored test instead. `fractal_agent_allocate` is the shipped one-call form of the optimizer step, and `fractal_agent_route_task` dispatches each journey to the best-matching model under a token budget.
+- **[demo-vertical-stalled-process-triage.sql](demo-vertical-stalled-process-triage.sql)** —
+  Stalled-Process Triage (domain kit). 36 open items across segments and stages; three tier-1 items in the review stage show the same stall signature (time-in-stage far above the healthy velocity, falling engagement, a silent owner, deepening concessions). `fractal_agent_patient_deterioration_triage` is reused verbatim (cohort search plus baseline-vs-current drift, with item-health columns in place of clinical vitals): an item's stage-entry telemetry plays the patient's admission baseline.
+- **[demo-vertical-intent-matching-discovery.sql](demo-vertical-intent-matching-discovery.sql)** —
+  Intent Matching & Diverse Selection (domain kit). 24 target entities in four intent clusters (category + stage signal vectors) and a 30-item content library. Scout (`fractal_search_explore`, the diversity-first MMR search) picks six deliberately different entities around a target profile instead of six near-duplicates, and `fractal_agent_recommend_diverse` returns a repulsion-diverse set of content items for the chosen entity: no model needed for either.
+- **[demo-vertical-agentic-next-action-ranking.sql](demo-vertical-agentic-next-action-ranking.sql)** —
+  Agentic Ranking & Next-Action Recommendation (agentic kit). 30 candidates across segments, a 12-item action catalog and a natural-language question over the candidate table. `fractal_agent_recall_hybrid` recalls the most similar past candidates inside one segment (a strict metadata filter), `fractal_agent_recommend_diverse` proposes a diverse set of next actions (not four variations of 'send an email'), and `fractal_sql_agent` answers a status question in plain English by generating and running the SQL.
+- **[demo-vertical-document-risk-drift.sql](demo-vertical-document-risk-drift.sql)** —
+  Document Risk Drift & Diverse Alternatives (domain kit). Four agreements x 96 weekly clause-risk reviews; one agreement's amended terms drift into a new regime (an accelerating risk creep). `fractal_dimension_drift` (the regime-detection recipe from the quant-finance kit, applied to document risk) finds it; Scout (`fractal_search_explore`) pulls six deliberately different clause variants out of the 24-clause corpus so the reviewer sees the spread rather than six near-copies; and `fractal_agent_recommend_diverse` proposes diverse approved replacement language.
+- **[demo-vertical-coordinated-record-detection.sql](demo-vertical-coordinated-record-detection.sql)** —
+  Record Clustering & Severity Trajectory (domain kit). A review desk screens new submissions against known ring signatures with `fractal_agent_outlier_intercept`, finds the records that moved from the normal severity baseline the way a staged ring does with `fractal_search_trajectory`, and measures the geographic footprint of event locations with `fractal_dimension_boxcount` (organic events scatter across the city; a staged ring repeats along one road).
+- **[demo-vertical-sensor-telemetry-allocation.sql](demo-vertical-sensor-telemetry-allocation.sql)** —
+  Sensor Telemetry & Resource Allocation (agentic kit). Six sites x 64 days of resource demand from soil-moisture sensors. `fractal_dimension_dfa` finds the site whose demand is accelerating (a non-linear trend or a failing supply line) rather than merely high; `fractal_optimize_portfolio` picks which 3 sites get the scheduled service run with the risk matrix inflated by the DFA exponent; the accelerating site is flagged for an inspection instead. `fractal_agent_allocate` is the shipped one-call form of the optimizer step.
+- **[demo-vertical-simulated-economy-drift.sql](demo-vertical-simulated-economy-drift.sql)** —
+  Simulated-Economy Drift & Loop Detection (agentic kit). Six markets x 96 days of price index; every market carries a weekly demand cycle, and one (mkt-d) enters an accelerating inflation spiral. `fractal_periodogram` confirms the weekly cycle, `fractal_dimension_dfa` flags the market that is inflating non-linearly, and `fractal_optimize_portfolio` picks the 3 markets for the scheduled sink program (the inflating market goes to an emergency price-cap instead). `fractal_agent_detect_loop` then watches trade-state logs: an automated actor that flips between the same two item states is detected while a varied actor is not.
+- **[demo-vertical-multi-series-replenishment.sql](demo-vertical-multi-series-replenishment.sql)** —
+  Multi-Series Forecasting & Replenishment (agentic kit). Six locations x 64 days of unit demand. `fractal_dimension_dfa` finds the location whose demand is accelerating (a viral item or a local event) rather than merely high; `fractal_optimize_portfolio` picks which 3 locations get the scheduled replenishment from the central hub with the risk matrix inflated by the DFA exponent; the surging location is flagged for an expedited pick instead. `fractal_agent_allocate` is the shipped one-call form of the optimizer step.
+- **[demo-vertical-periodicity-portfolio-selection.sql](demo-vertical-periodicity-portfolio-selection.sql)** —
+  Periodicity Detection & Portfolio Selection (domain kit). Six items x 96 days of sales velocity with a weekly demand cycle of differing strength. `fractal_periodogram` quantifies which items are genuinely periodic; `fractal_optimize_portfolio` picks the 3 items that get the scheduled action (a Sharpe-style trade of margin recovered against demand volatility); `fractal_agent_recommend_diverse` proposes a diverse set of substitute items. On the Enterprise edition `fractal_agent_diverse_portfolios` (multimodal optimization) also returns structurally different schedules; on the Community edition that step reports "enterprise tier not loaded".
+- **[demo-vertical-agentic-recall-recommendation.sql](demo-vertical-agentic-recall-recommendation.sql)** —
+  Agentic Recall & Diverse Recommendation (agentic kit). 24 candidate offers in four clusters and 30 abandoned sessions across categories. Scout (`fractal_search_explore`) picks six deliberately different offers around the user's profile so the follow-up tests variety rather than six near-identical offers; `fractal_agent_recall_hybrid` recalls the most similar past sessions inside the user's category (a strict metadata filter); and `fractal_sql_agent` answers a question over the session table in plain English.
+- **[demo-vertical-spatial-footprint-portfolio-risk.sql](demo-vertical-spatial-footprint-portfolio-risk.sql)** —
+  Spatial Footprint Complexity & Portfolio Risk (domain kit). Three districts' parcel footprints (a dense grid, a single arterial strip and a two-corridor district) measured with `fractal_dimension_boxcount`: the lower the dimension the more linear the frontage and the more a valuation depends on a few corridors. Six asset classes x 64 months of index values feed `fractal_dimension_dfa` and `fractal_optimize_portfolio` (pick 3 classes for the renewal push; the accelerating one is flagged), and Scout (`fractal_search_explore`) selects six deliberately different comparable parcels so the reviewer sees the spread of the market, not six near-twins.
 **A note on `fractal_dimension_boxcount`/`fractal_morphological_complexity`
 fixture design**, visible across several of the scripts above: both
 functions need enough *space-filling* points (a grid, a path, a real
@@ -584,6 +649,35 @@ DROP TABLE agents_demo_mem; DROP TABLE agents_demo_catalog; DROP TABLE agents_de
 DROP TABLE agents_demo_patients; DROP TABLE agents_demo_fcatalog; DROP TABLE agents_demo_fwarmup;
 DROP TABLE agents_demo_nodes; DROP TABLE agents_demo_alloc; DROP TABLE agents_demo_vehicles;
 DROP TABLE agents_demo_tracks;                                                                      -- demo-agents.sql
+DROP TABLE ebl_telemetry;  -- demo-vertical-ev-battery-lifecycle.sql
+DROP TABLE asv_known_bad; DROP TABLE asv_proposed; DROP TABLE asv_routes;  -- demo-vertical-adas-safety-validation.sql
+DROP TABLE v2x_capabilities; DROP TABLE v2x_claims;  -- demo-vertical-v2x-warranty-triage.sql
+DROP TABLE cir_depots; DROP TABLE cir_consumption; DROP TABLE cir_profile; DROP TABLE cir_result;  -- demo-vertical-critical-inventory-routing.sql
+DROP TABLE hpm_readings;  -- demo-vertical-heavy-industry-predictive-maintenance.sql
+DROP TABLE cgb_freq; DROP TABLE cgb_resources; DROP TABLE cgb_result;  -- demo-vertical-climatech-grid-balancing.sql
+DROP TABLE hot_workers;  -- demo-vertical-hazmat-occupational-triage.sql
+DROP TABLE sps_scenarios; DROP TABLE sps_scout;  -- demo-vertical-scenario-planning-simulation.sql
+DROP TABLE afp_flights;  -- demo-vertical-avionics-fault-prediction.sql
+DROP TABLE scc_footprints; DROP TABLE scc_slots;  -- demo-vertical-satellite-constellation-coverage.sql
+DROP TABLE taa_known_anomalous; DROP TABLE taa_proposed;  -- demo-vertical-telecom-account-anomaly-screening.sql
+DROP TABLE ttr_nodes; DROP TABLE ttr_requests;  -- demo-vertical-telecom-traffic-routing.sql
+DROP TABLE cem_readings;  -- demo-vertical-climatech-emissions-monitoring.sql
+DROP TABLE cre_grid;  -- demo-vertical-climatech-risk-exposure.sql
+DROP TABLE rfs_capture; DROP TABLE rfs_entropy;  -- demo-vertical-rf-spectrum-sensing.sql
+DROP TABLE esa_latency; DROP TABLE esa_rate; DROP TABLE esa_lprof; DROP TABLE esa_rprof; DROP TABLE esa_health; DROP TABLE esa_traj;  -- demo-vertical-event-stream-anomaly-triage.sql
+DROP TABLE oif_known; DROP TABLE oif_proposed; DROP TABLE oif_screen; DROP TABLE oif_screen_l2; DROP TABLE oif_clicks; DROP TABLE oif_dim;  -- demo-vertical-outlier-interception-footprint.sql
+DROP TABLE abr_outcome; DROP TABLE abr_prof; DROP TABLE abr_result; DROP TABLE abr_models; DROP TABLE abr_events; DROP TABLE abr_routed;  -- demo-vertical-agentic-budget-reallocation.sql
+DROP TABLE spt_items; DROP TABLE spt_traj; DROP TABLE spt_triage;  -- demo-vertical-stalled-process-triage.sql
+DROP TABLE imd_entities; DROP TABLE imd_picks; DROP TABLE imd_scout; DROP TABLE imd_content; DROP TABLE imd_rec;  -- demo-vertical-intent-matching-discovery.sql
+DROP TABLE anr_candidates; DROP TABLE anr_recall; DROP TABLE anr_actions; DROP TABLE anr_rec;  -- demo-vertical-agentic-next-action-ranking.sql
+DROP TABLE drd_risk; DROP TABLE drd_prof; DROP TABLE drd_clauses; DROP TABLE drd_picks; DROP TABLE drd_scout; DROP TABLE drd_approved; DROP TABLE drd_rec;  -- demo-vertical-document-risk-drift.sql
+DROP TABLE crd_known; DROP TABLE crd_proposed; DROP TABLE crd_screen; DROP TABLE crd_records; DROP TABLE crd_traj; DROP TABLE crd_locations; DROP TABLE crd_dim;  -- demo-vertical-coordinated-record-detection.sql
+DROP TABLE sta_demand; DROP TABLE sta_prof; DROP TABLE sta_result;  -- demo-vertical-sensor-telemetry-allocation.sql
+DROP TABLE sed_price; DROP TABLE sed_prof; DROP TABLE sed_result; DROP TABLE sed_loop;  -- demo-vertical-simulated-economy-drift.sql
+DROP TABLE msr_units; DROP TABLE msr_prof; DROP TABLE msr_result;  -- demo-vertical-multi-series-replenishment.sql
+DROP TABLE pps_sales; DROP TABLE pps_prof; DROP TABLE pps_result; DROP TABLE pps_catalog; DROP TABLE pps_rec;  -- demo-vertical-periodicity-portfolio-selection.sql
+DROP TABLE arr_offers; DROP TABLE arr_picks; DROP TABLE arr_scout; DROP TABLE arr_sessions; DROP TABLE arr_recall;  -- demo-vertical-agentic-recall-recommendation.sql
+DROP TABLE sfp_parcels; DROP TABLE sfp_dim; DROP TABLE sfp_index; DROP TABLE sfp_prof; DROP TABLE sfp_result; DROP TABLE sfp_comps; DROP TABLE sfp_picks; DROP TABLE sfp_scout;  -- demo-vertical-spatial-footprint-portfolio-risk.sql
 ```
 
 `demo-vectorizer.sql` and `demo-fractal-vector.sql` each tear themselves

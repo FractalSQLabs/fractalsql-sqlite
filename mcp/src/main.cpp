@@ -53,7 +53,7 @@ static std::vector<ToolSpec> buildAllTools( Db& db )
         all.insert( all.end(), v.begin(), v.end() );
     Resources::init( &db );
 
-    // 81 tools total: 14+4+22+22+10+5+4. This is what the engine actually
+    // 82 tools total: 14+4+23+22+10+5+4. This is what the engine actually
     // registers, verified against the live extension, and main.cpp checks
     // the same total when it labels a filtered surface.
 
@@ -315,7 +315,7 @@ static int checkSchemaGate( const std::string& lockPath, const std::string& hash
 {
     std::string expected;
     const LockCheckResult lockResult = checkSchemaLock( lockPath, hash, &expected );
-    std::string filtered = ( tools.size() == 81 ) ? std::string() : " (filtered surface)";
+    std::string filtered = ( tools.size() == 82 ) ? std::string() : " (filtered surface)";
     if( lockResult == LockCheckResult::Warn )
     {
         std::cerr << "schema hash mismatch: expected " << expected << " got " << hash << " ("
@@ -416,6 +416,7 @@ int main( int argc, char** argv )
         envOr( "FRACTALSQL_EXTENSION_PATH", "" ),
         envOr( "FRACTALSQL_BOOTSTRAP_SQL", "" ),
         agentPartialEnabled( envOr( "FSQL_MCP_AGENT_PARTIAL", "on" ) ),
+        envBool( "FSQL_MCP_READ_ONLY", false ),   // also latches the engine's destructive ledger functions
     } );
 
     const bool serving = !args.writeLock && !args.writeSafetyLock && !args.writeManifest && !args.listTools;

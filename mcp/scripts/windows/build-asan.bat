@@ -60,7 +60,7 @@ if not exist "%SQLITE_DIR%\sqlite3.c" (
 if not exist "%OUTDIR%" mkdir "%OUTDIR%"
 
 "%CLANGCL%" -std:c++17 /utf-8 /EHsc /O1 /W3 -fsanitize=address ^
-  /DFSQL_MCP_VERSION="\"2.0.10\"" ^
+  /DFSQL_MCP_VERSION="\"2.0.11\"" ^
   /I "%MCP_DIR%\vendor" /I "%MCP_DIR%\src" /I "%SQLITE_DIR%" ^
   /I "%OPENSSL_DIR%\include" ^
   "%SQLITE_DIR%\sqlite3.c" ^

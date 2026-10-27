@@ -78,7 +78,7 @@ int main( int argc, char** argv )
         DbConnection conn;
         check( "connect(): an unopenable DB path throws Connectivity",
                threwClass( [ &conn, &extPath ] {
-                   conn.connect( "/nonexistent_dir_xyz_abc/db.sqlite", extPath, "", "2.0.10" );
+                   conn.connect( "/nonexistent_dir_xyz_abc/db.sqlite", extPath, "", "2.0.11" );
                }, ErrorClass::Connectivity ) );
     }
 
@@ -88,7 +88,7 @@ int main( int argc, char** argv )
         DbConnection conn;
         check( "connect(): a nonexistent extension path throws Connectivity",
                threwClass( [ &conn ] {
-                   conn.connect( ":memory:", "/nonexistent_xyz.so", "", "2.0.10" );
+                   conn.connect( ":memory:", "/nonexistent_xyz.so", "", "2.0.11" );
                }, ErrorClass::Connectivity ) );
     }
 
@@ -107,7 +107,7 @@ int main( int argc, char** argv )
         check( "connect(): malformed bootstrap SQL propagates as a thrown "
                "ToolError",
                threwClass( [ &conn, &extPath ] {
-                   conn.connect( ":memory:", extPath, "THIS IS NOT VALID SQL;", "2.0.10" );
+                   conn.connect( ":memory:", extPath, "THIS IS NOT VALID SQL;", "2.0.11" );
                }, ErrorClass::Connectivity ) );
     }
 
@@ -129,7 +129,7 @@ int main( int argc, char** argv )
     // prepare failure: malformed SQL via all three query paths.
     {
         DbConnection conn;
-        conn.connect( ":memory:", extPath, "", "2.0.10" );
+        conn.connect( ":memory:", extPath, "", "2.0.11" );
         check( "callScalar: malformed SQL throws an Engine-class error",
                threwClass( [ &conn ] { conn.callScalar( "SELEKT GARBAGE", {} ); },
                            ErrorClass::Engine ) );
@@ -145,7 +145,7 @@ int main( int argc, char** argv )
     // of its own (sqlite3_bind_* then reports SQLITE_RANGE).
     {
         DbConnection conn;
-        conn.connect( ":memory:", extPath, "", "2.0.10" );
+        conn.connect( ":memory:", extPath, "", "2.0.11" );
         check( "callScalar: a bind beyond the statement's own parameter "
                "count throws ServerInternal",
                threwClass( [ &conn ] {
@@ -163,7 +163,7 @@ int main( int argc, char** argv )
     // isn't).
     {
         DbConnection conn;
-        conn.connect( ":memory:", extPath, "", "2.0.10" );
+        conn.connect( ":memory:", extPath, "", "2.0.11" );
         conn.callScalar( "CREATE TABLE _db_probe_uniq(x INTEGER UNIQUE)", {} );
         conn.callScalar( "INSERT INTO _db_probe_uniq VALUES(1)", {} );
         check( "callScalar: a step failure (UNIQUE violation) throws an "

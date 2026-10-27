@@ -26,7 +26,7 @@ namespace fsqlmcp
         try
         {
             validateArgs( spec, args );
-            Json result = spec.handler( args, ctx );
+            Json result = spec.handler( withoutNullDefaults( spec, args ), ctx );
             if( ctx.cancelled )
                 throw ToolError( ErrorClass::Cancelled, "call was cancelled by the client" );
             return result;

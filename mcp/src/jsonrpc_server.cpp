@@ -36,15 +36,28 @@ namespace fsqlmcp
         catch( ... ) { return makeError( nullptr, -32700, "parse error" ).dump(); }   // framing gate: id:null
 
         if( !req.is_object() || !req.contains( "jsonrpc" ) || !req.contains( "method" ) )
-            return makeError( req.value( "id", Json( nullptr ) ), -32600, "invalid request" ).dump();
+            // value() throws type_error.306 on a non-object line (an array, string, number
+            // or null), which escaped and aborted the whole process.
+            return makeError( req.is_object() ? req.value( "id", Json( nullptr ) ) : Json( nullptr ), -32600, "invalid request" ).dump();
 
-        return dispatch( req, clientKey );
+        // Nothing may escape handleLine: the stdio transport runs it on a worker thread
+        // and an escaping exception there is std::terminate (the whole server dies).
+        try { return dispatch( req, clientKey ); }
+        catch( const std::exception& e )
+        {
+            logging::exceptionDetail( "handleLine", sanitizeSecrets( e.what() ) );
+            return makeError( nullptr, -32603, "internal server error" ).dump();
+        }
     }
 
     std::optional<std::string> JsonRpcServer::dispatch( const Json& req, const std::string& clientKey )
     {
         const bool isNotification = !req.contains( "id" );
-        const std::string method = req.value( "method", "" );
+        // value() does not type-check a key it finds: a non-string "method" threw
+        // type_error.302 out of here and aborted the server. A non-string method is
+        // just an unknown method (-32601).
+        const std::string method = ( req.contains( "method" ) && req[ "method" ].is_string() )
+            ? req[ "method" ].get<std::string>() : std::string();
 
         if( method == "notifications/cancelled" || method == "$/cancel" )
         {
@@ -127,13 +140,7 @@ namespace fsqlmcp
             };
             if( t.retryTier )
                 entry[ "_meta" ][ "x-fractalsql-retry-tier" ] = std::string( *t.retryTier );   // retry-tier editions only
-            Json annotations;
-            if( t.destructiveHint ) annotations[ "destructiveHint" ] = true;
-            if( t.readOnlyHint )    annotations[ "readOnlyHint" ]    = true;
-            if( t.idempotentHint )  annotations[ "idempotentHint" ]  = true;   // 15.2
-            if( t.openWorldHint )   annotations[ "openWorldHint" ]   = true;   // 15.2
-            if( t.secretHint )      annotations[ "secretHint" ]      = true;   // 15.2
-            if( !annotations.empty() ) entry[ "annotations" ] = annotations;
+            entry[ "annotations" ] = toolAnnotations( t );
             arr.push_back( entry );
         }
         return Json{ { "tools", arr } };

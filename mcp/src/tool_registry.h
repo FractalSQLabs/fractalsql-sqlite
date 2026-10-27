@@ -41,12 +41,11 @@ namespace fsqlmcp
         ToolClass         toolClass;
         std::vector<ToolParam> params;
         std::optional<std::string_view> retryTier;   // retry-tier editions only; unset => omitted from tools/list
-        bool destructiveHint = false;
+        bool destructiveHint = true;    // fail-safe: a tool nobody classified is destructive (read-only mode refuses it)
         bool readOnlyHint    = false;
         std::function<Json( const Json& args, CallCtx& )> handler;  // tables pass it positionally 8th
-        // 15.2's expanded annotation set, present from the first write, not
-        // retro-patched; omitted from JSON when false so an unannotated tool
-        // still emits no annotations key at all.
+        // 15.2's expanded annotation set. All four standard hints are sent on
+        // the wire explicitly (see toolAnnotations below).
         bool idempotentHint  = false;
         bool openWorldHint   = false;
         bool secretHint      = false;
@@ -57,6 +56,23 @@ namespace fsqlmcp
         // never std::string_view of a temporary.
         std::string description;
     };
+
+    // The annotation object a client sees in tools/list, and the one the schema
+    // hash covers (one definition, so the two cannot drift). The four standard
+    // hints are always sent, true or false: in the MCP spec an omitted
+    // destructiveHint or openWorldHint defaults to TRUE, so leaving a false one
+    // out makes a spec-following client treat a closed-world, non-destructive
+    // tool as destructive and open-world. secretHint is not a spec hint and is
+    // only sent when set.
+    inline Json toolAnnotations( const ToolSpec& t )
+    {
+        Json a{ { "readOnlyHint", t.readOnlyHint },
+                { "destructiveHint", t.destructiveHint },
+                { "idempotentHint", t.idempotentHint },
+                { "openWorldHint", t.openWorldHint } };
+        if( t.secretHint ) a[ "secretHint" ] = true;
+        return a;
+    }
 
     // Non-recursive validity check. Null is skipped for non-required
     // arguments (an explicit JSON null counts as "absent" rather than
@@ -89,6 +105,24 @@ namespace fsqlmcp
                 throw ToolError( ErrorClass::Schema,
                                  key + " has the wrong type (expected " + jsonTypeName( p.type ) + ")" );
         }
+    }
+
+    // An explicit JSON null on an OPTIONAL, non-nullable parameter is "absent" to
+    // validateArgs (it is skipped), but handlers read optionals with
+    // Json::value(key, default), which THROWS type_error.302 on a null that is
+    // present -- surfacing as "internal server error". Hand the handler a copy
+    // with those nulls removed so the contract the validator promises is true.
+    // Nullable parameters keep their null (it is a meaningful value for them).
+    inline Json withoutNullDefaults( const ToolSpec& spec, const Json& args )
+    {
+        Json out = args;
+        for( const ToolParam& p : spec.params )
+        {
+            if( p.nullable ) continue;
+            const std::string key( p.name );
+            if( out.contains( key ) && out.at( key ).is_null() ) out.erase( key );
+        }
+        return out;
     }
 
     inline Json buildInputSchema( const ToolSpec& spec )

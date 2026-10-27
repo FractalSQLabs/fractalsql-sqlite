@@ -36,7 +36,7 @@ Description: Stochastic Fractal Search SQLite loadable extension (Community)
  Cursor, etc.) over stdio or an optional Bearer-token-authenticated
  HTTP transport.
  .
- Community Edition (v2.0.10): Salimi 2014 canonical SFS with Gaussian
+ Community Edition (v2.0.11): Salimi 2014 canonical SFS with Gaussian
  diffusion and greedy sniper selection; sovereign-tier features drive
  an optional reasoning plugin (fractalsql-reasoning-http).
  .
