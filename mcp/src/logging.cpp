@@ -1,3 +1,5 @@
+#include <string>
+#include <functional>
 // SPDX-License-Identifier: Apache-2.0 AND BSD-2-Clause
 // SPDX-FileCopyrightText: 2026 Daniel Gardiner d/b/a FractalSQLabs
 #include "logging.h"
@@ -23,9 +25,14 @@ namespace fsqlmcp::logging
         unsigned char digest[ EVP_MAX_MD_SIZE ];
         unsigned int  len = 0;
         EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-        EVP_DigestInit_ex( ctx, EVP_sha256(), nullptr );
-        EVP_DigestUpdate( ctx, s.data(), s.size() );
-        EVP_DigestFinal_ex( ctx, digest, &len );
+        // Every step can fail (allocation failure inside OpenSSL); an unchecked failure is a null dereference.
+        if( !ctx || EVP_DigestInit_ex( ctx, EVP_sha256(), nullptr ) != 1
+            || EVP_DigestUpdate( ctx, s.data(), s.size() ) != 1
+            || EVP_DigestFinal_ex( ctx, digest, &len ) != 1 )
+        {
+            if( ctx ) EVP_MD_CTX_free( ctx );
+            return std::string( "unavailable" );
+        }
         EVP_MD_CTX_free( ctx );
         static const char* const kHex = "0123456789abcdef";
         std::string out;
@@ -102,13 +109,29 @@ namespace fsqlmcp::logging
     }
 
     void toolCall( std::string_view toolName, const Json& argsRedactedCapped,
-                   double latencyMs, const char* errorClassOrNull )
+                   double latencyMs, const char* errorClassOrNull,
+                    const std::string& clientKey, const std::string& era )
     {
         Json line{
             { "event", "tool_call" },
             { "tool", std::string( toolName ) },
             { "latency_ms", latencyMs }
         };
+        // Who ran it: a short digest of the client key (session id or token
+        // prefix), never the key itself -- enough to tell clients apart in an
+        // incident without writing a bearer-token prefix into the log.
+        if( !clientKey.empty() )
+        {
+            char buf[ 24 ];
+            std::snprintf( buf, sizeof buf, "c-%08zx", std::hash<std::string>{}( clientKey ) & 0xffffffffu );
+            line[ "client" ] = buf;
+        }
+        // Which protocol era the call arrived in: "legacy" (a session and
+        // an initialize handshake) or "modern" (stateless, per-request
+        // metadata). An operator reading the log needs to know which one a
+        // given client is actually using.
+        if( !era.empty() )
+            line[ "era" ] = era;
         if( errorClassOrNull )
             line[ "error_class" ] = errorClassOrNull;
         // 13.6: the verbose level is wired through to the actual call site.

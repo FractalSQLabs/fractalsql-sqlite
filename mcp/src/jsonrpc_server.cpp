@@ -3,14 +3,27 @@
 #include "jsonrpc_server.h"
 #include "resources.h"
 #include "prompts.h"
+#include "policy.h"
+#include <algorithm>
 #include <unordered_set>
 
 namespace fsqlmcp
 {
+    // Every revision this server speaks. The first three are the legacy era
+    // (initialize handshake + Mcp-Session-Id); the last two are the modern
+    // era (stateless requests, per-request _meta).
     static const std::unordered_set<std::string> kSupportedProtocolVersions{
-        "2024-11-05", "2025-03-26", "2025-06-18"
+        "2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25", "2026-07-28"
     };
     static const char* const kDefaultProtocolVersion = "2025-06-18";
+
+    // The tools that take the model's auto_execute flag. The flag is
+    // controlled by the same actor the control protects against, so the
+    // operator's switch (FSQL_MCP_ALLOW_AUTO_EXECUTE) decides, not the model.
+    static bool takesAutoExecute( std::string_view name )
+    {
+        return name == "fractal_sql_agent" || name == "fractal_agent_data_analyst";
+    }
 
     JsonRpcServer::JsonRpcServer( ServerConfig cfg, std::vector<ToolSpec> tools, ConcurrencyConfig concCfg )
         : cfg_( std::move( cfg ) ), tools_( std::move( tools ) ), conc_( concCfg )
@@ -31,7 +44,15 @@ namespace fsqlmcp
 
     std::optional<std::string> JsonRpcServer::handleLine( const std::string& line, const std::string& clientKey )
     {
+        return handleLine( line, clientKey, CallOptions{} );
+    }
+
+    std::optional<std::string> JsonRpcServer::handleLine( const std::string& line, const std::string& clientKey,
+                                                          const CallOptions& opts )
+    {
         Json req;
+        if( jsonNestsTooDeep( line ) )
+            return makeError( nullptr, -32700, "parse error: nesting too deep" ).dump();
         try { req = Json::parse( line ); }
         catch( ... ) { return makeError( nullptr, -32700, "parse error" ).dump(); }   // framing gate: id:null
 
@@ -42,7 +63,7 @@ namespace fsqlmcp
 
         // Nothing may escape handleLine: the stdio transport runs it on a worker thread
         // and an escaping exception there is std::terminate (the whole server dies).
-        try { return dispatch( req, clientKey ); }
+        try { return dispatch( req, clientKey, opts ); }
         catch( const std::exception& e )
         {
             logging::exceptionDetail( "handleLine", sanitizeSecrets( e.what() ) );
@@ -50,7 +71,8 @@ namespace fsqlmcp
         }
     }
 
-    std::optional<std::string> JsonRpcServer::dispatch( const Json& req, const std::string& clientKey )
+    std::optional<std::string> JsonRpcServer::dispatch( const Json& req, const std::string& clientKey,
+                                                        const CallOptions& opts )
     {
         const bool isNotification = !req.contains( "id" );
         // value() does not type-check a key it finds: a non-string "method" threw
@@ -74,18 +96,45 @@ namespace fsqlmcp
             return makeError( id, -32000,
                 "server shutting down (a new request was refused after the shutdown signal; retry after restart)" ).dump();
 
+        const bool modern = ( opts.era == ProtocolEra::Modern );
+
         try
         {
-            if( method == "initialize" )     return makeResult( id, handleInitialize( req.value( "params", Json::object() ) ) ).dump();
-            if( method == "ping" )           return makeResult( id, Json::object() ).dump();
-            if( method == "tools/list" )     return makeResult( id, handleToolsList() ).dump();
-            if( method == "tools/call" )     return makeResult( id, handleToolsCall( req.value( "params", Json::object() ), clientKey, id.dump() ) ).dump();
-            if( method == "resources/list" ) return makeResult( id, handleResourcesList() ).dump();
-            if( method == "resources/read" ) return makeResult( id, handleResourcesRead( req.value( "params", Json::object() ) ) ).dump();
-            if( method == "resources/templates/list" ) return makeResult( id, Json{ { "resourceTemplates", Json::array() } } ).dump();
-            if( method == "prompts/list" )   return makeResult( id, handlePromptsList() ).dump();
-            if( method == "prompts/get" )    return makeResult( id, handlePromptsGet( req.value( "params", Json::object() ) ) ).dump();
-            return makeError( id, -32601, "method not found: " + method ).dump();
+            Json result;
+            bool listResult = false;
+            if( method == "initialize" )
+            {
+                if( cfg_.modernOnly )
+                    return makeError( id, -32000,
+                        "this server speaks the modern protocol era only (FSQL_MCP_PROTOCOL_ERA=modern); "
+                        "the initialize handshake is part of the legacy era and is refused. "
+                        "Supported versions: 2025-11-25, 2026-07-28" ).dump();
+                result = handleInitialize( req.value( "params", Json::object() ) );
+            }
+            else if( method == "server/discover" ) result = handleServerDiscover();
+            else if( method == "ping" )           result = Json::object();
+            else if( method == "tools/list" )     { result = handleToolsList( opts ); listResult = true; }
+            else if( method == "tools/call" )     result = handleToolsCall( req.value( "params", Json::object() ), clientKey, id.dump(), opts );
+            else if( method == "resources/list" ) { result = handleResourcesList(); listResult = true; }
+            else if( method == "resources/read" ) { result = handleResourcesRead( req.value( "params", Json::object() ) ); listResult = true; }
+            else if( method == "resources/templates/list" ) { result = Json{ { "resourceTemplates", Json::array() } }; listResult = true; }
+            else if( method == "prompts/list" )   { result = handlePromptsList(); listResult = true; }
+            else if( method == "prompts/get" )    result = handlePromptsGet( req.value( "params", Json::object() ) );
+            else return makeError( id, -32601, "method not found: " + method ).dump();
+
+            if( modern )
+            {
+                // The modern era's result envelope: every result says what kind
+                // of result it is, and a list result says how long it may be
+                // cached and in which scope.
+                result[ "resultType" ] = "complete";
+                if( listResult )
+                {
+                    result[ "ttlMs" ] = 0;              // this catalog is not cacheable
+                    result[ "cacheScope" ] = "session"; // ...and it is scoped to the caller's session
+                }
+            }
+            return makeResult( id, std::move( result ) ).dump();
         }
         catch( const ToolError& e )
         {
@@ -123,11 +172,42 @@ namespace fsqlmcp
         };
     }
 
-    Json JsonRpcServer::handleToolsList()
+    // The modern era's discovery RPC: which revisions this server speaks, what
+    // it can do and who it is. A modern client reads the supported versions
+    // from here instead of guessing.
+    Json JsonRpcServer::handleServerDiscover()
     {
+        Json versions = Json::array();
+        for( const std::string& v : { "2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25", "2026-07-28" } )
+            versions.push_back( v );
+        return Json{
+            { "protocolVersions", versions },
+            { "serverInfo", { { "name", cfg_.serverName }, { "version", cfg_.serverVersion } } },
+            { "capabilities", { { "tools", Json::object() },
+                                { "resources", Json::object() },
+                                { "prompts", Json::object() },
+                                { "logging", Json::object() } } }
+        };
+    }
+
+    Json JsonRpcServer::handleToolsList( const CallOptions& opts )
+    {
+        // A deterministic order (by name) in BOTH eras: the spec asks for it,
+        // and a client that compares two listings must see the same order
+        // whichever era it asked in.
+        std::vector<const ToolSpec*> sorted;
+        sorted.reserve( tools_.size() );
+        for( const ToolSpec& t : tools_ ) sorted.push_back( &t );
+        std::sort( sorted.begin(), sorted.end(),
+                   []( const ToolSpec* a, const ToolSpec* b ) { return a->name < b->name; } );
+
         Json arr = Json::array();
-        for( const ToolSpec& t : tools_ )
+        for( const ToolSpec* tp : sorted )
         {
+            const ToolSpec& t = *tp;
+            // A per-client credential may be limited to a subset of the
+            // catalog; the tools it may not call are not even listed.
+            if( opts.toolAllow && opts.toolAllow->count( std::string( t.name ) ) == 0 ) continue;
             Json entry{
                 { "name", std::string( t.name ) },
                 { "description", std::string( t.description ) },
@@ -146,7 +226,8 @@ namespace fsqlmcp
         return Json{ { "tools", arr } };
     }
 
-    Json JsonRpcServer::handleToolsCall( const Json& params, const std::string& clientKey, const std::string& requestId )
+    Json JsonRpcServer::handleToolsCall( const Json& params, const std::string& clientKey, const std::string& requestId,
+                                         const CallOptions& opts )
     {
         const std::string name = params.value( "name", "" );
         auto it = byName_.find( name );
@@ -163,9 +244,35 @@ namespace fsqlmcp
                 "server is running in read-only mode (FSQL_MCP_READ_ONLY=true); '" + name +
                 "' is destructive and was refused before reaching the engine" );
 
-        const Json args = params.value( "arguments", Json::object() );
+        // A per-client credential restricted to a subset of the catalog may
+        // not call outside it, even by guessing the name.
+        if( opts.toolAllow && opts.toolAllow->count( name ) == 0 )
+            throw ToolError( ErrorClass::Schema,
+                "tool '" + name + "' is not in this client's tool allowlist; the credential that made "
+                "this request may only call: " + [ &opts ] {
+                    std::string s;
+                    for( const std::string& n : *opts.toolAllow ) { if( !s.empty() ) s += ", "; s += n; }
+                    return s;
+                }() );
+
+        Json args = params.value( "arguments", Json::object() );
         if( !args.is_object() )
             throw ToolError( ErrorClass::Schema, "tool arguments must be a JSON object" );
+
+        // The context handle is the transport's, not the engine's: it selects
+        // which connection the call runs on and never reaches the adapter.
+        args.erase( "context_id" );
+
+        // The model's auto_execute flag only counts when the operator turned
+        // it on: the parameter is set by the same actor the control protects
+        // against, so a flag is not a control.
+        if( takesAutoExecute( spec.name ) && args.contains( "auto_execute" ) &&
+            args[ "auto_execute" ].is_boolean() && args[ "auto_execute" ].get<bool>() &&
+            !autoExecuteAllowed() )
+            throw ToolError( ErrorClass::Schema,
+                "auto_execute is refused: this server runs with FSQL_MCP_ALLOW_AUTO_EXECUTE unset, so a "
+                "generated statement is never executed without an operator turning that switch on "
+                "(FSQL_MCP_ALLOW_AUTO_EXECUTE=true). Generate the SQL and run it yourself instead." );
 
         // Register as in-flight BEFORE the concurrency acquire, so a $/cancel
         // landing either side of it still finds the session to interrupt (1.1).
@@ -173,11 +280,21 @@ namespace fsqlmcp
         ++active_;
         struct ActiveGuard { std::atomic<std::size_t>& a; ~ActiveGuard() { --a; } } activeGuard{ active_ };
 
-        try
+        // Drops the in-flight entry on any exit (a no-op once the success path erased it).
+        struct SessionGuard
+        {
+            JsonRpcServer& s; const std::string& id;
+            ~SessionGuard() { std::lock_guard<std::mutex> lk( s.inflightMu_ ); s.inflightSessions_.erase( id ); }
+        } sessionGuard{ *this, requestId };
+
         {
             ConcurrencyManager::Token token = conc_.acquire( spec.toolClass, clientKey );
 
             CallCtx ctx; ctx.clientKey = clientKey;
+            // Which protocol era this call arrived in: the operator's log
+            // says so on every call, so a client that silently falls back
+            // from the modern era to the legacy one is visible.
+            ctx.era = ( opts.era == ProtocolEra::Modern ) ? "modern" : "legacy";
             { std::lock_guard<std::mutex> lk( inflightMu_ ); ctx.cancelled = cancelledIds_.count( requestId ) != 0; }
 
             Json result;
@@ -208,16 +325,18 @@ namespace fsqlmcp
                 throw ToolError( ErrorClass::Cancelled, "call was cancelled; result discarded" );   // 1.1: never deliver a late result
 
             if( isError )
-                return Json{ { "content", Json::array( { Json{ { "type", "text" }, { "text", result[ "message" ] } } } ) },
-                             { "isError", true }, { "structuredContent", errorPayload } };
-            return Json{ { "content", Json::array( { Json{ { "type", "text" }, { "text", result.dump() } } } ) },
-                         { "isError", false }, { "structuredContent", result } };
-        }
-        catch( ... )
-        {
-            std::lock_guard<std::mutex> lk( inflightMu_ );
-            inflightSessions_.erase( requestId );
-            throw;
+            {
+                Json out{ { "content", Json::array( { Json{ { "type", "text" }, { "text", result[ "message" ] } } } ) },
+                          { "isError", true }, { "structuredContent", errorPayload } };
+                if( !opts.contextId.empty() ) out[ "context_id" ] = opts.contextId;
+                return out;
+            }
+            Json out{ { "content", Json::array( { Json{ { "type", "text" }, { "text", result.dump() } } } ) },
+                      { "isError", false }, { "structuredContent", result } };
+            // The context handle the caller may pass back to keep using the
+            // same engine state.
+            if( !opts.contextId.empty() ) out[ "context_id" ] = opts.contextId;
+            return out;
         }
     }
 

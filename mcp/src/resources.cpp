@@ -5,6 +5,7 @@
 #include "errors.h"
 #include "logging.h"
 #include <array>
+#include <exception>
 
 namespace fsqlmcp
 {
@@ -195,6 +196,9 @@ namespace fsqlmcp
             // that created a vectorizer; on a fresh session the view is
             // absent, and the engine's own message (verbatim, 1.6) carries
             // that. Same error shape + class the Python reference used.
+            // The error is rethrown after the handler, never from inside one: a throw
+            // from a catch block miscompiles under clang on Windows (MSVC unwinder crash).
+            std::exception_ptr pending;
             try
             {
                 const std::vector<std::string> names = g_db->columnNames( "SELECT * FROM fractal_vectorizer_status" );
@@ -213,13 +217,15 @@ namespace fsqlmcp
             catch( const ToolError& e )
             {
                 if( e.errorClass == ErrorClass::Engine )
-                    throw ToolError( ErrorClass::Schema,
+                    pending = std::make_exception_ptr( ToolError( ErrorClass::Schema,
                         "fractal_vectorizer_status is empty on this connection; the "
                         "vectorizer registry/queue are TEMP objects scoped to the "
                         "connection that created one (create a vectorizer on this "
-                        "session first). Underlying engine note: " + e.message );
-                throw;
+                        "session first). Underlying engine note: " + e.message ) );
+                else
+                    pending = std::current_exception();
             }
+            std::rethrow_exception( pending );
         }
 
         throw ToolError( ErrorClass::Schema, "unknown resource uri '" + uri + "'" );

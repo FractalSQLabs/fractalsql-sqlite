@@ -158,9 +158,30 @@ static void test_topk(void) {
     check("topk: max_k caps the scan", n == 2);
 }
 
+static void top_value(const char *doc, const char *key, const char *want, const char *label) {
+    const char *got = fsql_json_top_level_value(doc, key);
+    check(label, want ? (got != NULL && strncmp(got, want, strlen(want)) == 0) : got == NULL);
+}
+
+static void test_top_level_value(void) {
+    top_value("{\"k\":3}", "k", "3", "top-level: a plain key is found");
+    top_value("  { \"k\" :  3 , \"j\": 4}", "j", "4", "top-level: whitespace around the colon is skipped");
+    top_value("{\"opts\":{\"k\":5},\"k\":3}", "k", "3", "top-level: a nested key does not shadow the real one");
+    top_value("{\"opts\":{\"k\":5}}", "k", NULL, "top-level: a key only in a nested object is absent");
+    top_value("{\"a\":[{\"k\":5}],\"k\":3}", "k", "3", "top-level: keys inside arrays are skipped");
+    top_value("{\"a\":\"x \\\"k\\\": 9\",\"k\":3}", "k", "3", "top-level: key-shaped text inside a string is skipped");
+    top_value("{\"a\":\"k\",\"b\":1}", "k", NULL, "top-level: a string VALUE is not a key");
+    top_value("{\"kk\":1,\"k\":2}", "k", "2", "top-level: a longer key does not match a shorter one");
+    top_value("{\"k\":3,\"k\":4}", "k", "3", "top-level: the first of a repeated key wins");
+    top_value("[1,2]", "k", NULL, "top-level: a non-object document has no keys");
+    top_value("{\"a\":\"unterminated", "k", NULL, "top-level: an unterminated string ends the scan");
+    top_value(NULL, "k", NULL, "top-level: NULL document is absent, not a crash");
+}
+
 int main(void) {
     test_best_point();
     test_embedding_array();
     test_topk();
+    test_top_level_value();
     return failed ? 1 : 0;
 }

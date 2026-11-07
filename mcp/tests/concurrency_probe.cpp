@@ -3,7 +3,7 @@
 //
 // Standalone unit-test probe for mcp/src/concurrency.h's ConcurrencyManager/
 // BoundedSemaphore/Token. concurrency.h is header-only (every method inline,
-// no concurrency.cpp of its own), so -- like gate 41's db_probe.cpp sibling --
+// no concurrency.cpp of its own), so -- like the db_probe.cpp probe --
 // this probe's own translation unit is the only place its coverage data
 // exists at all.
 //

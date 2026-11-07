@@ -145,7 +145,9 @@ static void fv_construct_fn(sqlite3_context *ctx, int argc,
     if (sqlite3_value_type(argv[0]) == SQLITE_NULL) {
         sqlite3_result_null(ctx); return;
     }
-    int dim = sqlite3_value_int(argv[0]);
+    /* Clamp, not truncate: see fsql_value_int in fsql_sqlite_internal.h. */
+    const sqlite3_int64 dim64 = sqlite3_value_int64(argv[0]);
+    int dim = dim64 > INT_MAX ? INT_MAX : (dim64 < INT_MIN ? INT_MIN : (int)dim64);
     if (dim < 1 || dim > FSQL_VEC_MAX_DIM) {
         char buf[96];
         snprintf(buf, sizeof buf,

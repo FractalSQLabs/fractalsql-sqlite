@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="../FractalSQLforSQLite.jpg" alt="FractalSQL MCP Server" width="720">
+  <img src="../FractalSQLforSQLite.jpg" alt="FractalSQL for SQLite" width="720">
 </p>
 
 # FractalSQL MCP Server for SQLite
@@ -100,9 +100,9 @@ deploy:
   explicit client-set parameter to enable. `FSQL_MCP_READ_ONLY=true` is the
   deployment-wide stop switch: every `destructiveHint` tool is refused
   outright, before the call reaches the engine. It keys on
-  `destructiveHint`, so it stops the seven destructive tools (ledger
-  write/reset, `fractal_vectorizer_drop`, the two config tools) — not
-  every write; the real no-write boundary is scoping the DB file.
+  `destructiveHint`, so it stops every tool the safety-annotation lock marks
+  destructive — not every write; the real no-write boundary is scoping
+  the DB file.
 
 ## Regenerating the integrity locks
 
@@ -117,5 +117,41 @@ fractalsql-sqlite-mcp --write-manifest
 git add .mcp-schema-lock .mcp-safety-annotations-lock manifest.json
 ```
 
-The server verifies both locks at startup. Set `FSQL_MCP_STRICT_SCHEMA_HASH=true`
-to turn a stale lock into a hard startup failure for strict deployments.
+The server verifies both locks at startup. A stale lock is a hard startup failure by default;
+set `FSQL_MCP_STRICT_SCHEMA_HASH=false` to downgrade it to a warning.
+
+## Hardening switches
+
+| Variable | Effect |
+|---|---|
+| `FSQL_MCP_READ_ONLY` | `true` / `1` / `on` / `yes` (any case). Refuses every tool that writes state, and applies the engine-side backstop where the engine has one. |
+| `FSQL_MCP_ALLOW_MISSING_LOCKS` | Off by default. A missing schema or safety-annotation lock file stops startup; set `true` to run without the drift check (development only). An explicit `FSQL_MCP_REQUIRE_LOCKS=false` has the same effect. Lock files are looked up in the working directory first, then next to the executable. |
+| `FSQL_MCP_ALLOW_PLAINTEXT_NONLOOPBACK` | Off by default. The HTTP transport refuses to bind a non-loopback address without TLS (enable TLS with `FSQL_MCP_HTTPS=true` and a certificate/key); set this to `true` to accept a plaintext bind on a network you control. |
+| `FSQL_MCP_ALLOW_AUTO_EXECUTE` | Off by default. A model may only ask for `auto_execute` on the two tools that take it when the operator has turned this on. |
+| `FSQL_MCP_CONFIG_WRITES` | `safe` by default: the config-writing admin tools may change only the model names and the think mode. `off` refuses every write, `all` allows any key the build knows. |
+| `FSQL_MCP_PROTOCOL_ERA` | `dual` by default: both protocol eras are served. `modern` serves the modern era only. |
+| `FSQL_MCP_TOKEN_POLICY_FILE` | Per-client credentials: a JSON file naming clients, each with the SHA-256 of its token, an optional expiry and an optional tool allowlist. |
+| `FSQL_MCP_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to make cross-origin requests. An `Origin` header that is not on the list is refused with `403`, before the token is even checked. |
+| `FSQL_MCP_SESSION_TTL_SECS` / `FSQL_MCP_MAX_SESSIONS` | How long an idle session-state handle survives (default 3600) and how many may exist at once (default 64). A handle belongs to the credential that created it. |
+
+Every state-changing tool is reported with `destructiveHint: true`, so a client that honours the annotation asks before calling it and read-only mode refuses it. Each `tool_call` log line carries a short `client` digest identifying the session or token that made the call.
+
+## Audit data at rest
+
+The audit chain lives inside the database file, in the `fractalsql_ledger`
+table — there is no separate ledger file and no CSV mirror, so the
+database file's permissions, backups and volume encryption are the whole
+story of what is protected at rest.
+
+Two engine settings shape what the chain keeps and how a truncated chain
+is noticed:
+
+- `FSQL_AUDIT_REDACT` (`none` by default, or `hash` / `truncate`) keeps a
+  fingerprint of the question, the generated SQL, the analysis and the
+  rows instead of the text itself. The values returned to the caller are
+  never redacted.
+- `FSQL_LEDGER_ANCHOR_LOG` (`off` by default, or `stderr` / `syslog`)
+  publishes one JSON line per append — `{"event":"ledger_head","kind":K,"rows":N,"hash":"<hex>"}` —
+  so a chain whose tail was deleted no longer matches the last line
+  published and the truncation is visible off-host.
+

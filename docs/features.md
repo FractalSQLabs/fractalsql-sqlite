@@ -76,7 +76,7 @@ The Agency tier composes the Discovery and Cognition primitives into autonomous 
 | `fractal_agent_schedule_workload` | `fractal_search_debug` refine + nearest node → reasoning rationale | ✓ |
 | `fractal_agent_outlier_intercept` | distance-to-bad-state safety barrier → reasoning justification | ✓ |
 | `fractal_agent_patient_deterioration_triage` | cohort search + trajectory drift → reasoning triage | ✓ |
-| `fractal_agent_data_analyst` | NL → SQL → execute → reasoning analysis | ✓ |
+| `fractal_agent_data_analyst` | NL → SQL → reasoning analysis (SQL runs only with an explicit `auto_execute`) | ✓ |
 | `fractal_agent_recall_hybrid` | cohort-restricted vector recall | — |
 | `fractal_agent_recommend_diverse` | repulsion-diverse top-k | — |
 | `fractal_agent_feedback_audit` | diversify loop + collapse detection | — |
@@ -112,7 +112,7 @@ The final tier provides mathematical primitives for analyzing the "shape" of dat
 - **Box-Counting (`fractal_dimension_boxcount`)**: Measures the Minkowski-Bouligand dimension of a point cloud to evaluate spatial complexity.
 - **Drift (`fractal_dimension_drift`)**: Detects regime changes by comparing the DFA exponent of a recent window against a baseline.
 - **Change-Point Localization (`fractal_change_point_detect`)**: Localizes where a series' mean or variance shifted, complementing DFA's overall characterization.
-- **Periodogram (`fractal_periodogram`)**: Exact power spectrum (direct DFT) for cadence detection such as beaconing or retry loops.
+- **Periodogram (`fractal_periodogram`)**: Exact power spectrum (direct DFT for short series, FFT for longer ones) for cadence detection such as beaconing or retry loops.
 - **Spectral entropy (`fractal_spectrogram_entropy`)**: Per-window Shannon entropy of the power spectrum (0 = ordered tone, ~0.9 = noise); pair with `fractal_change_point_detect` to find when order is lost.
 
 ### Topology and State Fingerprints

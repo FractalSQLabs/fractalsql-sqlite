@@ -323,6 +323,35 @@ def _stdio_phase(exe, cwd, check):
         for b in bad[:3]:
             print("      offender: " + b)
 
+        deep_bad = []
+        for label, line in (("balanced arrays", "[" * 100000 + "]" * 100000),
+                            ("unterminated arrays", "[" * 100000),
+                            ("nested objects", '{"a":' * 50000 + "1" + "}" * 50000)):
+            s.raw(line)
+            try:
+                if "result" not in s.call("ping", {}, timeout=20):
+                    deep_bad.append(label)
+            except Exception:  # noqa: BLE001
+                deep_bad.append(label)
+                break
+        check("robustness: absurdly deep JSON nesting is refused and the server stays alive",
+              not deep_bad and s.alive())
+
+        # The boundary: a request nested exactly 128 levels deep is read, one
+        # level more is refused. The envelope object counts as the first level.
+        def _nested_ping(levels, rid):
+            s.raw('{"jsonrpc":"2.0","id":%d,"method":"ping","params":%s%s}'
+                  % (rid, "[" * levels, "]" * levels))
+        try:
+            _nested_ping(127, 7001)
+            at_limit = json.dumps(s.recv(7001, 15))
+            _nested_ping(128, 7002)
+            over_limit = json.dumps(s.recv(None, 15))
+            edge_ok = "nesting too deep" not in at_limit and "nesting too deep" in over_limit
+        except Exception:  # noqa: BLE001
+            edge_ok = False
+        check("robustness: JSON nested 128 levels is read and 129 levels is refused", edge_ok and s.alive())
+
         s.raw("x" * (8 * 1024 * 1024 + 64))
         try:
             ok = "result" in s.call("ping", {}, timeout=40)
@@ -470,18 +499,151 @@ def _sanitize_probe(here, check):
     if not (os.path.isfile(src) and os.path.isfile(errors) and cxx):
         print("SKIP robustness: sanitize_probe (no compiler or probe source present)")
         return
+    # The probe links the compiler's own runtime (libstdc++/libgcc on MinGW).
+    # Any other directory on PATH may ship a same-named DLL -- PostgreSQL's
+    # bin does, with libwinpthread-1.dll -- and the loader then binds that
+    # one instead, so the exe dies with STATUS_DLL_NOT_FOUND before it can
+    # print a line. Put the compiler's own bin directory first.
+    env = dict(os.environ)
+    cxx_dir = os.path.dirname(os.path.abspath(cxx))
+    env["PATH"] = cxx_dir + os.pathsep + env.get("PATH", "")
     with tempfile.TemporaryDirectory() as td:
         exe = os.path.join(td, "sanitize_probe")
         b = subprocess.run([cxx, "-std=c++17", "-O1", "-I", os.path.join(here, "src"), src, errors, "-o", exe],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env=env)
         if b.returncode != 0:
             check("robustness: sanitize_probe builds", False)
             print(b.stderr[-600:])
             return
-        r = subprocess.run([exe], capture_output=True, text=True, timeout=300)
+        r = subprocess.run([exe], capture_output=True, text=True, timeout=300, env=env)
         print(r.stdout.strip())
+        if r.returncode != 0:
+            print("probe exit code %s; stderr: %s" % (r.returncode, r.stderr.strip()[-400:]))
         check("robustness: sanitizeSecrets matches the old regex behaviour and survives huge inputs",
               r.returncode == 0)
+
+
+def _connection_cap_phase(exe, cwd, check):
+    """Connections past FSQL_MCP_MAX_CONNECTIONS are refused with 503 at once,
+    and the server serves normally again when the others close."""
+    port = _free_port()
+    limit = 4
+    env = dict(os.environ, FSQL_MCP_AUTH_TOKEN="robustness-token", FSQL_MCP_HTTP_PORT=str(port),
+               FSQL_MCP_MAX_CONNECTIONS=str(limit))
+    p = subprocess.Popen([exe, "--http", str(port)], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, cwd=cwd, env=env)
+
+    def healthz(timeout=5):
+        c = httpc.HTTPConnection("127.0.0.1", port, timeout=timeout)
+        try:
+            c.request("GET", "/healthz")
+            r = c.getresponse()
+            r.read()
+            return r.status
+        except Exception:  # noqa: BLE001
+            return None
+        finally:
+            c.close()
+
+    held = []
+    try:
+        up = False
+        for _ in range(80):
+            if p.poll() is not None:
+                break
+            if healthz(2) == 200:
+                up = True
+                break
+            time.sleep(0.15)
+        if not check("robustness: the HTTP server came up for the connection-cap probe", up):
+            return
+        for _ in range(limit):
+            s = socket.create_connection(("127.0.0.1", port), timeout=5)
+            # Send a request line but never its terminator. The server keeps
+            # the connection open in its request-reading window instead of
+            # closing it after the short idle timeout, so each held
+            # connection is still counted against the limit when the next
+            # connection arrives.
+            s.sendall(b"GET /healthz HTTP/1.1\r\n")
+            held.append(s)
+        time.sleep(0.5)
+        over = healthz()
+        check("robustness: a connection past the limit is refused with 503 (got %s)" % (over,), over == 503)
+        for s in held:
+            s.close()
+        held = []
+        back = None
+        for _ in range(40):
+            back = healthz()
+            if back == 200:
+                break
+            time.sleep(0.25)
+        check("robustness: the server answers again once the held connections close", back == 200 and p.poll() is None)
+    finally:
+        for s in held:
+            s.close()
+        if p.poll() is None:
+            p.terminate()
+
+
+def _framing_phase(exe, cwd, check):
+    """Ambiguous request framing is refused, never guessed at."""
+    port = _free_port()
+    token = "robustness-token"
+    env = dict(os.environ, FSQL_MCP_AUTH_TOKEN=token, FSQL_MCP_HTTP_PORT=str(port))
+    p = subprocess.Popen([exe, "--http", str(port)], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, cwd=cwd, env=env)
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                       "params": {"protocolVersion": "2025-06-18"}})
+
+    def status_line(framing):
+        s = socket.create_connection(("127.0.0.1", port), timeout=15)
+        try:
+            s.sendall(("POST /mcp HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer %s\r\n"
+                       "Content-Type: application/json\r\n%s\r\n%s" % (token, framing, body)).encode())
+            data = s.recv(4096)
+        except OSError:
+            data = b""
+        finally:
+            s.close()
+        return data.split(b"\r\n", 1)[0].decode("latin-1")
+
+    try:
+        up = False
+        for _ in range(80):
+            if p.poll() is not None:
+                break
+            try:
+                c = httpc.HTTPConnection("127.0.0.1", port, timeout=2)
+                c.request("GET", "/healthz")
+                rr = c.getresponse()
+                rr.read()
+                c.close()
+                if rr.status == 200:
+                    up = True
+                    break
+            except Exception:  # noqa: BLE001
+                time.sleep(0.15)
+        if not check("robustness: the HTTP server came up for the framing probes", up):
+            return
+        n = len(body)
+        good = status_line("Content-Length: %d\r\n" % n)
+        check("robustness: a request with one valid Content-Length is served", " 200 " in good)
+        bad = {
+            "a repeated Content-Length": "Content-Length: %d\r\nContent-Length: %d\r\n" % (n, n),
+            "a non-numeric Content-Length": "Content-Length: %dabc\r\n" % n,
+            "an unknown Transfer-Encoding": "Transfer-Encoding: gzip, chunked\r\n",
+            "Content-Length together with Transfer-Encoding": "Content-Length: %d\r\nTransfer-Encoding: chunked\r\n" % n,
+        }
+        served = [label for label, framing in bad.items()
+                  if " 200 " in status_line(framing) or " 202 " in status_line(framing)]
+        check("robustness: ambiguous request framing is refused (%d cases)" % len(bad), not served)
+        for label in served:
+            print("      served: " + label)
+        check("robustness: the server is still alive after the framing probes", p.poll() is None)
+    finally:
+        if p.poll() is None:
+            p.terminate()
 
 
 def run(check):
@@ -493,6 +655,8 @@ def run(check):
     for name, fn in (("stdio", lambda: _stdio_phase(exe, cwd, check)),
                      ("read-only", lambda: _read_only_phase(exe, cwd, check)),
                      ("http", lambda: _http_phase(exe, cwd, check)),
+                     ("framing", lambda: _framing_phase(exe, cwd, check)),
+                     ("conn-cap", lambda: _connection_cap_phase(exe, cwd, check)),
                      ("sanitize", lambda: _sanitize_probe(here, check) if here else None)):
         try:
             fn()

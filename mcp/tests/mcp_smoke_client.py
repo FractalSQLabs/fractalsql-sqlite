@@ -76,24 +76,24 @@ _failures = 0
 EXPECTED_SAFETY = {
     "fractal_agent_allocate": ("write", True),
     "fractal_agent_anomaly_triage": ("write", True),
-    "fractal_agent_data_analyst": ("write", True),
+    "fractal_agent_data_analyst": ("destructive", True),
     "fractal_agent_detect_loop": ("read", False),
     "fractal_agent_detour_classify": ("write", True),
     "fractal_agent_diverse_portfolios": ("write", True),
-    "fractal_agent_feedback_audit": ("write", False),
+    "fractal_agent_feedback_audit": ("destructive", False),
     "fractal_agent_network_coverage_alert": ("write", True),
     "fractal_agent_outlier_intercept": ("write", True),
     "fractal_agent_patient_deterioration_triage": ("write", True),
     "fractal_agent_plan_explore": ("write", True),
     "fractal_agent_rebalance_sibling": ("write", True),
     "fractal_agent_recall_hybrid": ("read", False),
-    "fractal_agent_recommend_diverse": ("write", False),
+    "fractal_agent_recommend_diverse": ("destructive", False),
     "fractal_agent_regime_triage": ("write", True),
     "fractal_agent_route_task": ("write", True),
     "fractal_agent_schedule_workload": ("write", True),
     "fractal_agent_track_anomaly": ("write", True),
     "fractal_agent_trajectory_predict": ("write", False),
-    "fractal_audit_log": ("write", False),
+    "fractal_audit_log": ("destructive", False),
     "fractal_audit_unpack": ("read", False),
     "fractal_change_point_detect": ("read", False),
     "fractal_cortical_folding": ("read", False),
@@ -103,17 +103,17 @@ EXPECTED_SAFETY = {
     "fractal_dimension_boxcount": ("read", False),
     "fractal_dimension_dfa": ("read", False),
     "fractal_dimension_drift": ("read", False),
-    "fractal_diversify_disable": ("write", False),
-    "fractal_diversify_enable": ("write", False),
-    "fractal_diversify_set_params": ("write", False),
+    "fractal_diversify_disable": ("destructive", False),
+    "fractal_diversify_enable": ("destructive", False),
+    "fractal_diversify_set_params": ("destructive", False),
     "fractal_embed": ("write", True),
     "fractal_explain_result": ("read", False),
-    "fractal_feedback_report": ("write", False),
+    "fractal_feedback_report": ("destructive", False),
     "fractal_hybrid_clinical_search": ("read", False),
-    "fractal_isolate_background": ("write", False),
+    "fractal_isolate_background": ("destructive", False),
     "fractal_ledger_compact": ("destructive", False),
     "fractal_ledger_flush": ("destructive", False),
-    "fractal_ledger_load": ("write", False),
+    "fractal_ledger_load": ("destructive", False),
     "fractal_ledger_reset_hard": ("destructive", False),
     "fractal_ledger_reset_soft": ("destructive", False),
     "fractal_ledger_shadow_count": ("read", False),
@@ -137,9 +137,9 @@ EXPECTED_SAFETY = {
     "fractal_search_telemetry": ("read", False),
     "fractal_search_trajectory": ("read", False),
     "fractal_spectrogram_entropy": ("read", False),
-    "fractal_sql_agent": ("write", True),
+    "fractal_sql_agent": ("destructive", True),
     "fractal_state_fingerprint": ("read", False),
-    "fractal_store_morphology": ("write", False),
+    "fractal_store_morphology": ("destructive", False),
     "fractal_tda_persistence_diagram": ("read", False),
     "fractal_text_to_sql": ("write", True),
     "fractal_vascular_network": ("read", False),
@@ -147,11 +147,11 @@ EXPECTED_SAFETY = {
     "fractal_vector_lp_distance": ("read", False),
     "fractal_vector_quantize_binary": ("read", False),
     "fractal_vector_quantize_int8": ("read", False),
-    "fractal_vectorizer_create": ("write", False),
+    "fractal_vectorizer_create": ("destructive", False),
     "fractal_vectorizer_drop": ("destructive", False),
-    "fractal_vectorizer_pause": ("write", False),
-    "fractal_vectorizer_process_queue": ("write", False),
-    "fractal_vectorizer_resume": ("write", False),
+    "fractal_vectorizer_pause": ("destructive", False),
+    "fractal_vectorizer_process_queue": ("destructive", False),
+    "fractal_vectorizer_resume": ("destructive", False),
     "fractalsql_configure_reasoning": ("destructive", False),
     "fractalsql_get_config": ("read", False),
     "fractalsql_get_version": ("read", False),
@@ -217,9 +217,11 @@ def main() -> int:  # noqa: ANN201
     # fixture setup (direct SQL, before the server owns the DB)
     dbpath = os.environ["SQLITE_DB_PATH"]
     ext = os.environ["FRACTALSQL_EXTENSION_PATH"]
+    # Plain tables and rows only: no extension function is called here, so the fixture connection does not load
+    # fractalsql.so. (Under --asan/--ubsan/--tsan that .so is sanitizer-built, and loading it into this
+    # unsanitized Python host aborts on macOS, where the sanitizer runtime cannot be preloaded into it. The
+    # server under test loads the extension itself.)
     con = sqlite3.connect(dbpath)
-    con.enable_load_extension(True)
-    con.load_extension(ext)
     con.executescript("""
     DROP TABLE IF EXISTS mcp_sm_docs;
     CREATE TABLE mcp_sm_docs(id INTEGER PRIMARY KEY, title TEXT, emb TEXT);
@@ -260,6 +262,11 @@ def main() -> int:  # noqa: ANN201
     # the sanitizer runtime into this otherwise-unsanitized host process)
     # or the dlopen aborts with "ASan runtime does not come first".
     env = dict(os.environ)
+    # The config-writing admin tools are gated by FSQL_MCP_CONFIG_WRITES.
+    # This session writes a reasoning endpoint and a plugin path, so it
+    # runs with the switch wide open; the switch's own default (safe) and
+    # its off setting are exercised in run_config_writes_phase().
+    env["FSQL_MCP_CONFIG_WRITES"] = "all"
     proc = subprocess.Popen(
         [mcp_exe],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=server_log,
@@ -347,10 +354,17 @@ def main() -> int:  # noqa: ANN201
                      or "properties" not in t["inputSchema"]]
         check("1.7 accessibility invariant: every tool has a non-empty "
               "description and a complete inputSchema.properties", not anonymous)
+        # The marker says "this tool takes no arguments", so it must be
+        # present exactly on the tools whose schema has no properties - and
+        # absent on the ones that do take an argument, such as the
+        # session-scoped tools that carry the optional state handle.
+        mismarked = [t["name"] for t in listed
+                     if bool(t["inputSchema"].get("x-fractalsql-no-arguments"))
+                     != (not t["inputSchema"].get("properties"))]
         zero_arg = [t for t in listed
                     if t["inputSchema"].get("x-fractalsql-no-arguments")]
-        check("1.7: zero-argument tools document their no-arguments shape "
-              "via the marker", len(zero_arg) >= 10)
+        check("1.7: the no-arguments marker matches the tool's real shape",
+              not mismarked and len(zero_arg) >= 1)
         tiers = {t.get("_meta", {}).get("x-fractalsql-tier") for t in listed}
         check("tier metadata groups tools like the docs teach",
               tiers == {"Discovery", "Cognition", "Agency", "Analytics",
@@ -1113,6 +1127,7 @@ def main() -> int:  # noqa: ANN201
     # separate server lifecycles: the HTTP transport, the CLI/env startup
     # surface, and the lock-failure postures
     run_http_and_cli_phase()
+    run_config_writes_phase()
     return 1 if _failures else 0
 
 
@@ -1173,6 +1188,77 @@ def quick_stdio(json_lines, env_extra, timeout=60, stderr_file=None):
         proc.kill()
         proc.wait(timeout=10)
     return responses, proc.returncode
+
+
+def run_config_writes_phase() -> None:
+    """The config-writes switch (FSQL_MCP_CONFIG_WRITES): off, safe (the
+    default) and all. Each setting gets its own short-lived stdio server,
+    because the switch is read at startup."""
+    global _failures
+    server_cwd = os.environ["MCP_SERVER_CWD"]
+
+    def call_set(key, value, mode, rid):
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": INIT_PARAMS},
+            {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+             "params": {"name": "fractalsql_set_config",
+                        "arguments": {"key": key, "value": value}}},
+        ]
+        env = {}
+        if mode is not None:
+            env["FSQL_MCP_CONFIG_WRITES"] = mode
+        resps, code = quick_stdio(lines, env)
+        r = next((x for x in resps if x and x.get("id") == rid), None)
+        result = (r or {}).get("result") or {}
+        return code, result, result.get("isError") is True, \
+            json.dumps(result.get("content") or "")
+
+    def call_configure(args, mode, rid):
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": INIT_PARAMS},
+            {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+             "params": {"name": "fractalsql_configure_reasoning",
+                        "arguments": args}},
+        ]
+        env = {}
+        if mode is not None:
+            env["FSQL_MCP_CONFIG_WRITES"] = mode
+        resps, code = quick_stdio(lines, env)
+        r = next((x for x in resps if x and x.get("id") == rid), None)
+        result = (r or {}).get("result") or {}
+        return code, result, result.get("isError") is True, \
+            json.dumps(result.get("content") or "")
+
+    # safe (the default): the endpoint URL is refused, the model name is
+    # allowed.
+    _, _, err, body = call_set("http_url", "http://127.0.0.1:1/v1", None, 10)
+    check("config writes: the default (safe) refuses writing the endpoint "
+          "URL", err and "config write refused" in body)
+    _, res, err, _ = call_set("http_model", "mcp-smoke-model", None, 11)
+    check("config writes: the default (safe) allows writing the model name",
+          not err and "http_model" in json.dumps(res))
+
+    # safe: configure_reasoning's provider_url is the same key, refused.
+    _, _, err, body = call_configure({"provider_url": "http://127.0.0.1:1/v1"},
+                                     None, 12)
+    check("config writes: the default (safe) refuses configure_reasoning's "
+          "provider_url", err and "config write refused" in body)
+    _, res, err, _ = call_configure({"model": "mcp-smoke-model2"}, None, 13)
+    check("config writes: the default (safe) allows configure_reasoning's "
+          "model", not err and "http_model" in json.dumps(res))
+
+    # off: nothing may be written, and reading config still works.
+    _, _, err, body = call_set("http_model", "mcp-smoke-model3", "off", 14)
+    check("config writes: off refuses writing even the model name",
+          err and "config write refused" in body
+          and "FSQL_MCP_CONFIG_WRITES=off" in body)
+    _, _, err, body = call_set("http_model", "mcp-smoke-model4", "off", 15)
+    check("config writes: the refusal names the key and the setting",
+          err and "http_model" in body and "mcp-smoke-model4" not in body)
+
+    # all: everything may be written.
+    _, res, err, _ = call_set("http_url", "http://127.0.0.1:1/v1", "all", 16)
+    check("config writes: all allows writing the endpoint URL", not err)
 
 
 def run_http_and_cli_phase() -> None:
@@ -1247,7 +1333,7 @@ def run_http_and_cli_phase() -> None:
                               input="")
     r = cli_run(["--version"])
     check("CLI: --version prints the release banner",
-          r.returncode == 0 and "2.0.11" in r.stdout)
+          r.returncode == 0 and "2.0.12" in r.stdout)
     r = cli_run(["--help"])
     check("CLI: --help prints the flag table",
           r.returncode == 0 and "--tool" in r.stdout)
@@ -1316,12 +1402,12 @@ def run_http_and_cli_phase() -> None:
           and "failed to load extension" in bad_ext_text)
 
     # the matching-lock path (checkSchemaGate's LockCheckResult::Ok
-    # branch, which logs "schema_lock_ok") -- the default stdio session
-    # above never hits it: the server's default lock-path resolution
-    # walks up from its CWD looking for a checkout root, which the
-    # scratch server_cwd this harness uses isn't, so without an
-    # explicit override it resolves Absent, not Ok. Point
-    # FSQL_MCP_SCHEMA_LOCK at the real committed lock explicitly instead.
+    # branch, which logs "schema_lock_ok"). The harness points
+    # FSQL_MCP_SCHEMA_LOCK at the committed lock for the whole run (the
+    # server is fail-closed about a missing lock, and its default
+    # lock-path resolution walks up from the scratch server_cwd this
+    # harness uses, which is not a checkout root), so this explicit
+    # override restates the same path.
     lock_path = os.path.join(os.environ["MCP_HERE"], ".mcp-schema-lock")
     r = cli_run([], env=dict(base_env, FSQL_MCP_SCHEMA_LOCK=lock_path))
     check("CLI: a matching schema lock logs schema_lock_ok and still "
@@ -1336,7 +1422,8 @@ def run_http_and_cli_phase() -> None:
     r = cli_run([], env=dict(base_env, FSQL_MCP_SCHEMA_LOCK=bad_lock,
                              FSQL_MCP_STRICT_SCHEMA_HASH="true"))
     check("CLI: a tampered schema lock under strict mode is a hard exit", r.returncode != 0)
-    r = cli_run([], env=dict(base_env, FSQL_MCP_SCHEMA_LOCK=bad_lock))
+    # Strict is the default now; an operator downgrades a mismatch to a warning explicitly.
+    r = cli_run([], env=dict(base_env, FSQL_MCP_SCHEMA_LOCK=bad_lock, FSQL_MCP_STRICT_SCHEMA_HASH="false"))
     check("CLI: a tampered schema lock non-strict only warns and still "
           "serves", r.returncode == 0)
     safety_path = os.path.join(os.environ["MCP_HERE"],
@@ -1494,12 +1581,12 @@ def run_http_and_cli_phase() -> None:
         chunk = (b"POST /mcp HTTP/1.1\r\nHost: x\r\n"
                  b"Authorization: Bearer g37-tok-alpha\r\n"
                  b"Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n")
-        check("HTTP: chunked transfer coding is refused (connection closed, "
-              "no response)", raw_http(chunk) == b"")
+        check("HTTP: chunked transfer coding is refused (411 Length "
+              "Required)", raw_http(chunk).startswith(b"HTTP/1.1 411"))
         big = (b"POST /mcp HTTP/1.1\r\nAuthorization: Bearer "
                b"g37-tok-alpha\r\nContent-Length: 99999999\r\n\r\n")
-        check("HTTP: an oversized Content-Length is refused (connection "
-              "closed)", raw_http(big) == b"")
+        check("HTTP: an oversized Content-Length is refused (413 Content "
+              "Too Large)", raw_http(big).startswith(b"HTTP/1.1 413"))
 
         # token hot reload: new content, distinct mtime, no restart
         with open(token_file, "w", encoding="utf-8") as fh:
@@ -1569,12 +1656,10 @@ def run_http_and_cli_phase() -> None:
         check("HTTP: a bind conflict on the in-use port exits nonzero "
               "(no zombie listener)", conflict.returncode != 0)
 
-        # graceful termination: the SIGTERM handler only sets the stop
-        # flag while accept() blocks, so poke one more connection to let
-        # the drain path run; a clean exit is the point (it also flushes
-        # any live coverage counters). Windows terminate() is a hard kill.
+        # graceful termination: an idle server must notice SIGTERM on its
+        # own and run the drain path; a clean exit is the point (it also
+        # flushes any live coverage counters). Windows terminate() is a hard kill.
         http_proc.terminate()
-        http_req("GET", "/healthz", timeout=5.0)
         try:
             rc = http_proc.wait(timeout=25)
         except Exception:
@@ -1706,11 +1791,6 @@ def run_shutdown_drain_phase(mcp_exe, server_cwd, base_env) -> None:
 
         t0 = time.monotonic()
         proc.terminate()
-        # Same poke as the main HTTP session's own termination test: the
-        # SIGTERM handler only sets the stop flag while accept() blocks,
-        # so one more connection is needed to make the main loop notice
-        # and fall through to the drain sequence.
-        req("GET", "/healthz", timeout=5.0)
         try:
             rc = proc.wait(timeout=8)
         except Exception:

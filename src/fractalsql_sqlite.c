@@ -48,6 +48,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <limits.h>
 
 #include "fsql_sqlite_internal.h"
 #include "fractalsql_parse.h"
@@ -66,6 +67,13 @@ FsqlState *fsql_state_create(sqlite3 *db, char **pzErrMsg) {
         return NULL;
     }
     st->db = db;
+
+    /* Start every connection from the documented defaults, so a session
+     * that never calls fractalsql_set() still gets them: the text-to-SQL
+     * attempt budget of 2 (a rejected candidate is regenerated once with
+     * the rejection fed back), the "select" statement allowlist, and the
+     * documented zero for the remaining numeric and boolean keys. */
+    fsql_config_apply_defaults(st);
 
     /* Capture the operator's process-level FSQL_REASONING_HTTP_RESPONSE_MODE
      * once, at state creation -- the analog of the pg wrapper's _PG_init
@@ -157,7 +165,8 @@ void fsql_state_destroy(void *p) {
 }
 
 /* -------------------------------------------------------------------
- * Input decoding (unchanged behavior from the 1.x bridge).
+ * Input decoding: a vector arrives as TEXT (CSV or bracketed JSON) or
+ * as a BLOB (canonical fractal_vector, or a bare float32 array).
  * ------------------------------------------------------------------- */
 
 int fsql_parse_text_vector(const char *src, int slen, double *out, int cap) {
@@ -186,11 +195,39 @@ int fsql_parse_text_vector(const char *src, int slen, double *out, int cap) {
     return n;
 }
 
+/* Two BLOB shapes are accepted.
+ *
+ * The canonical fractal_vector form carries a 4-byte header (uint16
+ * dimension, uint16 reserved) ahead of the float32 payload, so the
+ * payload length is stated rather than guessed. A bare float32 array
+ * with no header is also accepted, for callers that never went through
+ * the canonical constructors.
+ *
+ * The canonical form is recognised first. It can only be confused with
+ * a bare array if the array's first float has a zero exponent field -
+ * that is, a zero or denormal value - and its low bytes happen to spell
+ * out the expected dimension. */
 int fsql_parse_blob_vector(const void *src, int nbytes, double *out, int cap) {
-    if (nbytes <= 0 || (nbytes & 3) != 0) return -1;
+    if (nbytes <= 0) return -1;
+    const uint8_t *bytes = (const uint8_t *)src;
+
+    if (nbytes >= 4) {
+        int dim     = bytes[0] | (bytes[1] << 8);
+        int reserved = bytes[2] | (bytes[3] << 8);
+        if (dim >= 1 && dim <= cap && reserved == 0 &&
+            nbytes == 4 + dim * 4) {
+            for (int i = 0; i < dim; i++) {
+                float f;
+                memcpy(&f, bytes + 4 + i * 4, 4);
+                out[i] = (double)f;
+            }
+            return dim;
+        }
+    }
+
+    if ((nbytes & 3) != 0) return -1;
     int count = nbytes / 4;
     if (count > cap) return -1;
-    const uint8_t *bytes = (const uint8_t *)src;
     for (int i = 0; i < count; i++) {
         float f;
         memcpy(&f, bytes + i * 4, 4);
@@ -345,18 +382,14 @@ static void fractal_search_fn(sqlite3_context *ctx, int argc,
  * ------------------------------------------------------------------- */
 
 static int json_get_int(const char *s, const char *key, int fallback) {
-    if (!s || !*s) return fallback;
-    char needle[64];
-    snprintf(needle, sizeof needle, "\"%s\"", key);
-    const char *p = strstr(s, needle);
+    const char *p = fsql_json_top_level_value(s, key);
     if (!p) return fallback;
-    p = strchr(p, ':');
-    if (!p) return fallback;
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
     char *end;
     long v = strtol(p, &end, 10);
-    return (end == p) ? fallback : (int)v;
+    if (end == p) return fallback;
+    /* Clamp rather than truncate: a value past int range must stay out of
+     * range for the caller's bounds check, not wrap into it. */
+    return v > INT_MAX ? INT_MAX : (v < INT_MIN ? INT_MIN : (int)v);
 }
 
 typedef struct ScoutAgg {

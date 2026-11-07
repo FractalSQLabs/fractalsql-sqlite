@@ -55,6 +55,8 @@ Common paths include:
 
 **A note on configuration first.** SQLite has no GUCs and no server config file: every setting below is **per-connection** state applied with `SELECT fractalsql_set('<key>', '<value>');` and read back with `fractalsql_get('<key>')`. The standard way to apply it is the `load_fractalsql.sql` snippet the easy_install wizard generates — pass it to every session with `sqlite3 -init load_fractalsql.sql mydb.sqlite`, or `.read load_fractalsql.sql` from inside a session. Configuration takes effect immediately on the connection that runs it; there is nothing to reload.
 
+`fractalsql_set` is `SQLITE_DIRECTONLY`: run it as a top-level statement, as the snippet does. A trigger, view or `CHECK` constraint stored in a database file cannot call it, so a database you open cannot change these settings on your behalf.
+
 ## Step 1: Activate the Plugin
 Add the following to your per-session bootstrap (`load_fractalsql.sql`, or right after your `.load` line):
 

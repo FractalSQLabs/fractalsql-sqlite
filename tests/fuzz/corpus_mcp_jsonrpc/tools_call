@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fuzz_cheap","arguments":{"text":"x","n":2,"v":[1,2]}}}

@@ -39,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14, windows-2022]
+        os: [ubuntu-24.04, macos-15, windows-2022]
     env:
       GATE_SET: ${{ github.event_name == 'workflow_dispatch' && inputs.gate_set || 'default' }}
 
@@ -227,6 +227,13 @@ jobs:
                       -NewName "sqlite"
           Add-Content -Path $env:GITHUB_ENV -Value "FSQL_SQLITE_DIR=$PWD\deps\sqlite"
 
+      - name: Install OpenSSL (vcpkg, for the MCP server)
+        shell: cmd
+        run: |
+          echo VCPKG_ROOT=%VCPKG_INSTALLATION_ROOT%>>%GITHUB_ENV%
+          "%VCPKG_INSTALLATION_ROOT%\vcpkg" install openssl:x64-windows-static
+          if errorlevel 1 exit /b 1
+
       - name: build_test.ps1 -Asan
         shell: pwsh
         run: |
@@ -264,6 +271,13 @@ jobs:
                       -NewName "sqlite"
           Add-Content -Path $env:GITHUB_ENV -Value "FSQL_SQLITE_DIR=$PWD\deps\sqlite"
 
+      - name: Install OpenSSL (vcpkg, for the MCP server)
+        shell: cmd
+        run: |
+          echo VCPKG_ROOT=%VCPKG_INSTALLATION_ROOT%>>%GITHUB_ENV%
+          "%VCPKG_INSTALLATION_ROOT%\vcpkg" install openssl:x64-windows-static
+          if errorlevel 1 exit /b 1
+
       - name: build_test.ps1 -Ubsan
         shell: pwsh
         run: |
@@ -273,7 +287,7 @@ jobs:
   darwin-asan:
     name: build_test.sh --asan (macOS)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
@@ -304,7 +318,7 @@ jobs:
   darwin-ubsan:
     name: build_test.sh --ubsan (macOS)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4

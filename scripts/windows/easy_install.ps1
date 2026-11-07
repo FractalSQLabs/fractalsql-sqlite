@@ -473,6 +473,7 @@ function Invoke-Uninstall {
             Remove-Item -Force `
                 (Join-Path $InstallDir 'fractalsql.dll') `
                 (Join-Path $InstallDir 'fractalsql-reasoning-http.dll') `
+                (Join-Path $InstallDir 'fractalsql-reasoning-http.dll.sig') `
                 $Snippet `
                 $UserSnippet -ErrorAction SilentlyContinue
             Write-Ok "Files removed. Nothing was registered anywhere else - SQLite extensions leave no other trace."

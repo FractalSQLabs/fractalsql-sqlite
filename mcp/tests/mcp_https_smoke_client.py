@@ -182,12 +182,23 @@ def main() -> int:
             if s == 200:
                 up = True
                 break
+            # If the server process has already exited there is nothing
+            # left to wait for: every remaining probe fails too. Bail out
+            # now instead of spending the whole retry budget (100 probes
+            # x ~3s) on a process that is never coming back -- and report
+            # the exit code, which is what actually says why it died.
+            if proc.poll() is not None:
+                break
             time.sleep(0.15)
         if not check("--https: the transport comes up and GET /healthz "
                      "answers over TLS unauthenticated", up):
             print("---- server log tail ----")
             log.flush()
             print(open(log_path, encoding="utf-8").read()[-2000:])
+            rc = proc.poll()
+            if rc is not None:
+                print("---- the server exited early with code %d "
+                      "(0x%08X) ----" % (rc, rc & 0xFFFFFFFF))
             return 1
 
         check("--https: a bare plaintext HTTP request against the port "
@@ -225,7 +236,6 @@ def main() -> int:
         check("--https: DELETE closes the TLS session cleanly (200)", s == 200)
 
         proc.terminate()
-        https_req(port, "GET", "/healthz", timeout=5.0)
         try:
             rc = proc.wait(timeout=25)
         except Exception:

@@ -24,7 +24,7 @@ The Analytics tier provides mathematical primitives for analyzing the "shape" of
 Calculates the scaling exponent ($\alpha$) of a time-ordered series to distinguish between white noise, pink noise, and Brownian motion.
 
 **Signature**: `fractal_dimension_dfa(series) RETURNS REAL` — `series` is a CSV/JSON TEXT array or packed float32 BLOB.
-**Requirement**: $\ge 16$ points.
+**Requirement**: $\ge 16$ points. The DFA, drift and change-point functions accept at most 134,217,728 samples.
 
 
 #### Using the DFA exponent as a Hurst exponent
@@ -46,7 +46,7 @@ Caveats:
 Measures the spatial complexity of a point cloud using box-counting.
 
 **Signature**: `fractal_dimension_boxcount(points, dim) RETURNS REAL`
-**Requirement**: $\ge 8$ points and a non-degenerate bounding box.
+**Requirement**: $\ge 8$ points with finite coordinates, a non-degenerate bounding box, and (number of points) × `dim` ≤ 4,194,304. The point count in the first sentence is necessary, not sufficient: in testing on uniform-random points, 2-D sets of 64 and 100 points were always refused, 200 points were refused about one time in ten, and 500 always succeeded; 3-D sets of 500 points were always refused and 2,000 always succeeded.
 
 ### `fractal_dimension_drift`
 **Regime Change Detection**
@@ -69,9 +69,11 @@ Sliding two-sample test over adjacent windows of `window` samples; flags a bound
 
 ### `fractal_periodogram`
 **Classical Periodogram**
-Power at each positive Fourier frequency, computed by direct $O(n^2)$ DFT (exact, not an FFT approximation).
+Power at each positive Fourier frequency. Short series use a direct DFT; longer ones use an FFT (radix-2, or Bluestein's algorithm for other lengths), which agrees with the direct sum to floating-point rounding.
 
 **Signature**: `fractal_periodogram(series [, max_peaks]) RETURNS TEXT (JSON)` — `max_peaks` defaults to 8 (arity 1 or 2).
+
+The series may have at most 1,048,576 samples; a longer one is refused.
 **Return**: `{"freqs":[..],"power":[..]}` — only the `max_peaks` bins with highest power, sorted descending. Each `freqs` entry is cycles per sample in $(0, 0.5]$; `1.0/freq` is samples per cycle. Useful for network-beaconing and retry-loop cadence detection that DFA alone is blind to. Requires at least 4 points.
 
 ### `fractal_spectrogram_entropy`
@@ -109,6 +111,9 @@ Topological analysis over a point cloud's Vietoris-Rips filtration, capped at 51
 Random-hyperplane SimHash (Charikar 2002): projects a state vector onto `n_bits` random hyperplanes (deterministic from `seed`) and packs the sign of each projection MSB-first into bytes.
 
 **Signature**: `fractal_state_fingerprint(vec, n_bits [, seed]) RETURNS BLOB` — `vec` is a CSV/JSON TEXT array or packed float32 BLOB; `seed` defaults to 0.0 (arity 2 or 3). Returns `(n_bits + 7) / 8` bytes.
+
+`n_bits` must be between 1 and 33,554,424 (a 4 MiB fingerprint), and `n_bits` times the vector length must not exceed 268,435,456 (about a second of work); a larger value is an error.
+
 Two nearly-identical states collapse to the same or a very low Hamming-distance fingerprint, unlike an exact hash's all-or-nothing sensitivity to floating-point noise.
 
 ### `fractal_cycle_detect`
@@ -151,6 +156,8 @@ These functions take **pre-extracted geometry** (graphs, meshes, skeletons) as i
 | `fractal_nerve_plexus_metric` | `node_coords`, `dim`, `edges` | `{fiber_length_density, branch_density, fractal_dimension}` | Nerve fiber density. |
 | `fractal_morphological_complexity` | `points`, `dim` | `{dimension, lacunarity}` | Pre-segmented mask complexity. |
 
+The point-cloud functions (`fractal_dimension_boxcount`, `fractal_morphological_complexity`) refuse any non-finite coordinate, and refuse a cloud whose number of points times `dim` exceeds 4,194,304 (about 1,400,000 three-dimensional points). `fractal_cortical_folding` takes at most 4,194,304 vertices, and refuses vertices so nearly coplanar that the convex hull cannot be built. Each refusal is an error, not a wrong answer.
+
 ---
 
 ## Portfolio Optimization
@@ -161,6 +168,7 @@ These functions take **pre-extracted geometry** (graphs, meshes, skeletons) as i
 Finds the best $K$ assets in a large universe without brute-force exponential cost.
 
 **Signature**: `fractal_optimize_portfolio(mu, cov, k [, seed [, use_obl [, diffusion_mode]]]) RETURNS TEXT (JSON)` — `mu`/`cov` are flat CSV/JSON TEXT or float32 BLOB arrays (`cov` flattened row-major); omitted trailing arguments take the server edition's defaults exactly (the function is registered at several arities).
+**Limit**: restarts times the square of the asset count is bounded at 2^27 (a single run counts as one restart), so one run takes up to about 11,000 assets and a 64-restart multimodal run about 1,400. A larger request is refused before any work is done.
 **Return**: `{"sharpe":..,"weights":[..]}`.
 **`use_obl`**: apply Opposition-Based Learning to each SFS trial candidate. Also evaluate its bound-reflected opposite and keep whichever fits better. Off by default; doubles the fitness-eval cost of the affected diffusion step when enabled.
 **`diffusion_mode`**: `'gaussian'` (default, canonical SFS) or `'levy'`: substitutes a heavy-tailed Lévy-flight step (Mantegna's algorithm) for the Gaussian walk, which can help escape local optima on highly multimodal problems at the cost of occasional very large steps.
@@ -187,6 +195,8 @@ Finds the best $K$ assets in a large universe without brute-force exponential co
 Generalizes `fractal_optimize_portfolio`'s cardinality-constrained search into a pluggable-objective optimizer; the SQL entry point hardcodes value-weighted allocation: maximize `sum(weight[i] * item_values[i])` subject to at most `k` of `n_items` nonzero, each `weight <= upper_bounds[i]`, weights summing to 1.0.
 
 **Signature**: `fractal_optimize_subset(item_values, upper_bounds, k [, prev_weights [, turnover_penalty [, seed]]]) RETURNS TEXT (JSON)` — `item_values`/`upper_bounds`/`prev_weights` are CSV/JSON TEXT arrays or packed float32 BLOBs (`upper_bounds` length must match `item_values`); `turnover_penalty` defaults to 0.0 and `seed` to the shared default (arity 3–6, omitted trailing arguments take the documented defaults).
+
+`n_items` times `k` must not exceed 16,777,216 (about a minute of work); a larger request is refused.
 **Return**: `{"score":..,"weights":[..]}` where `score` is the achieved total value (higher is better). `prev_weights` + `turnover_penalty` (both optional) steer the search away from reallocating when set, for rebalancing use cases. Every `upper_bounds[i]` must be in `[0, 1]`, and the sum of the `k` largest `upper_bounds` must reach 1.0 or no feasible k-subset exists.
 
 ---

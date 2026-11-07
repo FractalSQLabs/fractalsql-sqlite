@@ -88,12 +88,18 @@ namespace fsqlmcp
             }
         }
 
-        server.beginShutdown();
+        // The requests that were read before the input ended are answered
+        // before the shutdown begins: a client that writes its last message
+        // and then closes its end still gets the replies. The shutdown flag
+        // only turns away requests that arrive after it, and no more can
+        // arrive here: the input is closed and the loop has ended.
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds( cfg.shutdownDrainMs );
         while( server.activeRequestCount() > 0 && std::chrono::steady_clock::now() < deadline )
             std::this_thread::sleep_for( std::chrono::milliseconds( 20 ) );
 
         for( auto& t : workers ) if( t.joinable() ) t.join();
+
+        server.beginShutdown();
         logging::event( "shutdown_complete", Json{ { "transport", "stdio" } } );
         return 0;
     }

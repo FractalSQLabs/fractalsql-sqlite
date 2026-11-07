@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Daniel Gardiner d/b/a FractalSQLabs
 #pragma once
 #include <optional>
+#include <set>
 #include <string>
 #include <functional>
 #include <unordered_map>
@@ -16,6 +17,24 @@
 
 namespace fsqlmcp
 {
+    // Which protocol era a request belongs to. The modern era (MCP revision
+    // 2026-07-28) is stateless: every request carries its own metadata and
+    // there is no protocol session. The legacy era (2024-11-05 .. 2025-11-25)
+    // keeps the initialize handshake and the Mcp-Session-Id header.
+    enum class ProtocolEra { Legacy, Modern };
+
+    // Per-request options the transport fills in and the dispatch core reads.
+    struct CallOptions
+    {
+        ProtocolEra era = ProtocolEra::Legacy;
+        // The context handle this request runs under (the modern era's
+        // explicit per-client state handle). Empty in the legacy era, where
+        // the protocol session supplies the context.
+        std::string contextId;
+        // The presenting credential's tool allowlist; unset means every tool.
+        std::optional<std::set<std::string>> toolAllow;
+    };
+
     struct ServerConfig
     {
         std::string serverName    = "fractalsql-mcp";
@@ -24,6 +43,9 @@ namespace fsqlmcp
         // 15.4's deployment-wide kill switch (FSQL_MCP_READ_ONLY): refuse every
         // destructive call before it reaches the adapter layer.
         bool readOnlyMode = false;
+        // FSQL_MCP_PROTOCOL_ERA=modern: refuse the legacy handshake outright
+        // and answer GET/DELETE with 405 for every request.
+        bool modernOnly = false;
     };
 
     // Transport-agnostic dispatch core, called identically from
@@ -35,6 +57,8 @@ namespace fsqlmcp
 
         // Returns std::nullopt for a notification or a cancelled-and-discarded call.
         std::optional<std::string> handleLine( const std::string& line, const std::string& clientKey );
+        std::optional<std::string> handleLine( const std::string& line, const std::string& clientKey,
+                                               const CallOptions& opts );
 
         // notifications/cancelled side effect: flags the id AND interrupts the
         // session's engine statement (sqlite3_interrupt here; pg_cancel_backend /
@@ -54,10 +78,12 @@ namespace fsqlmcp
         std::function<void( const std::string& clientKey )> interruptHook;
 
     private:
-        std::optional<std::string> dispatch( const Json& req, const std::string& clientKey );
+        std::optional<std::string> dispatch( const Json& req, const std::string& clientKey, const CallOptions& opts );
         Json handleInitialize( const Json& params );
-        Json handleToolsList();
-        Json handleToolsCall( const Json& params, const std::string& clientKey, const std::string& requestId );
+        Json handleServerDiscover();
+        Json handleToolsList( const CallOptions& opts );
+        Json handleToolsCall( const Json& params, const std::string& clientKey, const std::string& requestId,
+                              const CallOptions& opts );
         Json handleResourcesList();
         Json handleResourcesRead( const Json& params );
         Json handlePromptsList();
@@ -75,7 +101,7 @@ namespace fsqlmcp
         // check on each request -- a plain bool here is a genuine data
         // race (confirmed by TSan against a fully -fsanitize=thread-
         // instrumented build of this binary, not just the default LD_
-        // PRELOAD-only runtime-interception setup gate 37 normally uses,
+        // PRELOAD-only runtime-interception setup the smoke tests use,
         // which can miss races expressed through inline atomic/plain
         // loads in code it never compiled with instrumentation).
         std::atomic<bool> shuttingDown_{ false };

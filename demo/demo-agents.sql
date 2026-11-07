@@ -303,6 +303,8 @@ SELECT fractal_agent_recommend_diverse('agents_demo_catalog', 'emb', '0.12,0.01,
 -- generated statement; result_json is the real executed result (or a
 -- captured execution-failure reason); analysis is the real fractal_reason
 -- read. The horizontal catch-all -- no vertical demo is wired to it.
+-- The shipped agent only runs the statement it generated when the caller
+-- asks it to (the last argument); it generates and validates it either way.
 DROP TABLE IF EXISTS agents_demo_data;
 CREATE TABLE agents_demo_data (id INTEGER PRIMARY KEY, category TEXT, amount REAL);
 INSERT INTO agents_demo_data VALUES
@@ -321,8 +323,9 @@ FROM a;
 .print --- analysis (fractal_reason over the result) ---
 SELECT fractal_reason('one-line read of this SQL analysis result');
 .print --- the shipped agent: same composition, one call ---
+.print --- the last argument opts in to running the generated statement (1 = run it, 0 = only generate and validate it) ---
 SELECT fractal_agent_data_analyst(
-    'total amount spent per category in agents_demo_data', '["agents_demo_data"]', 2);
+    'total amount spent per category in agents_demo_data', '["agents_demo_data"]', 2, '{}', 1);
 
 -- 10. patient_deterioration_triage (medtech;
 -- fractal_agent_patient_deterioration_triage).

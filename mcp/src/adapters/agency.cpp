@@ -242,19 +242,31 @@ namespace fsqlmcp
         t.push_back( ToolSpec{ "fractal_agent_data_analyst", "Agency", ToolClass::Expensive,
             { Str("question",true,"Natural-language question."),
               StrArray("table_names",false,"Tables to scope to (null = auto-discover)."),
-              Int("max_retries",false,"Self-correction retries.",2), Str("context",false,"Optional JSON context.","{}") },
-            std::nullopt, false, false,
+              Int("max_retries",false,"Self-correction retries.",2), Str("context",false,"Optional JSON context.","{}"),
+              Bool_("auto_execute",false,"Default false: only generate and validate the SQL (no execution, no analysis). true is an explicit opt-in to run the generated SQL under this connection's role and analyse the real result.",false) },
+            std::nullopt, true, false,
             [&db]( const Json& a, CallCtx& ) {
                 SqlValue tn = a.contains("table_names") && !a.at("table_names").is_null()
                     ? SqlValue( vectors::stringArrayToJsonText( a.at("table_names"), "table_names" ) )
                     : SqlValue( nullptr );
-                return callAgent( db, "SELECT fractal_agent_data_analyst(?,?,?,?)",
-                { a.at("question").get<std::string>(), tn, a.value( "max_retries", 2 ),
-                  a.value( "context", std::string( "{}" ) ) } ); } } );
+                // Execution is an explicit per-call opt-in. Without it the
+                // generated statement is produced and validated but never
+                // run, and no reasoning happens.
+                if( a.value( "auto_execute", false ) )
+                    return callAgent( db, "SELECT fractal_agent_data_analyst(?,?,?,?,?)",
+                    { a.at("question").get<std::string>(), tn, a.value( "max_retries", 2 ),
+                      a.value( "context", std::string( "{}" ) ),
+                      static_cast<std::int64_t>( 1 ) } );
+                Json r = callAgent( db, "SELECT fractal_sql_agent(?,?,?,?)",
+                    { a.at("question").get<std::string>(), tn, a.value( "max_retries", 2 ),
+                      static_cast<std::int64_t>( 0 ) } );
+                if( r.is_object() ) { r["auto_execute"] = false; r["analysis"] = nullptr; }
+                return r; } } );
         t.back().description = std::string( "The horizontal catch-all: NL question -> fractal_sql_agent (NL->SQL->"
             "execute with its own retry loop) -> a reasoned analysis of the real result. Returns {analysis, "
-            "generated_sql, result_json}. Runs the generated SQL under whatever this connection can touch; "
-            "least-privilege guidance applies." ) + kReasoningAgent + kDataNote + kPartialNote;
+            "generated_sql, result_json}. auto_execute defaults to FALSE: the call then only generates and validates "
+            "SQL (analysis null, result_json null). Pass auto_execute=true to run the generated SQL under whatever this "
+            "connection can touch; least-privilege guidance applies." ) + kReasoningAgent + kDataNote + kPartialNote;
         markReasoning( t.back() );
 
         t.push_back( ToolSpec{ "fractal_agent_recall_hybrid", "Agency", ToolClass::Cheap,

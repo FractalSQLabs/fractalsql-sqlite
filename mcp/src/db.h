@@ -23,8 +23,8 @@ namespace fsqlmcp
     // The plugin's own version, and the engine surface version it was
     // built and tested against (version numbers track the engine).
     static const char* const kMcpPluginName       = "fractalsql-sqlite-mcp";
-    static const char* const kMcpPluginVersion    = "2.0.11";
-    static const char* const kEngineVersionExpect = "2.0.11";
+    static const char* const kMcpPluginVersion    = "2.0.12";
+    static const char* const kEngineVersionExpect = "2.0.12";
 
     using SqlValue = std::variant<std::nullptr_t, std::int64_t, double, std::string,
                                   std::vector<std::uint8_t>>;
@@ -93,7 +93,7 @@ namespace fsqlmcp
                       const std::string& bootstrapSql, const std::string& engineVersionExpected,
                       bool agentPartialReasoningFail = true, bool lockDestructive = false )
         {
-            openDatabase( dbPath );
+            openDatabase( dbPath, lockDestructive );
             // Every engine call binds parameters. The only statements
             // executed unbound are the fixed PRAGMA and the bootstrap snippet
             // (an operator-supplied file/env, not caller input).
@@ -101,7 +101,14 @@ namespace fsqlmcp
             loadExtensionLockedDown( extensionPath );
             runBootstrap( bootstrapSql );
             if( agentPartialReasoningFail ) applyAgentPartialReasoningFail();
-            if( lockDestructive ) applyDestructiveLatch();
+            if( lockDestructive )
+            {
+                applyDestructiveLatch();
+                // Engine-side backstop for FSQL_MCP_READ_ONLY: with query_only on, SQLite itself
+                // refuses INSERT/UPDATE/DELETE/DDL on this connection, whatever a tool's
+                // destructiveHint says. Set AFTER the bootstrap so operator setup still runs.
+                exec( "PRAGMA query_only=ON;" );
+            }
             checkVersionSkew( engineVersionExpected );
         }
 
@@ -220,14 +227,27 @@ namespace fsqlmcp
 
         // connect()'s phases, broken out 1:1 (same order, same behavior,
         // same exceptions) so each stays small on its own.
-        void openDatabase( const std::string& dbPath )
+        void openDatabase( const std::string& dbPath, bool readOnly )
         {
-            if( sqlite3_open( dbPath.c_str(), &db_ ) != SQLITE_OK )
+            // FSQL_MCP_READ_ONLY: open the file read-only so the engine itself refuses writes, whatever a
+            // tool's destructiveHint says. In-memory databases have no file to protect and
+            // cannot be opened read-only, so they keep the normal open (query_only still applies later).
+            const bool inMemory = dbPath.empty() || dbPath == ":memory:" || dbPath.rfind( "file::memory:", 0 ) == 0
+                                  || dbPath.find( "mode=memory" ) != std::string::npos;
+            const int flags = ( readOnly && !inMemory )
+                                  ? ( SQLITE_OPEN_READONLY | SQLITE_OPEN_URI )
+                                  : ( SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_URI );
+            if( sqlite3_open_v2( dbPath.c_str(), &db_, flags, nullptr ) != SQLITE_OK )
             {
                 const std::string msg = db_ ? sqlite3_errmsg( db_ ) : "cannot open database file";
                 close();
                 throw ToolError( ErrorClass::Connectivity, sanitizeSecrets( msg ) );
             }
+            // trusted_schema=OFF: views, triggers, CHECK constraints and generated columns in the
+            // database may then only call functions marked SQLITE_INNOCUOUS, so a payload stored in the schema
+            // cannot reach the extension's state-mutating functions. This applies to this server's connection only.
+            int unused = 0;
+            sqlite3_db_config( db_, SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0, &unused );
         }
 
         // Load-then-lock-down: enable ON only for the one expected .load

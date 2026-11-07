@@ -499,7 +499,8 @@ FSQL_API int fsql_audit_unpack(const void *blob, size_t blob_len,
  * 0.5; a smallest box of 32 gives ~0.52 at the cost of higher variance).
  *
  * Returns FSQL_OK on success (writes *out_alpha), FSQL_ERR_INVALID
- * on a NULL/too-short series, FSQL_ERR_OOM on allocation failure. */
+ * on a NULL, too-short or over-long (more than 2^27 samples) series,
+ * FSQL_ERR_OOM on allocation failure. */
 FSQL_API int fsql_dimension_dfa(const double *series, size_t n,
                                 double *out_alpha);
 
@@ -509,7 +510,8 @@ FSQL_API int fsql_dimension_dfa(const double *series, size_t n,
  * ordered/critical state). Requires n >= window + 16, window >= 16.
  *
  * Returns FSQL_OK on success (writes *out_drift, *out_recent_alpha,
- * *out_baseline_alpha), FSQL_ERR_INVALID on invalid/too-short input. */
+ * *out_baseline_alpha), FSQL_ERR_INVALID on invalid, too-short or over-long
+ * (more than 2^27 samples) input. */
 FSQL_API int fsql_dimension_drift(const double *series, size_t n, size_t window,
                                   double *out_drift, double *out_recent_alpha,
                                   double *out_baseline_alpha);
@@ -517,11 +519,13 @@ FSQL_API int fsql_dimension_drift(const double *series, size_t n, size_t window,
 /* Box-counting (Minkowski-Bouligand) fractal dimension over a point
  * cloud in `dim` dimensions -- occupied-space markers such as voxel
  * centers of a binary mask, or a vessel/nerve-fiber skeleton's
- * points. points: n_points x dim, row-major. Requires n_points >= 8
- * and a non-degenerate bounding box.
+ * points. points: n_points x dim, row-major. Requires n_points >= 8,
+ * finite coordinates and a non-degenerate bounding box.
  *
  * Returns FSQL_OK on success (writes *out_dimension), FSQL_ERR_INVALID
- * on invalid/degenerate input, FSQL_ERR_OOM on allocation failure. */
+ * on invalid/degenerate input, a non-finite coordinate, or when
+ * n_points x dim exceeds FSQL_LIMIT_GEOMETRY_WORK (default 2^22), and
+ * FSQL_ERR_OOM on allocation failure. */
 FSQL_API int fsql_dimension_boxcount(const double *points, size_t n_points,
                                      size_t dim, double *out_dimension);
 
@@ -534,7 +538,7 @@ FSQL_API int fsql_dimension_boxcount(const double *points, size_t n_points,
  * out_indices and the count written to *out_n.
  *
  * Returns FSQL_OK on success, FSQL_ERR_INVALID on NULL input,
- * window==0, n < 2*window, threshold<=0, or max_points==0. */
+ * window==0, n < 2*window, n > 2^27, threshold<=0, or max_points==0. */
 FSQL_API int fsql_change_point_detect(const double *series, size_t n, size_t window,
                                       double threshold, size_t *out_indices,
                                       size_t max_points, size_t *out_n);
@@ -546,9 +550,13 @@ FSQL_API int fsql_change_point_detect(const double *series, size_t n, size_t win
  * full spectrum. out_freqs[i] is a normalized frequency in (0, 0.5]
  * (cycles per sample); 1.0 / out_freqs[i] is samples per cycle.
  *
+ * Series up to 2048 samples use a direct DFT; longer ones use an FFT
+ * (O(n log n)), with the same result to rounding. A series longer than
+ * FSQL_LIMIT_PERIODOGRAM_SAMPLES (default 2^20) is refused.
+ *
  * Returns FSQL_OK on success (*out_n_peaks = min(max_peaks,
- * floor(n/2))), FSQL_ERR_INVALID on NULL/n<4/max_peaks==0 input,
- * FSQL_ERR_OOM on allocation failure. */
+ * floor(n/2))), FSQL_ERR_INVALID on NULL/n<4/max_peaks==0 input or a
+ * series past the limit, FSQL_ERR_OOM on allocation failure. */
 FSQL_API int fsql_periodogram(const double *series, size_t n,
                               double *out_freqs, double *out_power,
                               size_t max_peaks, size_t *out_n_peaks);
@@ -641,7 +649,9 @@ FSQL_API int fsql_tda_persistence_diagram(const double *points, size_t n_points,
  * loop detection) that an exact-match hash is too brittle for.
  *
  * Returns FSQL_OK on success, FSQL_ERR_INVALID on NULL/dim==0/
- * n_bits==0 input. */
+ * n_bits==0 input, or when n_bits * dim exceeds
+ * FSQL_LIMIT_FINGERPRINT_WORK (default 2^28 = 268435456): the work is that
+ * product and cannot be interrupted. out is untouched on an error. */
 FSQL_API int fsql_state_fingerprint(const double *v, size_t dim, size_t n_bits,
                                     double seed, uint8_t *out);
 
@@ -676,7 +686,7 @@ typedef struct fsql_cycle_state {
 /* Allocates the internal checkpoint buffer (n_bytes bytes, matching
  * the fingerprint size fsql_cycle_detect_feed will be called with).
  * Returns FSQL_OK on success, FSQL_ERR_INVALID on NULL/n_bytes==0
- * input, FSQL_ERR_OOM on allocation failure. Caller must
+ * input or n_bytes over 2^26 (64 MiB), FSQL_ERR_OOM on allocation failure. Caller must
  * fsql_cycle_detect_free when done. */
 FSQL_API int fsql_cycle_detect_init(fsql_cycle_state_t *cs, size_t n_bytes,
                                     size_t hamming_threshold);
@@ -896,7 +906,9 @@ FSQL_API int fsql_vascular_network(const double *node_coords, size_t n_nodes,
  *
  * Returns FSQL_OK on success (writes *out_mesh_area, *out_hull_area,
  * *out_gyrification_index), FSQL_ERR_INVALID on invalid/degenerate
- * input, FSQL_ERR_OOM on allocation failure. */
+ * input, a non-finite vertex, more than 2^22 vertices, or near-coplanar
+ * vertices that make the hull build run past its step bound,
+ * FSQL_ERR_OOM on allocation failure. */
 FSQL_API int fsql_cortical_folding(const double *vertices, size_t n_vertices,
                                    const size_t *faces, size_t n_faces,
                                    double *out_mesh_area, double *out_hull_area,
@@ -921,8 +933,9 @@ FSQL_API int fsql_nerve_plexus_metric(const double *node_coords, size_t n_nodes,
  * mask points. See src/fractal_dim/morphology.h.
  *
  * Returns FSQL_OK on success (writes *out_dimension, *out_lacunarity),
- * FSQL_ERR_INVALID on invalid/degenerate input, FSQL_ERR_OOM on
- * allocation failure. */
+ * FSQL_ERR_INVALID on invalid/degenerate input, a non-finite coordinate,
+ * or when n_points x dim exceeds FSQL_LIMIT_GEOMETRY_WORK (default 2^22),
+ * FSQL_ERR_OOM on allocation failure. */
 FSQL_API int fsql_morphological_complexity(const double *points, size_t n_points, size_t dim,
                                            double *out_dimension, double *out_lacunarity);
 
@@ -1000,6 +1013,45 @@ FSQL_API int fsql_vector_quantize_binary(const float *v, size_t dim, uint8_t *ou
 /* Hamming distance between two binary-quantized vectors. */
 FSQL_API int fsql_vector_hamming_distance(const uint8_t *a, const uint8_t *b,
                                           size_t n_bytes, size_t *out_dist);
+
+/* ----- Work limits -----------------------------------------------------
+ *
+ * Calls that can run for a long time are bounded by the size of the work they
+ * were asked for, because a single call cannot be interrupted. Each limit has
+ * a default that suits a shared server and a hard ceiling that only a rebuild
+ * can raise; an operator who needs a bigger job can raise the limit up to the
+ * ceiling. The limits are process-wide and read without a lock, so set them
+ * once at start-up, before work begins on other threads.
+ *
+ *   FSQL_LIMIT_SEARCH_WORK        iterations x population_size x
+ *                                 diffusion_factor x dim, per fsql_search*
+ *                                 (default 2^31, about a minute; ceiling 2^36)
+ *   FSQL_LIMIT_SUBSET_WORK        n_items x k, per fsql_optimize_subset
+ *                                 (default 2^24; ceiling 2^28)
+ *   FSQL_LIMIT_PERIODOGRAM_SAMPLES  series length, per fsql_periodogram
+ *                                 (default 2^20; ceiling 2^22)
+ *   FSQL_LIMIT_FINGERPRINT_WORK   n_bits x dim, per fsql_state_fingerprint
+ *                                 (default 2^28; ceiling 2^32)
+ *   FSQL_LIMIT_GEOMETRY_WORK      n_points x dim, per fsql_dimension_boxcount
+ *                                 and fsql_morphological_complexity
+ *                                 (default 2^22; ceiling 2^28)
+ */
+typedef enum {
+    FSQL_LIMIT_SEARCH_WORK         = 1,
+    FSQL_LIMIT_SUBSET_WORK         = 2,
+    FSQL_LIMIT_PERIODOGRAM_SAMPLES = 3,
+    FSQL_LIMIT_FINGERPRINT_WORK    = 4,
+    FSQL_LIMIT_GEOMETRY_WORK       = 5
+} fsql_limit_t;
+
+/* Reads the limit in force, its default and its ceiling. Any output may be
+ * NULL. FSQL_ERR_INVALID for an unknown limit (outputs are zeroed). */
+FSQL_API int fsql_limit_get(fsql_limit_t which, uint64_t *value,
+                            uint64_t *default_value, uint64_t *ceiling);
+
+/* Sets a limit. 0 restores the default. A value above the ceiling is refused
+ * with FSQL_ERR_INVALID and nothing changes. */
+FSQL_API int fsql_limit_set(fsql_limit_t which, uint64_t value);
 
 #ifdef __cplusplus
 }  /* extern "C" */

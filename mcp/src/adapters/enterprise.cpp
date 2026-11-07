@@ -24,7 +24,7 @@ namespace fsqlmcp
             "tamper-evident hash chain. A rewritten row breaks the chain; a deleted row leaves a visible id gap." )
             + kEnterprise;
 
-        t.push_back( ToolSpec{ "fractal_ledger_load", "Enterprise", ToolClass::Cheap, {}, std::nullopt, false, false,
+        t.push_back( ToolSpec{ "fractal_ledger_load", "Enterprise", ToolClass::Cheap, {}, std::nullopt, true, false,
             [&db]( const Json&, CallCtx& ) { return parseJsonLenient( db.callScalar( "SELECT fractal_ledger_load()", {} ) ); } } );
         t.back().description = std::string( "Hydrates in-memory ledgers from the chain's latest entry (tip-only, "
             "O(1)). On an integrity failure, diversify is auto-disabled and ledgers left empty." ) + kEnterprise;
@@ -77,9 +77,11 @@ namespace fsqlmcp
 
         t.push_back( ToolSpec{ "fractal_audit_log", "Enterprise", ToolClass::Cheap,
             { Str("entry_type", true, "Decision-audit entry type."),
-              Str("payload", true, "Payload, stored verbatim (SQLite has no jsonb).") },
+              Str("payload", true, "Payload: a well-formed JSON document, stored verbatim. The key _actor is reserved.") },
             std::nullopt, false, false,
-            [&db]( const Json& a, CallCtx& ) {
+            [&db]( const Json& a, CallCtx& ctx ) {
+                // Stamp the MCP client key into the chain entry.
+                db.callScalar( "SELECT fractal_set_actor(?)", { ctx.clientKey } );
                 return parseJsonLenient( db.callScalar( "SELECT fractal_audit_log(?, ?)",
                     { a.at( "entry_type" ).get<std::string>(), a.at( "payload" ).get<std::string>() } ) );
             } } );

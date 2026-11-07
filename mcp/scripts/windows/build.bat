@@ -70,8 +70,12 @@ if not exist "%OUTDIR%" mkdir "%OUTDIR%"
 rem /MT (static CRT) matches the vcpkg x64-windows-static triplet and yields a
 rem self-contained binary, mirroring the release-posture of the rest of this
 rem repo's Windows artifacts.
-cl.exe /nologo /std:c++17 /utf-8 /EHsc /MT /O2 /W3 ^
-  /DFSQL_MCP_VERSION="\"2.0.11\"" ^
+rem /DNOMINMAX suppresses windows.h's function-like min()/max() macros, which
+rem otherwise rewrite std::min/std::max into "std::(...)" and fail to compile
+rem with C2589. Two headers reach windows.h here: mcp\src\lock_paths.h and
+rem openssl/ssl.h (-> e_ostime.h -> winsock2.h -> windows.h).
+cl.exe /nologo /std:c++17 /utf-8 /EHsc /MT /O2 /W3 /DNOMINMAX ^
+  /DFSQL_MCP_VERSION="\"2.0.12\"" ^
   /I "%MCP_DIR%\vendor" /I "%MCP_DIR%\src" /I "%SQLITE_DIR%" ^
   /I "%OPENSSL_DIR%\include" ^
   "%SQLITE_DIR%\sqlite3.c" ^

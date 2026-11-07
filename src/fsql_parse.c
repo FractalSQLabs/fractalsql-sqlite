@@ -156,3 +156,50 @@ fsql_extract_topk(const char *json, int max_k, int *out_idx, double *out_dist)
     }
     return n;
 }
+
+#define JSON_WS(c) ((c) == ' ' || (c) == '\t' || (c) == '\n' || (c) == '\r')
+
+const char *
+fsql_json_top_level_value(const char *json, const char *key)
+{
+    if (!json || !key) return NULL;
+    const size_t klen = strlen(key);
+    const char *p = json;
+    while (JSON_WS(*p)) p++;
+    if (*p != '{') return NULL;
+    p++;
+
+    int depth = 1;        /* inside the outermost object */
+    int expect_key = 1;   /* at depth 1, the next string is a key */
+    while (*p) {
+        const char c = *p;
+        if (c == '"') {
+            const char *start = ++p;
+            while (*p && *p != '"') {
+                if (*p == '\\' && p[1]) p++;
+                p++;
+            }
+            if (!*p) return NULL;
+            const char *end = p++;   /* end = closing quote */
+            if (depth == 1 && expect_key) {
+                const char *q = p;
+                while (JSON_WS(*q)) q++;
+                if (*q == ':') {
+                    q++;
+                    if ((size_t)(end - start) == klen && memcmp(start, key, klen) == 0) {
+                        while (JSON_WS(*q)) q++;
+                        return q;
+                    }
+                    expect_key = 0;
+                    p = q;
+                }
+            }
+            continue;
+        }
+        if (c == '{' || c == '[') depth++;
+        else if (c == '}' || c == ']') { if (--depth == 0) return NULL; }
+        else if (c == ',' && depth == 1) expect_key = 1;
+        p++;
+    }
+    return NULL;
+}

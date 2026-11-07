@@ -290,19 +290,24 @@ namespace fsqlmcp
             "subset exists (clean engine error).";
 
         t.push_back( ToolSpec{ "fractal_store_morphology", "Analytics", ToolClass::Cheap,
-            { NullableNum("doc_id", "Feature-store key (nullable bigint)."), Vec("feature_array", true, "Feature vector.") },
-            std::nullopt, false, false,
-            [&db]( const Json& a, CallCtx& ) {
+            { NullableNum("doc_id", "Feature-store key (nullable bigint)."), Vec("feature_array", true, "Feature vector."),
+              Bool_("force", false, "Overwrite a vector another client wrote. Default false: such an overwrite is refused.", false) },
+            std::nullopt, true, false,
+            [&db]( const Json& a, CallCtx& ctx ) {
                 SqlValue id = a.contains( "doc_id" ) && !a.at( "doc_id" ).is_null()
                     ? SqlValue( a.at( "doc_id" ).get<std::int64_t>() ) : SqlValue( nullptr );
-                SqlValue raw = db.callScalar( "SELECT fractal_store_morphology(?, ?)",
-                    { id, vectors::vectorParamToText( a.at("feature_array"), "feature_array" ) } );
+                // The row records this MCP client key; an overwrite by another client is refused.
+                db.callScalar( "SELECT fractal_set_actor(?)", { ctx.clientKey } );
+                SqlValue raw = db.callScalar( "SELECT fractal_store_morphology(?, ?, ?)",
+                    { id, vectors::vectorParamToText( a.at("feature_array"), "feature_array" ),
+                      static_cast<std::int64_t>( a.value( "force", false ) ? 1 : 0 ) } );
                 const auto str = asText( raw );
                 if( str && *str == "ok" ) return Json{ { "status", "ok" } };
                 return parseJsonLenient( raw );
             } } );
         t.back().description = "Upserts a feature vector against a doc_id in the generic per-item feature store "
-            "(auto-created on first use). Last-writer-wins. Returns {'status':'ok'}.";
+            "(auto-created on first use). The row records the writing client; overwriting another client's vector is refused "
+            "unless force=true. Returns {'status':'ok'}.";
 
         t.push_back( ToolSpec{ "fractal_mine_topology_negatives", "Analytics", ToolClass::Cheap,
             { Vec("surrogate_vector", true, "Query vector into the feature store."), Int("k", false, "Neighbors to return.", 10), RowLimit() },

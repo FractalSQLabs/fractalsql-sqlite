@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="FractalSQLforSQLite.jpg" alt="FractalSQL for SQLite" width="720">
+</p>
+
 # Security Policy
 
 This repository follows the FractalSQLabs organization-wide security

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 AND BSD-2-Clause
 // SPDX-FileCopyrightText: 2026 Daniel Gardiner d/b/a FractalSQLabs
+#include <stdexcept>
 #include "schema_lock.h"
 #include <openssl/evp.h>
 #include <fstream>
@@ -32,9 +33,14 @@ namespace fsqlmcp
     {
         unsigned char digest[ EVP_MAX_MD_SIZE ]; unsigned int len = 0;
         EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-        EVP_DigestInit_ex( ctx, EVP_sha256(), nullptr );
-        EVP_DigestUpdate( ctx, data.data(), data.size() );
-        EVP_DigestFinal_ex( ctx, digest, &len );
+        // Every step can fail (allocation failure inside OpenSSL); an unchecked failure is a null dereference.
+        if( !ctx || EVP_DigestInit_ex( ctx, EVP_sha256(), nullptr ) != 1
+            || EVP_DigestUpdate( ctx, data.data(), data.size() ) != 1
+            || EVP_DigestFinal_ex( ctx, digest, &len ) != 1 )
+        {
+            if( ctx ) EVP_MD_CTX_free( ctx );
+            throw std::runtime_error( "sha256 is unavailable (allocation failure inside OpenSSL)" );
+        }
         EVP_MD_CTX_free( ctx );
 
         static const char* const kHex = "0123456789abcdef";

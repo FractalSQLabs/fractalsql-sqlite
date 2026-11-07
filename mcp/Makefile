@@ -29,7 +29,7 @@ CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra
 # one plain-C translation unit (sqlite3.o) matches the C++ objects'
 # -arch instead of silently compiling for the host architecture.
 CFLAGS   ?=
-DEFS     := -DFSQL_MCP_VERSION="\"2.0.11\""
+DEFS     := -DFSQL_MCP_VERSION="\"2.0.12\""
 
 # src/vectors.cpp uses std::to_chars on a double (shortest round-trip form), which
 # Apple's libc++ marks unavailable before macOS 13.3. CI exports
@@ -56,6 +56,37 @@ endif
 ifdef COVERAGE
   CXXFLAGS := $(CXXFLAGS) -O1 -g --coverage -fprofile-update=atomic
   CFLAGS   := $(CFLAGS) -O1 -g --coverage -fprofile-update=atomic
+endif
+
+# Sanitizer builds (build_test.sh --asan / --ubsan / --tsan): the same
+# switches the top-level Makefile takes, applied to the MCP server so its
+# own C++ is instrumented, not just the extension it loads.
+# ASAN=1 / UBSAN=1 compose freely; TSAN=1 composes with UBSAN=1 but NOT
+# with ASAN=1 (the runtimes cannot share a binary). UBSAN builds do not
+# recover: the first undefined-behaviour hit aborts the server, so a
+# build_test.sh gate cannot pass over it.
+# The vendored sqlite3 amalgamation is instrumented under ASAN/UBSAN but
+# left plain under TSAN: its own mutexes are pthread calls TSan already
+# intercepts, and instrumenting 250k lines of third-party C only adds
+# noise to a report about this server's threads.
+SANITIZE =
+ifeq ($(ASAN),1)
+  SANITIZE += -fsanitize=address
+endif
+ifeq ($(UBSAN),1)
+  SANITIZE += -fsanitize=undefined -fno-sanitize-recover=undefined
+endif
+ifeq ($(TSAN),1)
+  ifeq ($(ASAN),1)
+    $(error TSAN=1 cannot be combined with ASAN=1 -- their runtimes cannot link into the same binary)
+  endif
+  SANITIZE += -fsanitize=thread
+endif
+ifneq ($(strip $(SANITIZE)),)
+  CXXFLAGS := $(CXXFLAGS) -O1 -g -fno-omit-frame-pointer $(SANITIZE)
+  ifneq ($(TSAN),1)
+    CFLAGS := $(CFLAGS) -O1 -g -fno-omit-frame-pointer $(SANITIZE)
+  endif
 endif
 
 SQLITE_DIR    := ../deps/sqlite

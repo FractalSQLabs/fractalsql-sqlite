@@ -42,6 +42,13 @@ int fsql_extract_population(const char *json, int dim, int max_rows, double *out
  * malformed input. */
 int fsql_extract_topk(const char *json, int max_k, int *out_idx, double *out_dist);
 
+/* The value of `key` in the OUTERMOST object of `json`, or NULL when it is
+ * absent or `json` is not an object. Only top-level keys match: text inside
+ * string values and the keys of nested objects and arrays are skipped. The
+ * result points into `json`, at the first character of the value (leading
+ * whitespace skipped). Keys are compared byte for byte, without unescaping. */
+const char *fsql_json_top_level_value(const char *json, const char *key);
+
 #ifdef __cplusplus
 }
 #endif

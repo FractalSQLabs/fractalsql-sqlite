@@ -30,7 +30,7 @@
  *
  *   * = path-type keys get extra validation at set time: they must be
  *   absolute with no traversal segments (mirroring fsql_load_reasoning's
- *   own rules), which is exactly what gate 09 asserts.
+ *   own rules), which is exactly what the configuration tests assert.
  *
  * Keys are named without a "fractalsql." prefix: fractalsql_set(
  * 'http_url', ...). The prefixed spelling ("fractalsql.http_url") is
@@ -102,8 +102,8 @@ static const CfgDef CFG_TABLE[] = {
 #define CFG_N (sizeof(CFG_TABLE) / sizeof(CFG_TABLE[0]))
 
 /* URL-ish keys are CFG_PATH-validated too (an http_url is not a plugin
- * path, but the same traversal hygiene applies and gate 09 relies on
- * it); http_* URL keys allow the url scheme prefix. */
+ * path, but the same traversal hygiene applies and the configuration tests
+ * rely on it); http_* URL keys allow the url scheme prefix. */
 static int key_is_url(const char *key) {
     return strcmp(key, "http_url") == 0 ||
            strcmp(key, "http_embed_url") == 0 ||
@@ -362,6 +362,24 @@ const char *fsql_config_get(const FsqlState *st, const char *name) {
     return cfg_str_value(st, d);
 }
 
+/* Apply the documented default of every key that has one. Called once,
+ * when a connection's state is created, so a session that never calls
+ * fractalsql_set() still starts from the values the documentation
+ * promises: the text-to-SQL attempt budget is 2 (a rejected candidate
+ * is regenerated once with the rejection fed back), the statement
+ * allowlist is "select", and the remaining numeric and boolean keys
+ * start at their documented zero. The defaults go through the same
+ * validation as an explicit set, so a default can never be a value
+ * fractalsql_set() would reject. */
+void fsql_config_apply_defaults(FsqlState *st) {
+    char err[192] = "";
+    for (size_t i = 0; i < CFG_N; i++) {
+        const CfgDef *d = &CFG_TABLE[i];
+        if (!d->dflt) continue;
+        (void)fsql_config_set(st, d->key, d->dflt, err, sizeof err);
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* SQL wrappers                                                        */
 /* ------------------------------------------------------------------ */
@@ -371,6 +389,7 @@ static void fs_set_fn(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
     (void)argc;
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
     if (!st) { sqlite3_result_error(ctx, "fractalsql: not initialized", -1); return; }
+    FSQL_REFUSE_IN_GENERATED_SQL(ctx, st, "fractalsql_set");
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT ||
         sqlite3_value_type(argv[1]) != SQLITE_TEXT) {
         sqlite3_result_error(ctx,
@@ -422,8 +441,12 @@ static void fs_get_fn(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
 int fsql_config_register(sqlite3 *db, FsqlState *st) {
     (void)st;
     const int flags = SQLITE_UTF8 | SQLITE_INNOCUOUS;  /* stateful: NOT deterministic */
+    /* The setter changes which library and endpoints the extension loads and
+     * calls, so it is DIRECTONLY: SQL stored in a database file (a trigger,
+     * view or generated column) must not be able to run it. */
+    const int flags_set = SQLITE_UTF8 | SQLITE_DIRECTONLY;
     int rc = sqlite3_create_function_v2(
-        db, "fractalsql_set", 2, flags, st,
+        db, "fractalsql_set", 2, flags_set, st,
         fs_set_fn, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     rc = sqlite3_create_function_v2(

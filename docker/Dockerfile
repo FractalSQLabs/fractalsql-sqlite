@@ -22,7 +22,7 @@
 #     --output type=local,dest=./dist/amd64 \
 #     -f docker/Dockerfile .
 
-ARG BASE_IMAGE=rockylinux:9
+ARG BASE_IMAGE=rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6
 ARG OUTPUT_SUFFIX=
 ARG SIZE_CEILING_BYTES=3145728
 ARG CORE_VARIANT=community-sovereign-c
@@ -202,6 +202,11 @@ COPY deps/sqlite/sqlite3.h /build/deps/sqlite/sqlite3.h
 COPY mcp/Makefile          /build/mcp/Makefile
 COPY mcp/vendor/json.hpp   /build/mcp/vendor/json.hpp
 COPY mcp/src/              /build/mcp/src/
+# The MCP server's tool-surface and safety-annotation locks. They are
+# read at startup, and a missing lock is not a pass: the server
+# refuses to start without them.
+COPY mcp/.mcp-schema-lock          /build/mcp/.mcp-schema-lock
+COPY mcp/.mcp-safety-annotations-lock /build/mcp/.mcp-safety-annotations-lock
 # Belt-and-suspenders against .dockerignore not being honored for
 # whatever reason (stale COPY cache, a build client that ignores it):
 # a locally make'd .o — built against the HOST's glibc, not this
@@ -231,6 +236,11 @@ FROM scratch AS export
 ARG OUTPUT_SUFFIX
 COPY --from=builder /fractalsql${OUTPUT_SUFFIX}.so /fractalsql${OUTPUT_SUFFIX}.so
 COPY --from=builder /fractalsql-sqlite-mcp${OUTPUT_SUFFIX} /fractalsql-sqlite-mcp${OUTPUT_SUFFIX}
+# The MCP server's tool-surface and safety-annotation locks, beside the
+# binary that reads them: without them the server refuses to start,
+# because a missing lock is not a pass.
+COPY --from=builder /build/mcp/.mcp-schema-lock /.mcp-schema-lock
+COPY --from=builder /build/mcp/.mcp-safety-annotations-lock /.mcp-safety-annotations-lock
 
 # --------------------------------------------------------------------
 # Demo stage — a RUNNABLE sqlite3 CLI environment with the extension
@@ -341,6 +351,11 @@ RUN set -eux; \
     mv /mcpbuild/mcp/fractalsql-sqlite-mcp /usr/local/bin/; \
     rm -rf /mcpbuild; \
     /usr/local/bin/fractalsql-sqlite-mcp --version
+# The MCP server's tool-surface and safety-annotation locks, beside the
+# binary that reads them: without them the server refuses to start,
+# because a missing lock is not a pass.
+COPY mcp/.mcp-schema-lock /usr/local/bin/.mcp-schema-lock
+COPY mcp/.mcp-safety-annotations-lock /usr/local/bin/.mcp-safety-annotations-lock
 COPY --from=builder /fractalsql${OUTPUT_SUFFIX}.so /usr/local/lib/sqlite3/fractalsql.so
 # Bundled reasoning plugin (vendored prebuilt .so from include/). include/
 # carries the plugin for every supported platform (linux-x86_64,
@@ -349,11 +364,18 @@ COPY --from=builder /fractalsql${OUTPUT_SUFFIX}.so /usr/local/lib/sqlite3/fracta
 # build time — `uname -m` yields x86_64 / aarch64, matching the dir suffixes.
 COPY include/linux-x86_64/fractalsql-reasoning-http.so  /usr/local/lib/sqlite3/fractalsql-reasoning-http.x86_64.so
 COPY include/linux-aarch64/fractalsql-reasoning-http.so /usr/local/lib/sqlite3/fractalsql-reasoning-http.aarch64.so
+# Each plugin's detached signature travels with it and is renamed the same way,
+# so the installed plugin finds <plugin>.sig beside it.
+COPY include/linux-x86_64/fractalsql-reasoning-http.so.sig  /usr/local/lib/sqlite3/fractalsql-reasoning-http.x86_64.so.sig
+COPY include/linux-aarch64/fractalsql-reasoning-http.so.sig /usr/local/lib/sqlite3/fractalsql-reasoning-http.aarch64.so.sig
 RUN set -e \
  && ARCH=$(uname -m) \
  && mv "/usr/local/lib/sqlite3/fractalsql-reasoning-http.${ARCH}.so" \
         /usr/local/lib/sqlite3/fractalsql-reasoning-http.so \
- && rm -f /usr/local/lib/sqlite3/fractalsql-reasoning-http.*.so
+ && mv "/usr/local/lib/sqlite3/fractalsql-reasoning-http.${ARCH}.so.sig" \
+        /usr/local/lib/sqlite3/fractalsql-reasoning-http.so.sig \
+ && rm -f /usr/local/lib/sqlite3/fractalsql-reasoning-http.*.so \
+          /usr/local/lib/sqlite3/fractalsql-reasoning-http.*.so.sig
 # bench/ head-to-head benchmarks (sqlite-vec vs Scout). requirements.txt is
 # COPYd first so the slow pip install layer-caches independently of bench
 # source. The scripts take --ext/--db, so in-container runs point --ext at

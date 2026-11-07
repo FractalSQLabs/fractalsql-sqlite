@@ -725,7 +725,7 @@ static void da_exec_int1_ignore(const FsqlState *st, const char *sql,
 static int da_opt_int(int argc, sqlite3_value **argv, int idx, int dflt) {
     if (idx >= argc || sqlite3_value_type(argv[idx]) == SQLITE_NULL)
         return dflt;
-    return sqlite3_value_int(argv[idx]);
+    return fsql_value_int(argv[idx]);
 }
 static double da_opt_double(int argc, sqlite3_value **argv, int idx,
                             double dflt) {
@@ -1183,7 +1183,7 @@ static void agent_allocate_fn(sqlite3_context *ctx, int argc,
     char *cov_json = NULL;
     if (da_mu_cov_json(ctx, argv[0], argv[1], &mu_json, &cov_json) != 0)
         return;
-    int cardinality = sqlite3_value_int(argv[2]);
+    int cardinality = fsql_value_int(argv[2]);
     if (!mu_json || !cov_json) {
         free(mu_json); free(cov_json);
         sqlite3_result_error_nomem(ctx);
@@ -1262,9 +1262,9 @@ static void agent_route_task_fn(sqlite3_context *ctx, int argc,
     const char *cap_table   = (const char *)sqlite3_value_text(argv[1]);
     const char *cap_emb_col = (const char *)sqlite3_value_text(argv[2]);
     const char *cap_id_col  = (const char *)sqlite3_value_text(argv[3]);
-    int budget = sqlite3_value_int(argv[4]);
+    int budget = fsql_value_int(argv[4]);
     int cost_per_route = (argc >= 6 && sqlite3_value_type(argv[5]) != SQLITE_NULL)
-                        ? sqlite3_value_int(argv[5]) : 150;
+                        ? fsql_value_int(argv[5]) : 150;
     if (!cap_table || !cap_emb_col || !cap_id_col) { sqlite3_result_error_nomem(ctx); return; }
     if (!da_ident_ok(cap_table) || !da_ident_ok(cap_emb_col) || !da_ident_ok(cap_id_col)) {
         sqlite3_result_error(ctx,
@@ -1576,7 +1576,7 @@ static void agent_recall_hybrid_fn(sqlite3_context *ctx, int argc,
     const char *filter_val = (argc >= 5 && sqlite3_value_type(argv[4]) != SQLITE_NULL)
                             ? (const char *)sqlite3_value_text(argv[4]) : NULL;
     int k = (argc >= 6 && sqlite3_value_type(argv[5]) != SQLITE_NULL)
-          ? sqlite3_value_int(argv[5]) : 5;
+          ? fsql_value_int(argv[5]) : 5;
     const char *id_col = (argc >= 7 && sqlite3_value_type(argv[6]) != SQLITE_NULL)
                         ? (const char *)sqlite3_value_text(argv[6]) : "id";
     const char *content_col = (argc >= 8 && sqlite3_value_type(argv[7]) != SQLITE_NULL)
@@ -1680,7 +1680,7 @@ static void agent_recommend_diverse_fn(sqlite3_context *ctx, int argc,
     const char *catalog_table = (const char *)sqlite3_value_text(argv[0]);
     const char *emb_col       = (const char *)sqlite3_value_text(argv[1]);
     int k = (argc >= 4 && sqlite3_value_type(argv[3]) != SQLITE_NULL)
-          ? sqlite3_value_int(argv[3]) : 10;
+          ? fsql_value_int(argv[3]) : 10;
     const char *id_col = (argc >= 5 && sqlite3_value_type(argv[4]) != SQLITE_NULL)
                         ? (const char *)sqlite3_value_text(argv[4]) : "id";
     if (!catalog_table || !emb_col || !id_col) { sqlite3_result_error_nomem(ctx); return; }
@@ -1726,17 +1726,24 @@ static void agent_recommend_diverse_fn(sqlite3_context *ctx, int argc,
 
 /* ======================================================================
  * Engine G: fractal_agent_data_analyst(question, table_names DEFAULT
- *   NULL, max_retries DEFAULT 2, context DEFAULT '{}')
+ *   NULL, max_retries DEFAULT 2, context DEFAULT '{}',
+ *   auto_execute DEFAULT 0)
  *   -> TEXT JSON {analysis, generated_sql, result_json}
+ *
+ * auto_execute decides whether the generated statement is actually run.
+ * It is 0 (off) by default: the statement is generated and validated but
+ * NOT executed, the SQL still comes back in generated_sql so the caller
+ * can run it itself, and result_json and analysis stay null (no reasoning
+ * call is made). Pass 1 for the full NL->SQL->run->reason path.
  * ====================================================================== */
 static void agent_data_analyst_fn(sqlite3_context *ctx, int argc,
                                   sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
     char err[512] = { 0 };
-    if (argc < 1 || argc > 4) {
+    if (argc < 1 || argc > 5) {
         sqlite3_result_error(ctx,
             "fractal_agent_data_analyst(question [, table_names, max_retries, "
-            "context]) expects 1 to 4 args", -1);
+            "context, auto_execute]) expects 1 to 5 args", -1);
         return;
     }
     if (sqlite3_value_type(argv[0]) == SQLITE_NULL) {
@@ -1747,14 +1754,17 @@ static void agent_data_analyst_fn(sqlite3_context *ctx, int argc,
     const char *table_names = (argc >= 2 && sqlite3_value_type(argv[1]) != SQLITE_NULL)
                              ? (const char *)sqlite3_value_text(argv[1]) : NULL;
     int max_retries = (argc >= 3 && sqlite3_value_type(argv[2]) != SQLITE_NULL)
-                     ? sqlite3_value_int(argv[2]) : 2;
+                     ? fsql_value_int(argv[2]) : 2;
     const char *context = (argc >= 4 && sqlite3_value_type(argv[3]) != SQLITE_NULL)
                          ? (const char *)sqlite3_value_text(argv[3]) : "{}";
+    int auto_execute = (argc >= 5 && sqlite3_value_type(argv[4]) != SQLITE_NULL)
+                     ? (fsql_value_int(argv[4]) != 0) : 0;
     if (!question) { sqlite3_result_error_nomem(ctx); return; }
     if (!context) context = "{}";
 
     StrBuf sql; sb_init(&sql);
-    sb_printf(&sql, "SELECT fractal_sql_agent(?1,?2,%d,1)", max_retries);
+    sb_printf(&sql, "SELECT fractal_sql_agent(?1,?2,%d,%d)", max_retries,
+              auto_execute ? 1 : 0);
     if (sb_failed(&sql)) { sb_free(&sql); sqlite3_result_error_nomem(ctx); return; }
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(st->db, sql.buf, -1, &stmt, NULL);
@@ -1791,6 +1801,36 @@ static void agent_data_analyst_fn(sqlite3_context *ctx, int argc,
         &(OneText){ res }, err, sizeof err);
     free(res);
 
+    /* Execution is opt-in. With auto_execute off the statement was
+     * generated and validated but never run, so there is no result to
+     * reason about: the SQL still comes back (the caller can run it
+     * itself) and analysis stays null. */
+    if (!auto_execute) {
+        StrBuf audit; sb_init(&audit);
+        sb_puts(&audit, "{\"question\":");
+        sb_json_string(&audit, question);
+        sb_puts(&audit, ",\"generated_sql\":");
+        if (generated_sql) sb_json_raw_or_string(&audit, generated_sql); else sb_puts(&audit, "null");
+        sb_puts(&audit, ",\"execution_status\":");
+        if (execution_status) sb_json_raw_or_string(&audit, execution_status); else sb_puts(&audit, "null");
+        sb_puts(&audit, ",\"auto_execute\":false,\"analysis\":null}");
+        if (!sb_failed(&audit))
+            da_audit_log_best_effort(st, "agent_data_analyst", audit.buf);
+        sb_free(&audit);
+
+        StrBuf out; sb_init(&out);
+        sb_puts(&out, "{\"analysis\":null,\"generated_sql\":");
+        if (generated_sql) sb_json_raw_or_string(&out, generated_sql); else sb_puts(&out, "null");
+        sb_puts(&out, ",\"result_json\":");
+        sb_json_raw_or_string(&out, result_json);
+        sb_puts(&out, "}");
+        free(generated_sql); free(result_json); free(execution_status);
+        if (sb_failed(&out)) { sb_free(&out); sqlite3_result_error_nomem(ctx); return; }
+        sqlite3_result_text(ctx, out.buf, (int)out.len, SQLITE_TRANSIENT);
+        sb_free(&out);
+        return;
+    }
+
     StrBuf prompt; sb_init(&prompt);
     sb_puts(&prompt, "Analyze this database query result and answer in one "
                     "paragraph: ");
@@ -1817,7 +1857,7 @@ static void agent_data_analyst_fn(sqlite3_context *ctx, int argc,
         if (result_json) sb_json_raw_or_string(&out, result_json); else sb_puts(&out, "null");
         sb_puts(&out, ",\"analysis\":null,\"reasoning_step_failed\":");
         sb_json_string(&out, err);
-        sb_puts(&out, "}");
+        sb_puts(&out, ",\"auto_execute\":true}");
         free(generated_sql); free(result_json); free(execution_status);
         if (sb_failed(&out)) { sqlite3_result_error_nomem(ctx); return; }
         da_audit_log_best_effort(st, "agent_data_analyst", out.buf);
@@ -1839,7 +1879,7 @@ static void agent_data_analyst_fn(sqlite3_context *ctx, int argc,
     if (execution_status) sb_json_raw_or_string(&audit, execution_status); else sb_puts(&audit, "null");
     sb_puts(&audit, ",\"analysis\":");
     sb_json_string(&audit, analysis);
-    sb_puts(&audit, "}");
+    sb_puts(&audit, ",\"auto_execute\":true}");
     if (!sb_failed(&audit))
         da_audit_log_best_effort(st, "agent_data_analyst", audit.buf);
     sb_free(&audit);
@@ -1890,7 +1930,7 @@ static void agent_patient_deterioration_triage_fn(sqlite3_context *ctx, int argc
     const char *cohort_ids_json = (argc >= 6 && sqlite3_value_type(argv[5]) != SQLITE_NULL)
                                  ? (const char *)sqlite3_value_text(argv[5]) : NULL;
     int k = (argc >= 7 && sqlite3_value_type(argv[6]) != SQLITE_NULL)
-          ? sqlite3_value_int(argv[6]) : 5;
+          ? fsql_value_int(argv[6]) : 5;
     const char *id_col = (argc >= 8 && sqlite3_value_type(argv[7]) != SQLITE_NULL)
                         ? (const char *)sqlite3_value_text(argv[7]) : "id";
     if (!patient_table || !vec_col || !id_col) { sqlite3_result_error_nomem(ctx); return; }
@@ -2090,9 +2130,9 @@ static void agent_feedback_audit_fn(sqlite3_context *ctx, int argc,
     const char *warmup_table   = (const char *)sqlite3_value_text(argv[3]);
     const char *warmup_vec_col = (const char *)sqlite3_value_text(argv[4]);
     int warmup_count = (argc >= 6 && sqlite3_value_type(argv[5]) != SQLITE_NULL)
-                      ? sqlite3_value_int(argv[5]) : 8;
+                      ? fsql_value_int(argv[5]) : 8;
     int k = (argc >= 7 && sqlite3_value_type(argv[6]) != SQLITE_NULL)
-          ? sqlite3_value_int(argv[6]) : 3;
+          ? fsql_value_int(argv[6]) : 3;
     if (!catalog_table || !emb_col || !warmup_table || !warmup_vec_col) {
         sqlite3_result_error_nomem(ctx); return;
     }
@@ -2228,9 +2268,9 @@ static void agent_schedule_workload_fn(sqlite3_context *ctx, int argc,
     const char *node_emb_col  = (const char *)sqlite3_value_text(argv[2]);
     const char *node_id_col   = (const char *)sqlite3_value_text(argv[3]);
     int iterations = (argc >= 5 && sqlite3_value_type(argv[4]) != SQLITE_NULL)
-                    ? sqlite3_value_int(argv[4]) : 30;
+                    ? fsql_value_int(argv[4]) : 30;
     int population = (argc >= 6 && sqlite3_value_type(argv[5]) != SQLITE_NULL)
-                    ? sqlite3_value_int(argv[5]) : 50;
+                    ? fsql_value_int(argv[5]) : 50;
     const char *context = (argc >= 8 && sqlite3_value_type(argv[7]) != SQLITE_NULL)
                          ? (const char *)sqlite3_value_text(argv[7]) : "{}";
     if (!node_table || !node_emb_col || !node_id_col) { sqlite3_result_error_nomem(ctx); return; }
@@ -2350,7 +2390,7 @@ static void agent_rebalance_sibling_fn(sqlite3_context *ctx, int argc,
             return;
         }
     }
-    int cardinality = sqlite3_value_int(argv[2]);
+    int cardinality = fsql_value_int(argv[2]);
     const char *alloc_table   = (const char *)sqlite3_value_text(argv[3]);
     const char *alloc_emb_col = (const char *)sqlite3_value_text(argv[4]);
     int have_seed = (argc >= 7 && sqlite3_value_type(argv[6]) != SQLITE_NULL);
@@ -2504,7 +2544,7 @@ static void agent_detour_classify_fn(sqlite3_context *ctx, int argc,
     const char *id_col = (argc >= 7 && sqlite3_value_type(argv[6]) != SQLITE_NULL)
                         ? (const char *)sqlite3_value_text(argv[6]) : "id";
     int boxcount_dim = (argc >= 8 && sqlite3_value_type(argv[7]) != SQLITE_NULL)
-                      ? sqlite3_value_int(argv[7]) : 2;
+                      ? fsql_value_int(argv[7]) : 2;
     if (!vehicle_table || !emb_col || !id_col) { sqlite3_result_error_nomem(ctx); return; }
     if (!da_ident_ok(vehicle_table) || !da_ident_ok(emb_col) || !da_ident_ok(id_col)) {
         sqlite3_result_error(ctx,
@@ -2770,9 +2810,9 @@ static void agent_network_coverage_alert_fn(sqlite3_context *ctx, int argc,
         return;
     }
     int boxcount_dim = (argc >= 3 && sqlite3_value_type(argv[2]) != SQLITE_NULL)
-                      ? sqlite3_value_int(argv[2]) : 2;
+                      ? fsql_value_int(argv[2]) : 2;
     int drift_win = (argc >= 4 && sqlite3_value_type(argv[3]) != SQLITE_NULL)
-                   ? sqlite3_value_int(argv[3]) : 48;
+                   ? fsql_value_int(argv[3]) : 48;
     double drift_threshold = da_opt_double(argc, argv, 4, 0.5);
     const char *context = (argc >= 6 && sqlite3_value_type(argv[5]) != SQLITE_NULL)
                          ? (const char *)sqlite3_value_text(argv[5]) : "{}";
@@ -2878,7 +2918,7 @@ static void agent_regime_triage_fn(sqlite3_context *ctx, int argc,
         return;
     }
     int win = (argc >= 2 && sqlite3_value_type(argv[1]) != SQLITE_NULL)
-            ? sqlite3_value_int(argv[1]) : 64;
+            ? fsql_value_int(argv[1]) : 64;
     double drift_threshold = da_opt_double(argc, argv, 2, 0.5);
     const char *context = (argc >= 4 && sqlite3_value_type(argv[3]) != SQLITE_NULL)
                          ? (const char *)sqlite3_value_text(argv[3]) : "{}";
@@ -2985,9 +3025,9 @@ static void agent_diverse_portfolios_fn(sqlite3_context *ctx, int argc,
             "fractal_agent_diverse_portfolios: mu, cov, cardinality are required", -1);
         return;
     }
-    int cardinality = sqlite3_value_int(argv[2]);
+    int cardinality = fsql_value_int(argv[2]);
     int n_restarts = (argc >= 4 && sqlite3_value_type(argv[3]) != SQLITE_NULL)
-                    ? sqlite3_value_int(argv[3]) : 8;
+                    ? fsql_value_int(argv[3]) : 8;
     double overlap_threshold = da_opt_double(argc, argv, 4, 0.15);
     double quality_frac = da_opt_double(argc, argv, 5, 0.90);
     const char *context = (argc >= 8 && sqlite3_value_type(argv[7]) != SQLITE_NULL)
@@ -3138,8 +3178,23 @@ static void agent_diverse_portfolios_fn(sqlite3_context *ctx, int argc,
 /* Registration                                                        */
 /* ------------------------------------------------------------------ */
 
+/* Only the agents that read and compute are INNOCUOUS. Those that call the
+ * reasoning endpoint are not, so SQLite refuses them inside a view, trigger
+ * or CHECK constraint when trusted_schema is off. A function missing from
+ * this list is the safe default: not innocuous. */
+static int domain_agent_is_innocuous(const char *name) {
+    static const char *const pure[] = {
+        "fractal_agent_recall_hybrid",
+        /* fractal_agent_recommend_diverse and fractal_agent_feedback_audit
+         * are deliberately absent: both enable / reconfigure / disable the
+         * Diversify engine, i.e. they mutate session state. */
+    };
+    for (size_t i = 0; i < sizeof pure / sizeof pure[0]; i++)
+        if (strcmp(name, pure[i]) == 0) return 1;
+    return 0;
+}
+
 int fsql_domain_agents_register(sqlite3 *db, FsqlState *st) {
-    static const int flags = SQLITE_UTF8 | SQLITE_INNOCUOUS;
 
     struct {
         const char *name;
@@ -3166,6 +3221,8 @@ int fsql_domain_agents_register(sqlite3 *db, FsqlState *st) {
     };
 
     for (size_t i = 0; i < sizeof(fns) / sizeof(fns[0]); i++) {
+        const int flags = SQLITE_UTF8 |
+                          (domain_agent_is_innocuous(fns[i].name) ? SQLITE_INNOCUOUS : 0);
         int rc = sqlite3_create_function_v2(
             db, fns[i].name, fns[i].narg, flags, st, fns[i].fn,
             NULL, NULL, NULL);

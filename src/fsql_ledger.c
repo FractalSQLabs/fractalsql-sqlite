@@ -147,6 +147,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef _WIN32
+#include <syslog.h>
+#endif
+
+#include "fsql_audit_redact.h"
 #include "fsql_hmac.h"
 #include "fsql_sqlite_internal.h"
 
@@ -501,9 +506,138 @@ static int ledger_chain_read_prev(const FsqlLedgerCtx *lc, int kind,
  * must already hold the write transaction (BEGIN IMMEDIATE, taken by
  * ledger_materialize / the audit_log write path -- see the file header
  * for why that lock is needed here). */
+/* The chain table is append-only and, left alone, grows without
+ * bound. FSQL_LEDGER_MAX_ROWS (default 10,000,000; 0 disables the cap) is the
+ * highest row id the table may reach. At the cap, appends fail with a clear
+ * error instead of filling the disk; the operator archives the database (the
+ * chain is self-contained and verifiable on its own) and starts a new one.
+ * Retention: rows are never deleted in place, because deleting any row breaks
+ * the hash chain. */
+static long long ledger_max_rows(void) {
+    static long long cached = -2;
+    if (cached == -2) {
+        const char *e = getenv("FSQL_LEDGER_MAX_ROWS");
+        cached = 10000000LL;
+        if (e && *e) {
+            char *end = NULL;
+            long long v = strtoll(e, &end, 10);
+            if (end && *end == '\0' && v >= 0) cached = v;
+        }
+    }
+    return cached;
+}
+
+/* ------------------------------------------------------------------ */
+/* Head anchor: publishing the chain head to a log outside the chain   */
+/* ------------------------------------------------------------------ */
+
+/* The head of a chain is derived from the table itself: the newest row
+ * of that kind. Whoever can write to the database can also delete the
+ * tail of a chain, and a chain that lost rows still verifies
+ * structurally -- there is simply less of it. The head anchor closes
+ * that gap by publishing the head to a log the database writer does not
+ * control, so a truncated chain stops matching what was published:
+ *
+ *   FSQL_LEDGER_ANCHOR_LOG=off      (default) publish nothing
+ *   FSQL_LEDGER_ANCHOR_LOG=stderr    publish one JSON line per append
+ *   FSQL_LEDGER_ANCHOR_LOG=syslog    publish to the system logger
+ *
+ * The published line is:
+ *
+ *   {"event":"ledger_head","kind":K,"rows":N,"hash":"<hex>"}
+ *
+ * where K is the chain kind, N the number of rows that chain holds
+ * after the append, and the hash the hex of the newest entry hash.
+ * The line is published as the row is appended, before the enclosing
+ * write transaction commits.
+ */
+static int ledger_str_eq_ci(const char *a, const char *b) {
+    if (!a || !b) return a == b;
+    for (; *a && *b; a++, b++) {
+        int ca = (unsigned char)*a, cb = (unsigned char)*b;
+        if (ca >= 'A' && ca <= 'Z') ca += 'a' - 'A';
+        if (cb >= 'A' && cb <= 'Z') cb += 'a' - 'A';
+        if (ca != cb) return 0;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static int ledger_anchor_mode(void) {
+    static int cached = -1;
+    if (cached == -1) {
+        cached = 0;   /* off */
+        const char *e = getenv("FSQL_LEDGER_ANCHOR_LOG");
+        if (e && *e) {
+            if (ledger_str_eq_ci(e, "stderr")) cached = 1;
+            else if (ledger_str_eq_ci(e, "syslog")) cached = 2;
+        }
+    }
+    return cached;
+}
+
+/* How many rows the chain of `kind` holds, counted through the
+ * (kind, id) index the chain table is created with. */
+static long long ledger_chain_rows(const FsqlLedgerCtx *lc, int kind) {
+    sqlite3_stmt *cs = NULL;
+    long long rows = 0;
+    if (sqlite3_prepare_v2(lc->st->db,
+                           "SELECT COUNT(*) FROM fractalsql_ledger WHERE kind=?1",
+                           -1, &cs, NULL) == SQLITE_OK) {
+        sqlite3_bind_int(cs, 1, kind);
+        if (sqlite3_step(cs) == SQLITE_ROW) rows = sqlite3_column_int64(cs, 0);
+    }
+    if (cs) sqlite3_finalize(cs);
+    return rows;
+}
+
+static void ledger_anchor_publish(int kind, long long rows,
+                                  const uint8_t entry_hash[32]) {
+    int mode = ledger_anchor_mode();
+    if (mode == 0) return;
+
+    char hex[65];
+    for (int i = 0; i < 32; i++)
+        snprintf(hex + (size_t)i * 2, 3, "%02x", entry_hash[i]);
+
+    char line[256];
+    int n = snprintf(line, sizeof line,
+                     "{\"event\":\"ledger_head\",\"kind\":%d,\"rows\":%lld,\"hash\":\"%s\"}",
+                     kind, rows, hex);
+    if (n < 0) return;
+    if (mode == 2) {
+#ifndef _WIN32
+        syslog(LOG_INFO, "%s", line);
+        return;
+#else
+        /* No system logger on this platform: the line goes to standard
+         * error, where the operator's log collector picks it up. */
+#endif
+    }
+    fprintf(stderr, "%s\n", line);
+    fflush(stderr);
+}
+
 static int ledger_chain_insert(const FsqlLedgerCtx *lc, int kind,
                                const void *payload, size_t len,
                                char *err, size_t err_cap) {
+    {
+        long long cap = ledger_max_rows();
+        if (cap > 0) {
+            sqlite3_stmt *cs = NULL;
+            long long top = 0;
+            if (sqlite3_prepare_v2(lc->st->db, "SELECT COALESCE(MAX(id),0) FROM fractalsql_ledger",
+                                   -1, &cs, NULL) == SQLITE_OK) {
+                if (sqlite3_step(cs) == SQLITE_ROW) top = sqlite3_column_int64(cs, 0);
+            }
+            if (cs) sqlite3_finalize(cs);
+            if (top >= cap) {
+                snprintf(err, err_cap,
+                         "fractalsql: ledger chain is full (%lld rows, FSQL_LEDGER_MAX_ROWS); "
+                         "archive this database and start a new one", top);
+                return -1;
+            }
+        }
+    }
     uint8_t prev_hash[32];
     if (ledger_chain_read_prev(lc, kind, prev_hash, err, err_cap) != 0)
         return -1;
@@ -574,6 +708,9 @@ static int ledger_chain_insert(const FsqlLedgerCtx *lc, int kind,
                  sqlite3_errmsg(lc->st->db));
         return -1;
     }
+    if (kind >= 0 && kind <= 16)
+        ((FsqlState *)lc->st)->ledger_watermark[kind]++;   /* wipe detection, see FsqlState */
+    ledger_anchor_publish(kind, ledger_chain_rows(lc, kind), entry_hash);
     return 0;
 }
 
@@ -903,6 +1040,7 @@ static void ledger_lock_destructive_fn(sqlite3_context *sctx, int argc,
     (void)argc; (void)argv;
     FsqlState *st = ledger_state_of(sctx);
     if (!st) return;
+    FSQL_REFUSE_IN_GENERATED_SQL(sctx, st, "fractal_lock_destructive");
     st->destructive_locked = 1;
     sqlite3_result_text(sctx, "locked", -1, SQLITE_STATIC);
 }
@@ -914,6 +1052,7 @@ static void ledger_flush_fn(sqlite3_context *sctx, int argc,
     (void)argc; (void)argv;
     FsqlState *st = ledger_state_of(sctx);
     if (!st) return;
+    FSQL_REFUSE_IN_GENERATED_SQL(sctx, st, "fractal_ledger_flush");
     if (ledger_destructive_blocked(sctx, st)) return;
     if (ledger_ensure_ent(st, sctx) != 0) return;
     FsqlLedgerCtx *lc = ledger_ctx_of(st->ledger_ctx);
@@ -1044,6 +1183,10 @@ static void ledger_load_fn(sqlite3_context *sctx, int argc,
     (void)argc; (void)argv;
     FsqlState *st = ledger_state_of(sctx);
     if (!st) return;
+    FSQL_REFUSE_IN_GENERATED_SQL(sctx, st, "fractal_ledger_load");
+    /* The load overwrites the live ledger state, so it honours the same
+     * one-way latch as flush, compact and the two resets. */
+    if (ledger_destructive_blocked(sctx, st)) return;
     if (ledger_ensure_ent(st, sctx) != 0) return;
     FsqlLedgerCtx *lc = ledger_ctx_of(st->ledger_ctx);
     if (!lc) {
@@ -1113,6 +1256,7 @@ static void ledger_compact_fn(sqlite3_context *sctx, int argc,
     (void)argc; (void)argv;
     FsqlState *st = ledger_state_of(sctx);
     if (!st) return;
+    FSQL_REFUSE_IN_GENERATED_SQL(sctx, st, "fractal_ledger_compact");
     if (ledger_destructive_blocked(sctx, st)) return;
     if (ledger_ensure_ent(st, sctx) != 0) return;
     /* Compact drops decayed/evicted shadow entries, no slot clearing
@@ -1125,6 +1269,7 @@ static void ledger_reset_soft_fn(sqlite3_context *sctx, int argc,
     (void)argc; (void)argv;
     FsqlState *st = ledger_state_of(sctx);
     if (!st) return;
+    FSQL_REFUSE_IN_GENERATED_SQL(sctx, st, "fractal_ledger_reset_soft");
     if (ledger_destructive_blocked(sctx, st)) return;
     if (ledger_ensure_ent(st, sctx) != 0) return;
     ledger_reset_common(sctx, st->ent.ledger_reset_soft,
@@ -1137,6 +1282,7 @@ static void ledger_reset_hard_fn(sqlite3_context *sctx, int argc,
     (void)argc; (void)argv;
     FsqlState *st = ledger_state_of(sctx);
     if (!st) return;
+    FSQL_REFUSE_IN_GENERATED_SQL(sctx, st, "fractal_ledger_reset_hard");
     if (ledger_destructive_blocked(sctx, st)) return;
     if (ledger_ensure_ent(st, sctx) != 0) return;
     ledger_reset_common(sctx, st->ent.ledger_reset_hard,
@@ -1358,6 +1504,8 @@ static void ledger_audit_log_fn(sqlite3_context *sctx, int argc,
     (void)argc;
     FsqlState *st = ledger_state_of(sctx);
     if (!st) return;
+    FSQL_REFUSE_IN_GENERATED_SQL(sctx, st, "fractal_audit_log");
+    if (ledger_destructive_blocked(sctx, st)) return;     /* The latch covers the audit append. */
     if (ledger_ensure_ent(st, sctx) != 0) return;
     const FsqlLedgerCtx *lc = ledger_ctx_of(st->ledger_ctx);
     if (!lc) {
@@ -1383,23 +1531,90 @@ static void ledger_audit_log_fn(sqlite3_context *sctx, int argc,
         return;
     }
 
+    /* The payload is spliced into the chain document as-is, so it must
+     * be well-formed JSON; and "_actor" is reserved for the attribution block. */
+    {
+        sqlite3_stmt *vs = NULL;
+        int valid = 0;
+        if (sqlite3_prepare_v2(sqlite3_context_db_handle(sctx),
+                               "SELECT json_valid(?1)", -1, &vs, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(vs, 1, payload, -1, SQLITE_STATIC);
+            if (sqlite3_step(vs) == SQLITE_ROW) valid = sqlite3_column_int(vs, 0);
+        }
+        if (vs) sqlite3_finalize(vs);
+        if (!valid) {
+            sqlite3_result_error(sctx,
+                "fractal_audit_log: payload must be well-formed JSON", -1);
+            return;
+        }
+        if (strstr(payload, "\"_actor\"") != NULL) {
+            sqlite3_result_error(sctx,
+                "fractal_audit_log: payload may not contain the reserved key \"_actor\"", -1);
+            return;
+        }
+    }
+
     char *etype = ledger_json_escape(entry_type);
     if (!etype) {
         sqlite3_result_error(sctx, "fractalsql: out of memory", -1);
         return;
     }
+    char *actor_esc = ledger_json_escape(st->actor);
+    if (!actor_esc) {
+        free(etype);
+        sqlite3_result_error(sctx, "fractalsql: out of memory", -1);
+        return;
+    }
     size_t plen = strlen(payload);
-    /* {"type":"E","entry":P}: the literal carries empty E/P plus its
-     * NUL; grow by the actual E/P lengths. */
-    size_t js_len = sizeof("{\"type\":\"\",\"entry\":}") + strlen(etype) + plen;
+    /* Where the actor block goes: inside the "entry" value, before the closing
+     * brace of an object payload, or wrapping a scalar/array payload. The outer
+     * {"type","entry"} shape is unchanged. */
+    const char *pb = payload, *pe = payload + plen;
+    while (pb < pe && (*pb == ' ' || *pb == '\t' || *pb == '\n' || *pb == '\r')) pb++;
+    while (pe > pb && (pe[-1] == ' ' || pe[-1] == '\t' || pe[-1] == '\n' || pe[-1] == '\r')) pe--;
+    int is_obj = (pb < pe && *pb == '{' && pe[-1] == '}');
+    int obj_empty = 0;
+    if (is_obj) {
+        const char *q = pb + 1;
+        while (q < pe - 1 && (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r')) q++;
+        obj_empty = (q == pe - 1);
+    }
+    char actor_blk[256 + 64];
+    snprintf(actor_blk, sizeof actor_blk,
+             "{\"client\":\"%s\",\"attested\":false}", actor_esc);
+    free(actor_esc);
+    size_t js_len = sizeof("{\"type\":\"\",\"entry\":{\"value\":,\"_actor\":}}") +
+                    strlen(etype) + plen + strlen(actor_blk) + 8;
     char *js = (char *)malloc(js_len);
     if (!js) {
         free(etype);
         sqlite3_result_error(sctx, "fractalsql: out of memory", -1);
         return;
     }
-    snprintf(js, js_len, "{\"type\":\"%s\",\"entry\":%s}", etype, payload);
+    if (is_obj && !obj_empty)
+        snprintf(js, js_len, "{\"type\":\"%s\",\"entry\":%.*s,\"_actor\":%s}}",
+                 etype, (int)((pe - 1) - pb), pb, actor_blk);
+    else if (is_obj)
+        snprintf(js, js_len, "{\"type\":\"%s\",\"entry\":{\"_actor\":%s}}", etype, actor_blk);
+    else
+        snprintf(js, js_len, "{\"type\":\"%s\",\"entry\":{\"value\":%.*s,\"_actor\":%s}}",
+                 etype, (int)(pe - pb), pb, actor_blk);
     free(etype);
+
+    /* Redact the text the entry carries before it is appended. The
+     * question an agent was asked, the SQL it generated, the analysis it
+     * wrote and the rows it read can all hold customer data; the
+     * operator can ask for a fingerprint of that text instead of the
+     * text itself (FSQL_AUDIT_REDACT). The redaction is applied to the
+     * finished entry, so it reaches the fields nested inside the
+     * payload as well as the payload itself. */
+    if (fsql_audit_redact_mode() != FSQL_AUDIT_REDACT_NONE) {
+        char *redacted = fsql_audit_redact_json(js);
+        if (redacted) {
+            free(js);
+            js = redacted;
+        }
+    }
 
     /* Same BEGIN IMMEDIATE substitution as ledger_materialize (see its
      * comment / the file header): grab the write lock before ensure_table
@@ -1424,6 +1639,21 @@ static void ledger_audit_log_fn(sqlite3_context *sctx, int argc,
         return;
     }
     sqlite3_result_text(sctx, "ok", -1, SQLITE_STATIC);
+}
+
+/* fractal_set_actor(label): stamp the client label recorded in later
+ * fractal_audit_log entries. Direct-only, so generated SQL can
+ * not change it. Returns the stored label. */
+static void ledger_set_actor_fn(sqlite3_context *sctx, int argc,
+                                sqlite3_value **argv) {
+    (void)argc;
+    FsqlState *st = ledger_state_of(sctx);
+    if (!st) return;
+    const char *label = (sqlite3_value_type(argv[0]) == SQLITE_TEXT)
+                            ? (const char *)sqlite3_value_text(argv[0]) : "";
+    if (!label) label = "";
+    snprintf(st->actor, sizeof st->actor, "%s", label);
+    sqlite3_result_text(sctx, st->actor, -1, SQLITE_TRANSIENT);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1512,7 +1742,7 @@ static void ledger_verify_fn(sqlite3_context *sctx, int argc,
     }
     int kind = 1;
     if (argc >= 1 && sqlite3_value_type(argv[0]) != SQLITE_NULL)
-        kind = sqlite3_value_int(argv[0]);
+        kind = fsql_value_int(argv[0]);
 
     char err[256] = "";
     if (ledger_ensure_table(lc, err, sizeof err) != 0) {
@@ -1567,15 +1797,23 @@ static void ledger_verify_fn(sqlite3_context *sctx, int argc,
     sqlite3_finalize(stmt);
 
     char json[256];
-    if (rows == 0)
+    long long *wm = (kind >= 0 && kind <= 16) ? &((FsqlState *)st)->ledger_watermark[kind] : NULL;
+    if (!failed && wm && (long long)rows < *wm)
+        snprintf(json, sizeof json,
+                 "{\"ok\":false,\"reason\":\"chain truncated or wiped: %lld rows were present "
+                 "earlier in this session, %lld remain\"}", *wm, (long long)rows);
+    else if (rows == 0)
         snprintf(json, sizeof json, "{\"ok\":true,\"rows_verified\":0}");
     else if (failed)
         snprintf(json, sizeof json,
                  "{\"ok\":false,\"first_failure_id\":%lld,\"reason\":\"%s\"}",
                  (long long)fail_id, fail_reason);
     else
+    {
         snprintf(json, sizeof json, "{\"ok\":true,\"rows_verified\":%lld}",
                  (long long)rows);
+        if (wm && (long long)rows > *wm) *wm = (long long)rows;
+    }
     sqlite3_result_text(sctx, json, -1, SQLITE_TRANSIENT);
 }
 
@@ -1636,6 +1874,7 @@ int fsql_ledger_register(sqlite3 *db, FsqlState *st) {
         { "fractal_ledger_shadow_count", ledger_shadow_count_fn, 0, 0 },
         { "fractal_audit_unpack",        ledger_audit_unpack_fn, 1, 0 },
         { "fractal_audit_log",           ledger_audit_log_fn,    2, 0 },
+        { "fractal_set_actor",           ledger_set_actor_fn,    1, 1 },
         { "fractal_ledger_verify",       ledger_verify_fn,       0, 0 },
         { "fractal_ledger_verify",       ledger_verify_fn,       1, 0 },
     };

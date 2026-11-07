@@ -10,6 +10,7 @@
 #endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <chrono>
 #include <cstdint>
 #include <string>
 
@@ -46,13 +47,19 @@ namespace fsqlmcp::net
             return invalidSocket();
         }
         if( ::bind( s, reinterpret_cast<sockaddr*>( &addr ), sizeof( addr ) ) == SOCKET_ERROR ||
-            ::listen( s, 16 ) == SOCKET_ERROR )
+            ::listen( s, SOMAXCONN ) == SOCKET_ERROR )
         {
             errOut = "bind/listen failed: WSA error " + std::to_string( WSAGetLastError() );
             ::closesocket( s );
             return invalidSocket();
         }
         return reinterpret_cast<void*>( s );
+    }
+
+    bool waitForConnection( Socket listenSock, int ms )
+    {
+        WSAPOLLFD p{ asSock( listenSock ), POLLRDNORM, 0 };
+        return ::WSAPoll( &p, 1, ms ) > 0;
     }
 
     Socket accept( Socket listenSock )
@@ -74,5 +81,34 @@ namespace fsqlmcp::net
         return sent == SOCKET_ERROR ? -1 : sent;
     }
     void close( Socket s ) { ::closesocket( asSock( s ) ); }
+    void closeAfterReply( Socket s, int lingerMs )
+    {
+        // Half-close: the peer reads the reply and then sees EOF, so a client
+        // that is still writing its request is not reset straight away.
+        ::shutdown( asSock( s ), SD_SEND );
+        // Read and discard whatever the peer sends until it stops or the
+        // linger window ends. Data left unread in the receive buffer at
+        // close time makes Windows reset the connection, and the reset
+        // discards the reply that was just written: the client would see a
+        // broken connection instead of the refusal it was owed.
+        DWORD timeoutMs = 100;
+        ::setsockopt( asSock( s ), SOL_SOCKET, SO_RCVTIMEO,
+                      reinterpret_cast<const char*>( &timeoutMs ), sizeof( timeoutMs ) );
+        char sink[ 4096 ];
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds( lingerMs );
+        while( std::chrono::steady_clock::now() < deadline )
+        {
+            const int n = ::recv( asSock( s ), sink, static_cast<int>( sizeof( sink ) ), 0 );
+            if( n == 0 ) break;   // the peer closed: nothing more can arrive
+            if( n == SOCKET_ERROR )
+            {
+                const int e = WSAGetLastError();
+                // A timeout means the peer has not written yet: keep waiting
+                // for the rest of its request.
+                if( e != WSAETIMEDOUT && e != WSAEWOULDBLOCK ) break;
+            }
+        }
+        ::closesocket( asSock( s ) );
+    }
 }
 #endif  // _WIN32

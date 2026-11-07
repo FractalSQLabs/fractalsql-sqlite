@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="FractalSQLforSQLite.jpg" alt="FractalSQL for SQLite" width="720">
+</p>
+
 Third-Party Notices
 
 This file contains licensing and attribution notices for third-party software components incorporated into FractalSQL.
