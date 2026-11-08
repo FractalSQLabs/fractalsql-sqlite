@@ -116,10 +116,15 @@ jobs:
           # The MCP server ships in the package, with its lock files beside the binary (where the server looks
           # for them). Run it from another directory so that lookup is what has to find them.
           test -x /usr/local/bin/fractalsql-sqlite-mcp
-          test -f /usr/local/bin/.mcp-schema-lock && test -f /usr/local/bin/.mcp-safety-annotations-lock
+          # two tests, not `a && b`: under `set -e` a failing first test of an && list does not stop the script
+          test -f /usr/local/bin/.mcp-schema-lock
+          test -f /usr/local/bin/.mcp-safety-annotations-lock
           /usr/local/bin/fractalsql-sqlite-mcp --version
           test "$(cd /tmp && /usr/local/bin/fractalsql-sqlite-mcp --list-tools | wc -l)" -ge 60
-          test -f /usr/share/doc/sqlite3-fractalsql/mcp/manifest.json || test -f /usr/share/doc/fractalsql-sqlite/mcp/manifest.json
+          # Ask the package, not the filesystem: the stock ubuntu image excludes /usr/share/doc at install time
+          # (a dpkg path-exclude), so the file is in the .deb but never lands in the container.
+          # (no grep -q: it exits at the first match, the writer gets SIGPIPE, and pipefail turns that into a failure)
+          dpkg-deb -c ./dist/packages/sqlite3-fractalsql-amd64.deb | grep 'mcp/manifest.json' >/dev/null
 
           # python3 already on ubuntu:24.04. Run the full smoke suite —
           # edition + version + fractal_search ordering — via the
@@ -161,10 +166,13 @@ jobs:
           # The MCP server ships in the package, with its lock files beside the binary (where the server looks
           # for them). Run it from another directory so that lookup is what has to find them.
           test -x /usr/local/bin/fractalsql-sqlite-mcp
-          test -f /usr/local/bin/.mcp-schema-lock && test -f /usr/local/bin/.mcp-safety-annotations-lock
+          # two tests, not `a && b`: under `set -e` a failing first test of an && list does not stop the script
+          test -f /usr/local/bin/.mcp-schema-lock
+          test -f /usr/local/bin/.mcp-safety-annotations-lock
           /usr/local/bin/fractalsql-sqlite-mcp --version
           test "$(cd /tmp && /usr/local/bin/fractalsql-sqlite-mcp --list-tools | wc -l)" -ge 60
-          test -f /usr/share/doc/sqlite3-fractalsql/mcp/manifest.json || test -f /usr/share/doc/fractalsql-sqlite/mcp/manifest.json
+          # Ask the package, not the filesystem: container images can install with docs excluded.
+          rpm -qlp ./dist/packages/fractalsql-sqlite-amd64.rpm | grep 'mcp/manifest.json' >/dev/null
 
           dnf install -qy python3
           EXT_PATH=/usr/local/lib/sqlite3/fractalsql.so \
