@@ -167,6 +167,7 @@ For enterprise editions, licensing, and support, contact
 - **[Reasoning Setup](docs/reasoning-setup.md)**: LLM provider configuration (Ollama, OpenAI, Bedrock, Azure, Vertex).
 - **[Text-to-SQL Setup](docs/text-to-sql-setup.md)**: pipeline details and the security model.
 - **[Vectorizer Setup](docs/vectorizer-setup.md)**: automatic embedding pipelines.
+- **[MCP Plugin](docs/mcp-plugin.md)**: use FractalSQL from Claude Desktop, Cursor, Windsurf, LangChain, LlamaIndex, CrewAI, and many more MCP clients.
 - **[Docker Demo](docs/docker-demo.md)**: a one-command end-to-end demo.
 - **[Agent Blueprint Gallery](demo/README.md)**: the vertical demos and reference agents.
 - **[Enterprise Tier](docs/enterprise.md)**: the tamper-evident decision ledger (CISO/audit).
