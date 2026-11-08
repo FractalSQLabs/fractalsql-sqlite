@@ -8,11 +8,14 @@
 #include "admin.h"
 #include "../db.h"
 #include "../logging.h"
+#include "../policy.h"
 #include "../tool_param_helpers.h"
 #include "../vectors.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdio>
+#include <functional>
 #include <string>
 
 namespace fsqlmcp
@@ -45,6 +48,45 @@ namespace fsqlmcp
     {
         const auto t = asText( db.callScalar( "SELECT fractalsql_get(?)", { key } ) );
         return t.value_or( "null" );
+    }
+
+    // A short, non-reversible tag of the calling client, for the refusal
+    // log: enough to tell two clients apart in an incident, never the
+    // credential itself.
+    static std::string clientTag( const std::string& clientKey )
+    {
+        if( clientKey.empty() ) return std::string();
+        char buf[ 24 ];
+        std::snprintf( buf, sizeof buf, "c-%08zx",
+                       std::hash<std::string>{}( clientKey ) & 0xffffffffu );
+        return buf;
+    }
+
+    // The config-writes switch. off: no key may be written through the MCP
+    // boundary. safe (the default): only the low-risk keys -- the model
+    // names and the think mode -- may be; every other key is refused,
+    // including one this build does not know about. all: every key may be
+    // (the enterprise keys still need their own per-call consent).
+    //
+    // The refusal names the key, says what it is set to now, and says where
+    // to set it instead: the operator's own configuration, not a tool call a
+    // model can make.
+    static void refuseConfigWrite( Db& db, const std::string& key, const CallCtx& ctx )
+    {
+        const std::string current = redactedValue( key, getConfigValue( db, key ) );
+        logging::event( "config_write_refused", Json{
+            { "key", key },
+            { "mode", configWritesModeName() },
+            { "client", clientTag( ctx.clientKey ) } } );
+        throw ToolError( ErrorClass::Schema,
+            "config write refused: '" + key + "' may not be written through this tool while "
+            "FSQL_MCP_CONFIG_WRITES=" + std::string( configWritesModeName() ) + ". The safe set is the "
+            "chat model name (http_model), the embedding model name (http_embed_model) and the think mode "
+            "(http_think); the endpoint URLs, the plaintext flag, the plugin path, the token and the "
+            "enterprise keys are not in it. '" + key + "' is currently set to '" + current + "'. Set it in "
+            "the server's own configuration -- the bootstrap snippet (FRACTALSQL_BOOTSTRAP_SQL) or the "
+            "engine's configuration file -- instead of through this tool, or run the server with "
+            "FSQL_MCP_CONFIG_WRITES=all if you really want this tool to write it." );
     }
 
     // A soft, once-per-process warning carrying the risk statement: the
@@ -80,7 +122,7 @@ namespace fsqlmcp
             } } );
         t.back().description = "Confirms the FractalSQL install is alive and which edition (Community/Enterprise) "
             "is active: calls fractalsql_version() and fractalsql_edition(). The one-line sanity check after "
-            "installing; expect a real edition/version back (e.g. Community|2.0.11), plus a startup warning if "
+            "installing; expect a real edition/version back (e.g. Community|2.0.12), plus a startup warning if "
             "the engine version differs from what this plugin was built against (the version-skew guard warns, "
             "never hard-fails).";
 
@@ -97,7 +139,7 @@ namespace fsqlmcp
                     "enterprise_require_signature, enterprise_ledger_key) through the MCP boundary: an "
                     "explicit operator intent, never a default.", false) },
             std::nullopt, true, false,
-            [&db]( const Json& a, CallCtx& ) {
+            [&db]( const Json& a, CallCtx& ctx ) {
                 adminSoftWarning();
                 const std::string key = a.at( "key" ).get<std::string>();
                 if( isEnterpriseKey( key ) && !a.value( "allow_secrets", false ) )
@@ -119,6 +161,10 @@ namespace fsqlmcp
                         "enterprise_require_signature, agent_partial_reasoning_fail); "
                         "the fractalsql.-prefixed "
                         "spelling is accepted by the engine too" );
+                // The config-writes switch: a key the current mode does not
+                // allow is refused before anything is changed.
+                if( !configWriteAllowed( key ) )
+                    refuseConfigWrite( db, key, ctx );
                 const std::string oldVal = getConfigValue( db, key );
                 const std::string newVal = a.at( "value" ).get<std::string>();
                 const SqlValue setResult = db.callScalar( "SELECT fractalsql_set(?, ?)", { key, newVal } );
@@ -168,32 +214,40 @@ namespace fsqlmcp
                          "Allow plaintext http:// endpoints (needed for local Ollama).", true },
               NullableStr("think_mode", "Reasoning effort for hybrid-thinker models: unset/none (model default), 'off', or any provider-verbatim value (low/medium/high/...).") },
             std::nullopt, true, false,
-            [&db]( const Json& a, CallCtx& ) {
+            [&db]( const Json& a, CallCtx& ctx ) {
                 adminSoftWarning();
                 static const std::vector<std::pair<const char*, const char*>> kFieldMap{
                     { "provider_url", "http_url" }, { "embed_url", "http_embed_url" },
                     { "model", "http_model" }, { "embed_model", "http_embed_model" },
                     { "allow_plaintext", "http_allow_plaintext" }, { "think_mode", "http_think" }
                 };
-                bool any = false;
-                Json applied = Json::object();
+                // Collect first, apply second: a call that names a key the
+                // config-writes switch refuses changes nothing at all.
+                std::vector<std::pair<std::string, std::string>> pending;
                 for( const auto& kv : kFieldMap )
                 {
                     if( !a.contains( kv.first ) || a.at( kv.first ).is_null() ) continue;
-                    any = true;
                     const std::string newVal = std::string( kv.first ) == "allow_plaintext"
                         ? std::string( a.at( kv.first ).get<bool>() ? "on" : "off" )   // CFG_BOOL engine-side spelling
                         : a.at( kv.first ).get<std::string>();
-                    const std::string oldVal = getConfigValue( db, kv.second );
-                    db.callScalar( "SELECT fractalsql_set(?, ?)", { std::string( kv.second ), newVal } );
-                    logging::configChange( kv.second, redactedValue( kv.second, oldVal ),
-                                           redactedValue( kv.second, newVal ) );
-                    applied[ kv.second ] = Json{ { "old", oldVal }, { "new", newVal } };
+                    pending.emplace_back( kv.second, newVal );
                 }
-                if( !any )
+                if( pending.empty() )
                     throw ToolError( ErrorClass::Schema,
                         "nothing to set: pass at least one of provider_url, "
                         "embed_url, model, embed_model, allow_plaintext, think_mode" );
+                for( const auto& p : pending )
+                    if( !configWriteAllowed( p.first ) )
+                        refuseConfigWrite( db, p.first, ctx );
+                Json applied = Json::object();
+                for( const auto& p : pending )
+                {
+                    const std::string oldVal = getConfigValue( db, p.first );
+                    db.callScalar( "SELECT fractalsql_set(?, ?)", { p.first, p.second } );
+                    logging::configChange( p.first, redactedValue( p.first, oldVal ),
+                                           redactedValue( p.first, p.second ) );
+                    applied[ p.first ] = Json{ { "old", oldVal }, { "new", p.second } };
+                }
                 return Json{ { "applied", applied }, { "scope", kScope },
                     { "note", "this tool never touches the reasoning provider token "
                               "(http_token) or any enterprise key: the "

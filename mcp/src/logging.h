@@ -21,7 +21,9 @@ namespace fsqlmcp::logging
     // capped/redacted copy (redactAndCap); callers must not pass raw
     // caller-supplied arguments here.
     void toolCall( std::string_view toolName, const Json& argsRedactedCapped,
-                   double latencyMs, const char* errorClassOrNull );
+                   double latencyMs, const char* errorClassOrNull,
+                    const std::string& clientKey = std::string(),
+                    const std::string& era = std::string() );
 
     // Admin-tool config changes: logs old+new value explicitly.
     void configChange( std::string_view key, std::string_view oldValueRedacted,

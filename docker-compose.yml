@@ -14,16 +14,19 @@ services:
       FRACTALSQL_HTTP_MODEL: gpt-oss:20b
       FRACTALSQL_HTTP_EMBED_URL: http://ollama:11434/v1/embeddings
       FRACTALSQL_HTTP_EMBED_MODEL: nomic-embed-text
-      FSQL_REASONING_HTTP_TIMEOUT_MS: "330000"
-      FSQL_REASONING_HTTP_LOW_SPEED_SECS: "300"
+      FSQL_REASONING_HTTP_TIMEOUT_MS: "120000"
+      FSQL_REASONING_HTTP_LOW_SPEED_SECS: "60"
+      # Keep the MCP queue-wait budget close to the request window above so a few slow
+      # reasoning calls cannot hold the expensive-class slots for the 900 s default.
+      FSQL_MCP_MAX_QUEUE_WAIT_MS: "150000"
     volumes:
       - demo_data:/work
     command: ["sleep", "infinity"]
 
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:${OLLAMA_IMAGE_TAG:-0.9.0@sha256:2ea3b768a8f2dcd4d910f838d79702bb952089414dd578146619c0a939647ac6}   # pinned; override via OLLAMA_IMAGE_TAG (pin by @sha256 digest for production)
     ports:
-      - "11435:11434"
+      - "127.0.0.1:11435:11434"
     volumes:
       - ollama_data:/root/.ollama
     healthcheck:
@@ -33,7 +36,7 @@ services:
       retries: 30
 
   pull-model:
-    image: ollama/ollama:latest
+    image: ollama/ollama:${OLLAMA_IMAGE_TAG:-0.9.0@sha256:2ea3b768a8f2dcd4d910f838d79702bb952089414dd578146619c0a939647ac6}   # pinned; override via OLLAMA_IMAGE_TAG (pin by @sha256 digest for production)
     profiles: ["pull-model"]
     depends_on:
       ollama:

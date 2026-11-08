@@ -32,11 +32,11 @@ implementation — no external crypto dependency, matching how the HMAC
 envelope below vendors its own SHA-256). **Signature verification is
 mandatory by default**: the library must carry a verifying `.sig` sidecar
 or the load is refused. `enterprise_require_signature` is a SQL-settable
-key, and every principal that can run SQL can call `fractalsql_set()` — so
+key, and every principal that can run SQL directly can call `fractalsql_set()` (it is `SQLITE_DIRECTONLY`, so SQL stored in the database file cannot) — so
 that key can only ever *strengthen* the check, never weaken it below the
 default. Weakening it back to the original "loading unverified is the
 operator's choice" behavior (missing `.sig` loads, present-but-wrong
-signature always refused) requires setting `FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1`
+signature always refused) requires setting `FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0`
 in the process environment — something no SQL statement can do. The path is
 locked once a library has loaded; re-point it by reopening the connection.
 The gate is `fractalsql_set('enterprise_lib', ...)` plus a fresh
@@ -214,7 +214,7 @@ file, 64 raw bytes) against a fixed FractalSQLabs public key is required
 before the library is loaded. Because `enterprise_require_signature` is
 SQL-settable and therefore not an operator control on its own, the default
 is strict and the *opt-out* lives in the environment:
-`FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1` in the process environment restores
+`FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0` in the process environment restores
 the original permissive behavior (missing `.sig` loads; the SQL key then
 governs as before). An **invalid** signature (present but wrong) is always
 refused regardless of any setting: unambiguous tamper evidence, unlike a
@@ -223,6 +223,78 @@ successfully — re-point it by reopening the connection. New enterprise
 releases only need a fresh signature from the same long-lived key; this
 extension never needs rebuilding, preserving the drop-in-library design a
 hash pin would have broken.
+
+### Data at rest
+
+The QTL chain is stored **inside the database file**, in the
+`fractalsql_ledger` table. There is no separate ledger file and no CSV
+mirror: one append-only row per entry, each carrying the hash of the row
+before it, so the chain is verifiable on its own. Three consequences are
+worth stating plainly.
+
+**The database file is the protected object.** Everything the chain holds
+is in the file, so the file's permissions, its backups and its volume
+encryption are the whole story of what is protected at rest. Give the
+file the same protection as the data it holds — `0600` for a file only its
+owner reads, and encryption at rest on the volume when the data warrants
+it. (The WAL and shared-memory sidecars alongside it carry the same
+content and want the same treatment.)
+
+**There is no separate head record with its own MAC.** In a deployment
+where the chain is a file, a head record can be kept outside it, so that
+deleting the tail of the chain is detectable: the head still says how many
+rows there were, and the MAC says the head itself was not edited. Here the
+head *is* the newest row of the table, so a separate head record would
+only duplicate state the chain already protects — whoever can write to the
+table can rewrite the head too, and a second copy of the same information
+in the same database adds no guarantee. The truncation gap is closed
+instead by publishing the head **outside** the database, which is what the
+anchor log below does. (The `scripts/enterprise/anchor-ledger.sh` recipe
+above is the scheduled-cron version of the same idea and stays useful when
+you want the anchor on a timer rather than on every append.)
+
+**The head can be published on every append.** With
+`FSQL_LEDGER_ANCHOR_LOG=stderr` (or `syslog` where the platform has one)
+the extension writes one JSON line per append:
+
+```json
+{"event":"ledger_head","kind":2,"rows":17,"hash":"<hex of the newest entry hash>"}
+```
+
+`kind` is the chain, `rows` is how many rows that chain holds after the
+append, and `hash` is the newest entry hash. A chain whose tail was
+deleted no longer matches the last line published, so a truncation is
+visible from the log even though it is invisible from the database alone.
+The line is published as the row is appended, before the enclosing write
+transaction commits. Send stderr (or syslog) to a log collector the
+database's own writer cannot rewrite, and keep it at least as long as the
+audit window you care about.
+
+**The text of an entry can be redacted.** An audit entry carries what the
+agents were asked and what they produced, and that text can hold customer
+data: the question, the generated SQL with its literals, the analysis, the
+rows that were read. `FSQL_AUDIT_REDACT` decides what the chain keeps:
+
+| `FSQL_AUDIT_REDACT` | What is stored |
+| --- | --- |
+| `none` (default) | The text, as it is. |
+| `hash` | `sha256:<hex> len=<bytes>` — the fingerprint of the text and its length, so equal texts stay comparable and the length is known, but the text is not. |
+| `truncate` | The first 64 characters of the text. |
+
+Redaction reaches the fields nested inside the entry as well as the entry
+itself, and leaves everything else alone: identifiers, counts, statuses
+and the attribution block are stored as they are. The values returned to
+the caller are never redacted — an agent still answers with the real
+question, the real SQL and the real analysis; only what is persisted
+changes.
+
+Two limits belong here rather than in a footnote. Neither setting
+encrypts anything: a redacted entry is unreadable, but the rows it
+describes, the table they came from and the database file itself are not
+protected by it — that is what volume encryption and file permissions are
+for. And the MAC key is the key you already set
+(`enterprise_ledger_key`); the anchor log publishes a hash of the head,
+not the key and not the entry contents.
 
 ---
 

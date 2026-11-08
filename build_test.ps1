@@ -146,8 +146,10 @@
     Gates 01-02 only.
 
 .PARAMETER Fuzz
-    Gate 21 only -- libFuzzer smoke. Set FSQL_FUZZ_TIME (seconds per
-    target, default 30) to run longer than the pre-push smoke budget.
+    The libFuzzer gates only: the extension parsers plus the MCP server
+    targets. Skips cleanly when clang lacks -fsanitize=fuzzer. Set
+    FSQL_FUZZ_TIME (seconds per target, default 30) to run longer than
+    the pre-push smoke budget.
 
 .PARAMETER Ext
     Prebuilt extension override (skips gate 01's build). Same purpose as
@@ -162,11 +164,17 @@
     Rebuilds fractalsql.dll with MSVC /fsanitize=address over the same
     src\*.c file list scripts\windows\build.bat compiles, into a
     separate dist\windows-asan\ tree. Only this repo's own source is
-    instrumented; the vendored core archive is linked as-is.
+    instrumented; the vendored core archive is linked as-is. The MCP server
+    is built sanitized too (mcp\scripts\windows\build-asan.bat, into
+    mcp\dist\windows-mcp-asan) and run by the HTTPS gate.
+    Not needed for -Fuzz: the fuzz gates (21 and 44) always build with
+    ASan (gate 21 also with UBSan), because LLVM documents libFuzzer on
+    Windows as unsupported without it.
 
 .PARAMETER Ubsan
     Same as -Asan but via clang-cl and -fsanitize=undefined (native
-    cl.exe has no UBSan support), into dist\windows-ubsan\. Mutually
+    cl.exe has no UBSan support), into dist\windows-ubsan\; the MCP server
+    uses build-ubsan.bat into mcp\dist\windows-mcp-ubsan. Mutually
     exclusive with -Asan.
 
 .PARAMETER List
@@ -175,7 +183,7 @@
 .EXAMPLE
     PS> .\build_test.ps1                    # DEFAULT
     PS> .\build_test.ps1 -Quick
-    PS> .\build_test.ps1 -Fuzz              # gate 21 only
+    PS> .\build_test.ps1 -Fuzz              # gates 21 + 44, built with ASan
     PS> .\build_test.ps1 -Asan              # DEFAULT gates against an ASan build
     PS> .\build_test.ps1 -Ubsan             # DEFAULT gates against a UBSan build
     PS> .\build_test.ps1 -Gate 04
@@ -208,6 +216,8 @@ if ($Asan -and $Ubsan) {
 }
 
 $ErrorActionPreference = 'Continue'
+# Test fixtures load unsigned mock plugins and an unsigned mock enterprise core; the product defaults are exercised explicitly where tested.
+if (-not $env:FSQL_REASONING_REQUIRE_SIGNATURE) { $env:FSQL_REASONING_REQUIRE_SIGNATURE = "0" }
 try { $PSNativeCommandArgumentPassing = 'Standard' } catch { }
 
 $script:Here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -237,9 +247,10 @@ if (-not (Test-Path -LiteralPath $script:BTROOT)) {
 $script:DEFAULT_GATES = @('01', '02', '03', '04', '05', '06', '07', '08', '09', '10',
                           '11', '12', '13', '14', '15', '16', '17', '18', '19', '20',
                           '22', '23', '24', '25', '26', '27', '28', '29', '30', '31',
-                          '32', '35', '36', '37', '38', '39', '40', '41', '42', '43')
+                          '32', '35', '36', '37', '38', '39', '40', '41', '42', '43',
+                          '45')
 $script:QUICK_GATES = @('01', '02')
-$script:FUZZ_GATES = @('21')
+$script:FUZZ_GATES = @('21', '44')
 
 if ($TimeoutMult -gt 0) {
     $script:TimeoutMult = $TimeoutMult
@@ -592,6 +603,18 @@ function Compile-Plugins {
     $script:Think = Join-Path $script:PlugDir 'think_reasoning_plugin.dll'
     $script:MockEmb = Join-Path $script:PlugDir 'mock_embed_plugin.dll'
     $script:EvilEmb = Join-Path $script:PlugDir 'evil_embed_plugin.dll'
+    # The enterprise mock core: the fixture the ledger/audit gate loads
+    # through fractalsql_set('enterprise_lib', ...) for a real write and
+    # read-back path. FSQL_STATIC keeps the public header's import
+    # decoration out of a fixture that is loaded at runtime, not linked.
+    $name = 'mock_enterprise_core'
+    $log = Join-Path $script:PlugDir "$name.log"
+    & $script:Cc -shared -fPIC -std=c99 -DFSQL_STATIC -Iinclude "tests/$name.c" `
+        -o (Join-Path $script:PlugDir "$name.dll") 1>$log 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Add-Content -LiteralPath (Join-Path $script:PlugDir 'compile_failures') -Value $name
+    }
+    $script:MockEnt = Join-Path $script:PlugDir 'mock_enterprise_core.dll'
 }
 
 # Skip a gate whose fixture plugin did not compile (platform-limited
@@ -872,8 +895,8 @@ function Gate-01-Build {
 
 function Gate-02-Smoke {
     $ver = Sqlq 'SELECT fractalsql_version();'
-    if ($ver -eq '2.0.11') { Pass "02 smoke: version=$ver" }
-    else { Fail "02 smoke: version='$ver' (want 2.0.11)" }
+    if ($ver -eq '2.0.12') { Pass "02 smoke: version=$ver" }
+    else { Fail "02 smoke: version='$ver' (want 2.0.12)" }
     # fractal_search convergence: self-distance ~0
     $d = Sqlq "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');"
     if ($d -eq '0.0' -or (PyAbsLt1e6 $d)) { Pass "02 smoke: fractal_search self-distance=$d" }
@@ -953,6 +976,30 @@ function Gate-04-TextToSql {
         Pass '04 auto-discovery: text_to_sql off the auto-built context'
     }
     else { Fail "04 auto-discovery: got '$auto'" }
+    # Model-generated SQL run by fractal_sql_agent(auto_execute) must not reach
+    # the functions that change configuration. The model's reply is a SELECT:
+    # read-only, so it passes validation, but it calls fractalsql_set.
+    [IO.File]::WriteAllText($script:SqlTxt, "SELECT fractalsql_set('text_to_sql_max_attempts','9')")
+    $gen = (Sqlq "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
+                 "SELECT fractalsql_set('text_to_sql_max_attempts','1');" `
+                 "SELECT fractal_sql_agent('q', NULL, 1, 1);" `
+                 "SELECT fractalsql_get('text_to_sql_max_attempts');" |
+            ForEach-Object { "$_" }) -join "`n"
+    if ($gen -match '"execution_status":"execution_failed"' -and (($gen -split "`n")[-1]).Trim() -eq '1') {
+        Pass '04 model-generated SQL cannot change configuration (auto_execute)'
+    }
+    else { Fail "04 model-generated SQL reached fractalsql_set: $gen" }
+    # Control: the same path does run a harmless generated SELECT, so the
+    # refusal above is the guard and not a broken auto_execute.
+    [IO.File]::WriteAllText($script:SqlTxt, 'SELECT count(*) FROM bt_orders')
+    $gen = (Sqlq "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
+                 "SELECT fractalsql_set('text_to_sql_max_attempts','1');" `
+                 "SELECT fractal_sql_agent('q', NULL, 1, 1);" |
+            ForEach-Object { "$_" }) -join "`n"
+    if ($gen -match '"execution_status":"executed"') {
+        Pass '04 auto_execute still runs a harmless generated SELECT'
+    }
+    else { Fail "04 auto_execute control: got '$gen'" }
 }
 
 # Guard-page plugin: the response is deliberately NOT NUL-terminated and
@@ -1806,6 +1853,25 @@ function Gate-20-ApiFunc {
     else { Fail "20 api_func: stale reclaim staging: $r2" }
 }
 
+# The fuzz gates build with AddressSanitizer. LLVM documents libFuzzer on Windows as
+# unsupported without ASan, and ASan catches the memory errors a plain fuzz run misses.
+# Copies the ASan runtime DLL next to the built executables (otherwise they fail to start
+# with a missing-DLL error) and returns $true when the sanitizer is on; FSQL_FUZZ_ASAN=0
+# turns it off.
+function Enable-FuzzAsan([string]$ClangPath) {
+    if ($env:FSQL_FUZZ_ASAN -eq '0') { return $false }
+    $root = Split-Path -Parent (Split-Path -Parent $ClangPath)
+    $dll = Get-ChildItem -Path $root -Recurse -Filter 'clang_rt.asan_dynamic-x86_64.dll' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($dll) { Copy-Item -LiteralPath $dll.FullName -Destination $script:PlugDir -Force }
+    else {
+        Write-Host '         clang_rt.asan_dynamic-x86_64.dll not found under the clang install; fuzzing without ASan'
+        return $false
+    }
+    $env:ASAN_OPTIONS = 'detect_leaks=0:halt_on_error=1'
+    return $true
+}
+
 function Gate-21-FuzzSmoke {
     $fuzzcc = $env:FSQL_FUZZ_CC
     if (-not $fuzzcc) {
@@ -1832,10 +1898,12 @@ function Gate-21-FuzzSmoke {
         return
     }
     $fuzzTime = if ($env:FSQL_FUZZ_TIME) { $env:FSQL_FUZZ_TIME } else { '30' }
+    $asan = Enable-FuzzAsan $fuzzcc
+    [string[]]$san = if ($asan) { '-fsanitize=fuzzer,address,undefined' } else { '-fsanitize=fuzzer' }
     foreach ($t in @('fuzz_parse_embedding_array', 'fuzz_extract_best_point',
                      'fuzz_extract_population')) {
         $src = "tests/fuzz/$t.c"
-        & $fuzzcc -O1 -g -fsanitize=fuzzer -Iinclude -Isrc $src src/fsql_parse.c `
+        & $fuzzcc -O1 -g @san -Iinclude -Isrc $src src/fsql_parse.c `
             -o (Join-Path $script:PlugDir "$t.exe") `
             1>(Join-Path $script:PlugDir "$t.log") 2>&1
         if ($LASTEXITCODE -ne 0) {
@@ -1848,10 +1916,11 @@ function Gate-21-FuzzSmoke {
         New-Item -ItemType Directory -Force $seed | Out-Null
         & (Join-Path $script:PlugDir "$t.exe") tests/fuzz/corpus_extract_population $seed `
             "-max_total_time=$fuzzTime" -print_final_stats=1 `
+            "-artifact_prefix=$($script:PlugDir)\$t." `
             1>(Join-Path $script:PlugDir "$t.run.log") 2>&1
         $rc = $LASTEXITCODE
         if ($rc -eq 0) {
-            Pass "21 fuzz_smoke: $t ($fuzzTime s, corpus-seeded)"
+            Pass "21 fuzz_smoke: $t ($fuzzTime s, corpus-seeded$(if ($asan) { ', ASan+UBSan' }))"
         }
         else {
             Fail "21 fuzz_smoke: $t exited rc=$rc; see $(Join-Path $script:PlugDir "$t.run.log")"
@@ -1860,6 +1929,7 @@ function Gate-21-FuzzSmoke {
                 ForEach-Object { Write-Host "         $_" }
         }
     }
+    Remove-Item Env:ASAN_OPTIONS -ErrorAction SilentlyContinue
 }
 
 function Find-Awk {
@@ -1962,7 +2032,7 @@ print(','.join('%s,%s' % (i+random.random()*0.01, i*0.5+random.random()*0.01) fo
         Pass '22 v2_functions: boxcount returns a numeric dimension'
     }
     else { Fail "22 v2_functions: boxcount happy path: $r" }
-    if (ExpectErr 'need >= 8 points' `
+    if (ExpectErr 'need >= 8 finite points' `
             "SELECT fractal_dimension_boxcount('0,0,1,0,0,1,1,1', 2);") {
         Pass '22 v2_functions: degenerate boxcount rejected'
     }
@@ -2270,6 +2340,82 @@ print(','.join('%s,%s'%(i,i+1) for i in range(n-1)))" 2>$null)
         Pass '22 v2_functions: hamming_distance (same pair=0, one bit=1)'
     }
     else { Fail "22 v2_functions: hamming_distance: $r" }
+
+    # Integer arguments past int range. SQL integers are narrowed to 32 bits
+    # for the range checks, so a value that wraps back into range (2^32 plus a
+    # valid value) must be refused, not run as the smaller value. Each row is
+    # label, call with {N} for the argument, a valid value of it.
+    $wrapRows = @(
+        @('drift window', "SELECT fractal_dimension_drift('$s200', {N});", 64),
+        @('boxcount dim', "SELECT fractal_dimension_boxcount('$boxpts', {N});", 2),
+        @('morphology dim', "SELECT fractal_morphological_complexity('$boxpts', {N});", 2),
+        @('spectrogram window', "SELECT fractal_spectrogram_entropy('2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2',{N},8);", 8),
+        @('change_point window', "SELECT fractal_change_point_detect('1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0', {N}, 1.0);", 10),
+        @('optimize_subset k', "SELECT fractal_optimize_subset('10,9,8,7,6,5,4,3,2,1','1,1,1,1,1,1,1,1,1,1',{N});", 5),
+        @('search_debug iterations', "SELECT fractal_search_debug('1.0,0.0,0.0',{N},50,2);", 30),
+        @('search_debug population', "SELECT fractal_search_debug('1.0,0.0,0.0',30,{N},2);", 50),
+        @('search_debug diffusion', "SELECT fractal_search_debug('1.0,0.0,0.0',30,50,{N});", 2),
+        @('state_fingerprint n_bits', "SELECT length(fractal_state_fingerprint('1.0,0.0,0.0', {N}));", 64)
+    )
+    $wrapBad = @()
+    foreach ($row in $wrapRows) {
+        $wrapLabel = $row[0]; $wrapSql = $row[1]; $wrapBase = [int64]$row[2]
+        $null = Sqlq ($wrapSql.Replace('{N}', "$wrapBase"))
+        if ($script:SqlqRc -ne 0) { $wrapBad += "${wrapLabel}: the valid value $wrapBase was refused"; continue }
+        $wrapVal = $wrapBase + 4294967296
+        $null = Sqlq ($wrapSql.Replace('{N}', "$wrapVal"))
+        if ($script:SqlqRc -eq 0) { $wrapBad += "${wrapLabel}: $wrapVal ran as $wrapBase" }
+    }
+    if ($wrapBad.Count -eq 0) {
+        Pass "22 v2_functions: $($wrapRows.Count) integer arguments reject a value that wraps back into range"
+    }
+    else { Fail "22 v2_functions: integer arguments past int range: $($wrapBad -join '; ')" }
+    if (ExpectErr 'n_bits must be between 1 and 33554424' `
+            "SELECT fractal_state_fingerprint('1.0,0.0,0.0', 33554425);") {
+        Pass '22 v2_functions: state_fingerprint refuses an n_bits past the 4 MiB ceiling'
+    }
+    else { Fail '22 v2_functions: state_fingerprint accepted an n_bits past the ceiling' }
+    # The cost is n_bits x vector length, so that product is bounded as well.
+    if (ExpectErr 'n_bits x vector length must not exceed 268435456' `
+            "SELECT fractal_state_fingerprint('1,2,3,4,5,6,7,8,9', 33554424);") {
+        Pass '22 v2_functions: state_fingerprint refuses a fingerprint whose n_bits x length is past the work bound'
+    }
+    else { Fail '22 v2_functions: state_fingerprint accepted n_bits x length past the work bound' }
+    if (ExpectErr 'n_bits must be between 1 and 33554424' `
+            "SELECT fractal_agent_detect_loop('a','1,2,3,4,5,6',3,33554425);") {
+        Pass '22 v2_functions: agent_detect_loop refuses an n_bits past the ceiling'
+    }
+    else { Fail '22 v2_functions: agent_detect_loop accepted an n_bits past the ceiling' }
+    if (ExpectErr 'item count x k must not exceed 16777216' `
+            "WITH RECURSIVE g(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM g WHERE i<6000) SELECT fractal_optimize_subset((SELECT group_concat(5,',') FROM g), (SELECT group_concat(1,',') FROM g), 3000);") {
+        Pass '22 v2_functions: optimize_subset refuses items x k past the work bound'
+    }
+    else { Fail '22 v2_functions: optimize_subset accepted items x k past the work bound' }
+    if (ExpectErr 'series longer than 1048576 samples' `
+            "WITH RECURSIVE g(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM g WHERE i<1048577) SELECT fractal_periodogram((SELECT group_concat(i%7,',') FROM g), 3);") {
+        Pass '22 v2_functions: periodogram refuses a series past 1048576 samples'
+    }
+    else { Fail '22 v2_functions: periodogram accepted a series past 1048576 samples' }
+    if (ExpectErr 'malformed points' `
+            "WITH RECURSIVE g(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM g WHERE i<4194306) SELECT fractal_dimension_boxcount((SELECT group_concat(i%97,',') FROM g), 2);") {
+        Pass '22 v2_functions: boxcount refuses a point cloud past the 4 MiB input cap'
+    }
+    else { Fail '22 v2_functions: boxcount accepted a point cloud past the 4 MiB input cap' }
+    if (ExpectErr 'fractalsql' `
+            "SELECT fractal_dimension_boxcount('0,0,1,0,0,1,1,1,2,2,3,1,1,3,4,4,nan,5', 2);") {
+        Pass '22 v2_functions: boxcount refuses a non-finite coordinate'
+    }
+    else { Fail '22 v2_functions: boxcount accepted a non-finite coordinate' }
+    $bigDim = (@('0.5') * 1000) -join ','
+    if (ExpectErr 'search too large' "SELECT fractal_search_debug('$bigDim',1000,1000,8);") {
+        Pass '22 v2_functions: search_debug refuses iterations x population x diffusion x dim past the work bound'
+    }
+    else { Fail '22 v2_functions: search_debug accepted a search past the work bound' }
+    if ((ExpectErr 'population_size 1 out of range [2, 10000]' "SELECT fractal_search_debug('1.0,0.0,0.0',30,1,2);") -and
+        (ExpectErr 'population_size 10001 out of range [2, 10000]' "SELECT fractal_search_debug('1.0,0.0,0.0',30,10001,2);")) {
+        Pass '22 v2_functions: search_debug reports the core''s population range (2..10000)'
+    }
+    else { Fail '22 v2_functions: search_debug population range is not the core''s' }
 }
 
 function Gate-23-Agents {
@@ -2728,9 +2874,9 @@ function Gate-25-EnterpriseStress {
     # Signature verification is mandatory by default (fsql_enterprise.c);
     # a dev drop is typically unsigned and this gate tests ledger
     # behavior, not the signature gate, so opt out the way a dev would.
-    $env:FSQL_ENTERPRISE_ALLOW_UNVERIFIED = '1'
+    $env:FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE = '0'
     PyRun 'py_gate25'
-    Remove-Item Env:\FSQL_ENTERPRISE_ALLOW_UNVERIFIED -ErrorAction SilentlyContinue
+    Remove-Item Env:\FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE -ErrorAction SilentlyContinue
     $rc = $LASTEXITCODE
     Remove-Item Env:\FSQL_BT_ENT_LIB -ErrorAction SilentlyContinue
     if ($rc -eq 0) {
@@ -3305,16 +3451,114 @@ function Gate-31-LedgerChain {
 
     if (-not $script:Py) {
         Skip '31 ledger_chain storage-layer driver (no python3 sqlite3 stdlib)'
+    }
+    else {
+        if (-not (Skip-IfPySanitizerBlocked '31 ledger_chain storage-layer driver')) {
+            Write-PyGate31 (Join-Path $script:PlugDir 'py_gate31.py')
+            PyRun 'py_gate31'
+            if ($LASTEXITCODE -eq 0) {
+                Pass '31 ledger_chain: chain build/tamper/gap/migration/kind-independence (see driver OK lines above)'
+            } else {
+                Fail '31 ledger_chain: see driver output above'
+            }
+        }
+    }
+
+    # ---- the real write/read storage path, with the enterprise mock
+    # core loaded: fractal_audit_log's actual C write goes through the
+    # storage VFS, so this is the only place the audit chain's own
+    # append path is reachable in this harness. It is also what the
+    # redaction and the head anchor are written against.
+    if (-not (HavePlugin $script:MockEnt)) {
+        Skip '31 ledger_chain: real write/read storage path (mock core did not build)'
         return
     }
-    if (Skip-IfPySanitizerBlocked '31 ledger_chain storage-layer driver') { return }
-    Write-PyGate31 (Join-Path $script:PlugDir 'py_gate31.py')
-    PyRun 'py_gate31'
-    if ($LASTEXITCODE -eq 0) {
-        Pass '31 ledger_chain: chain build/tamper/gap/migration/kind-independence (see driver OK lines above)'
+    $env:FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE = '0'
+    Sqlq 'DELETE FROM fractalsql_ledger WHERE kind = 2;' | Out-Null
+
+    # ---- audit redaction (FSQL_AUDIT_REDACT): what the chain keeps of
+    # the text an agent was given. "hash" keeps the fingerprint and the
+    # length, "truncate" keeps the first 64 characters, and neither
+    # keeps the whole question.
+    $qtext = 'how many rows mention the word zephyr in the customer notes column ENDTOKEN'
+    $env:FSQL_AUDIT_REDACT = 'hash'
+    # The payload is built with json_object() rather than a JSON literal:
+    # a literal needs embedded double quotes, which the shell's argv
+    # handling strips on the way to the sqlite3 CLI.
+    $red = Sqlq "SELECT fractalsql_set('enterprise_lib','$($script:MockEnt)');" `
+        "SELECT fractal_audit_log('test.redact', json_object('question','$qtext','n',1));" `
+        "SELECT fractal_audit_unpack(payload) FROM fractalsql_ledger WHERE kind=2 ORDER BY rowid DESC LIMIT 1;"
+    Remove-Item Env:FSQL_AUDIT_REDACT
+    if ($red -like '*zephyr*') {
+        Fail '31 ledger_chain: FSQL_AUDIT_REDACT=hash still stored the question text'
     } else {
-        Fail '31 ledger_chain: see driver output above'
+        Pass '31 ledger_chain: FSQL_AUDIT_REDACT=hash keeps the question text out of the chain'
     }
+    if ($red -like '*sha256:*') {
+        Pass '31 ledger_chain: FSQL_AUDIT_REDACT=hash stores the fingerprint instead'
+    } else {
+        Fail "31 ledger_chain: expected a sha256 fingerprint in the stored payload, got: $red"
+    }
+    if ($red -like '*test.redact*') {
+        Pass '31 ledger_chain: audit redaction leaves the non-text fields alone'
+    } else {
+        Fail "31 ledger_chain: redaction damaged the non-text fields, got: $red"
+    }
+
+    $env:FSQL_AUDIT_REDACT = 'truncate'
+    $trc = Sqlq "SELECT fractalsql_set('enterprise_lib','$($script:MockEnt)');" `
+        "SELECT fractal_audit_log('test.truncate', json_object('question','$qtext','n',1));" `
+        "SELECT fractal_audit_unpack(payload) FROM fractalsql_ledger WHERE kind=2 ORDER BY rowid DESC LIMIT 1;"
+    Remove-Item Env:FSQL_AUDIT_REDACT
+    if ($trc -like '*ENDTOKEN*') {
+        Fail '31 ledger_chain: FSQL_AUDIT_REDACT=truncate kept more than the first 64 characters'
+    } else {
+        Pass '31 ledger_chain: FSQL_AUDIT_REDACT=truncate keeps only the first 64 characters'
+    }
+    if ($trc -like '*how many rows mention*') {
+        Pass '31 ledger_chain: FSQL_AUDIT_REDACT=truncate keeps the head of the text'
+    } else {
+        Fail "31 ledger_chain: truncate mode dropped the text entirely, got: $trc"
+    }
+
+    # ---- the head anchor (FSQL_LEDGER_ANCHOR_LOG): the chain head is
+    # published outside the database, so a chain whose tail was deleted
+    # no longer matches what was published.
+    $env:FSQL_LEDGER_ANCHOR_LOG = 'stderr'
+    $anc = Sqlq "SELECT fractalsql_set('enterprise_lib','$($script:MockEnt)');" `
+        "SELECT fractal_audit_log('test.anchor', json_object('n',3));"
+    Remove-Item Env:FSQL_LEDGER_ANCHOR_LOG
+    $anchorLine = ''
+    foreach ($line in ($anc -split "`n")) {
+        if ($line -like '*{"event":"ledger_head"*') { $anchorLine = $line.Trim() }
+    }
+    if ($anchorLine) {
+        Pass '31 ledger_chain: FSQL_LEDGER_ANCHOR_LOG=stderr publishes the chain head'
+    } else {
+        Fail "31 ledger_chain: expected a ledger_head anchor line, got: $anc"
+    }
+    if ($anchorLine -like '*"kind":2*') {
+        Pass '31 ledger_chain: the anchor line names the chain it belongs to'
+    } else {
+        Fail "31 ledger_chain: expected kind 2 in the anchor line, got: $anchorLine"
+    }
+    $anchorHash = ''
+    if ($anchorLine -match '"hash":"([0-9a-f]+)"') { $anchorHash = $Matches[1] }
+    $headHash = (Sqlq "SELECT hex(entry_hash) FROM fractalsql_ledger WHERE kind=2 ORDER BY id DESC LIMIT 1;").Trim().ToLower()
+    if ($anchorHash -and $anchorHash -eq $headHash) {
+        Pass '31 ledger_chain: the published head hash is the chain''s own newest entry hash'
+    } else {
+        Fail "31 ledger_chain: anchor hash ($anchorHash) does not match the chain head ($headHash)"
+    }
+    # Without the anchor log switched on, nothing is published.
+    $noanc = Sqlq "SELECT fractalsql_set('enterprise_lib','$($script:MockEnt)');" `
+        "SELECT fractal_audit_log('test.anchor.off', json_object('n',4));"
+    if ($noanc -like '*ledger_head*') {
+        Fail '31 ledger_chain: the anchor log published a line while it was switched off'
+    } else {
+        Pass '31 ledger_chain: the anchor log stays quiet until it is switched on'
+    }
+    Remove-Item Env:FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE
 }
 
 function Gate-32-EnterpriseSignatureReal {
@@ -3374,15 +3618,15 @@ function Gate-32-EnterpriseSignatureReal {
         [System.IO.File]::WriteAllBytes($Path, $bytes)
     }
 
-    # ---- Case A: no .sig, FSQL_ENTERPRISE_ALLOW_UNVERIFIED opt-out +
+    # ---- Case A: no .sig, FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE opt-out +
     # require=off -- soft: still loads and works.
-    $env:FSQL_ENTERPRISE_ALLOW_UNVERIFIED = '1'
+    $env:FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE = '0'
     $ra = Sqlq `
         "SELECT fractalsql_set('enterprise_lib', '$found');" `
         "SELECT fractalsql_set('enterprise_require_signature','off');" `
         'SELECT fractal_ledger_reset_hard();'
     $rca = $script:SqlqRc
-    Remove-Item Env:\FSQL_ENTERPRISE_ALLOW_UNVERIFIED -ErrorAction SilentlyContinue
+    Remove-Item Env:\FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE -ErrorAction SilentlyContinue
     if ($rca -eq 0 -and -not $ra.Contains('enterprise tier not loaded')) {
         Pass '32 enterprise_signature_real Case A: missing .sig + env opt-out + require=off -- still loads and works'
     } else {
@@ -3397,7 +3641,7 @@ function Gate-32-EnterpriseSignatureReal {
         'SELECT fractal_ledger_reset_hard();'
     $rcb = $script:SqlqRc
     if ($rcb -ne 0 -and $rb.Contains('no signature found') `
-            -and $rb.Contains('FSQL_ENTERPRISE_ALLOW_UNVERIFIED')) {
+            -and $rb.Contains('FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE')) {
         Pass '32 enterprise_signature_real Case B: missing .sig, no env opt-out -- refused'
     } else {
         Fail "32 enterprise_signature_real Case B: expected a hard refusal, got rc=${rcb}: $rb"
@@ -3642,7 +3886,7 @@ function Gate-41-DbProbe {
     $lines = @(
         '@echo off',
         "call `"$vcvars64`" >nul 2>&1",
-        "cl.exe /nologo /std:c++17 /utf-8 /EHsc /MT /O1 /Zi /DFSQL_MCP_VERSION=`"\`"2.0.11\`"`" ^",
+        "cl.exe /nologo /std:c++17 /utf-8 /EHsc /MT /O1 /Zi /DFSQL_MCP_VERSION=`"\`"2.0.12\`"`" ^",
         "  /I `"$mcpDir\vendor`" /I `"$mcpDir\src`" /I `"$sqliteDir`" /I `"$opensslDir\include`" ^",
         "  `"$mcpDir\tests\db_probe.cpp`" `"$mcpDir\src\errors.cpp`" `"$mcpDir\src\logging.cpp`" `"$sqliteDir\sqlite3.c`" ^",
         "  /Fo`"$outDir\\`" /Fe`"$bin`" ^",
@@ -3729,9 +3973,11 @@ function Gate-Title { param([string]$G)
         '32' { 'enterprise_signature_real' }
         '35' { 'ed25519' }           '36' { 'extract_population' }
         '37' { 'mcp_smoke' }         '38' { 'mcp_https' }
+        '44' { 'mcp_fuzz' }
         '39' { 'extract_parse' }     '40' { 'vectors_probe' }
         '41' { 'db_probe' }          '42' { 'concurrency_probe' }
         '43' { 'kits' }
+        '45' { 'mcp_conformance' }
     }
 }
 
@@ -3910,9 +4156,11 @@ function Invoke-Gate { param([string]$G)
         '32' { Gate-32-EnterpriseSignatureReal }
         '35' { Gate-35-Ed25519 }                '36' { Gate-36-ExtractPopulation }
         '37' { Gate-37-McpSmoke }                '38' { Gate-38-McpHttps }
+        '44' { Gate-44-McpFuzz }
         '39' { Gate-39-ExtractParse }             '40' { Gate-40-VectorsProbe }
         '41' { Gate-41-DbProbe }                  '42' { Gate-42-ConcurrencyProbe }
         '43' { Gate-43-Kits }
+        '45' { Gate-45-McpConformance }
     }
 }
 
@@ -3975,13 +4223,22 @@ function Gate-37-McpSmoke {
         ))
         $out = & cmd /c "call $boot" 2>&1
         $out | ForEach-Object { Write-Host "    $_" }
-        if (-not (Test-Path -LiteralPath $script:McpExe)) {
+        $buildRc = $LASTEXITCODE
+        # The build's exit code is checked FIRST: a failed rebuild leaves the
+        # previous exe in place, and running the client against that stale
+        # binary reports its drift as a dozen confusing client-side FAILs
+        # instead of the real cause. Gate 38 already does this.
+        if ($buildRc -ne 0) {
             if (($out -join "`n") -match 'no Visual Studio|OpenSSL for MSVC not found|amalgamation not found') {
                 Skip '37 mcp_smoke (no toolchain for the MCP server binary build -- install VS2022 C++ + vcpkg openssl:x64-windows-static)'
             }
             else {
-                Fail '37 mcp_smoke: MCP server build failed'
+                Fail "37 mcp_smoke: the MCP server build failed (exit $buildRc)"
             }
+            return
+        }
+        if (-not (Test-Path -LiteralPath $script:McpExe)) {
+            Fail '37 mcp_smoke: MCP server build failed'
             return
         }
     }
@@ -4001,6 +4258,15 @@ function Gate-37-McpSmoke {
     $env:FRACTALSQL_EXTENSION_PATH = $script:ExtAbs
     $env:FSQL_MCP_LOG_LEVEL        = 'debug'
     $env:FRACTALSQL_BOOTSTRAP_SQL  = $bootstrap
+    # The server's default lock lookup walks up from its CWD looking for a
+    # checkout root; this harness runs it with CWD at the scratch BTROOT
+    # (the mock reasoning plugin opens a CWD-relative canary file), so that
+    # walk resolves Absent. The server is fail-closed by default (a missing
+    # lock is a hard startup failure, exit 3), so point it at the repo's
+    # committed locks explicitly -- that is what the gate wants to exercise
+    # anyway: the real drift check against the committed 10.5/15.3 locks.
+    $env:FSQL_MCP_SCHEMA_LOCK      = Join-Path $script:Here 'mcp\.mcp-schema-lock'
+    $env:FSQL_MCP_SAFETY_LOCK      = Join-Path $script:Here 'mcp\.mcp-safety-annotations-lock'
 
     & $script:Py -u (Join-Path $script:Here 'mcp\tests\mcp_smoke_client.py') 2>&1 |
         ForEach-Object { Write-Host "    $_" }
@@ -4044,30 +4310,49 @@ function Gate-38-McpHttps {
     # mcp\scripts\windows\build.bat); duplicated here rather than
     # factored out so this gate stays runnable standalone and never
     # risks gate 37's own (much larger, extensively exercised) build path.
-    $script:McpExe = Join-Path $script:Here 'mcp\dist\windows-mcp\fractalsql-sqlite-mcp.exe'
+    # Under -Asan/-Ubsan the server is built sanitized into its own dist dir
+    # (build-asan.bat / build-ubsan.bat), so it is exercised here even though
+    # gate 37 skips.
+    $mcpDist   = if ($Asan) { 'windows-mcp-asan' } elseif ($Ubsan) { 'windows-mcp-ubsan' } else { 'windows-mcp' }
+    $mcpScript = if ($Asan) { 'build-asan.bat' } elseif ($Ubsan) { 'build-ubsan.bat' } else { 'build.bat' }
+    $script:McpExe = Join-Path $script:Here "mcp\dist\$mcpDist\fractalsql-sqlite-mcp.exe"
     $needsBuild = -not (Test-Path -LiteralPath $script:McpExe)
     if (-not $needsBuild) {
         $exeTime = (Get-Item -LiteralPath $script:McpExe).LastWriteTimeUtc
-        $newer = Get-ChildItem -LiteralPath (Join-Path $script:Here 'mcp\src') -Recurse -File |
-            Where-Object { $_.LastWriteTimeUtc -gt $exeTime }
+        $watch = @()
+        foreach ($d in @('mcp\src', 'mcp\vendor')) {
+            $p = Join-Path $script:Here $d
+            if (Test-Path -LiteralPath $p) {
+                $watch += Get-ChildItem -LiteralPath $p -Recurse -File
+            }
+        }
+        # The build script is an input too.
+        $scriptPath = Join-Path $script:Here "mcp\scripts\windows\$mcpScript"
+        if (Test-Path -LiteralPath $scriptPath) { $watch += Get-Item -LiteralPath $scriptPath }
+        $newer = $watch | Where-Object { $_.LastWriteTimeUtc -gt $exeTime }
         $needsBuild = [bool]($newer)
     }
     if ($needsBuild) {
         $boot = Join-Path $script:BTROOT 'fractalsql_bt_mcp_build_cmd.bat'
         [IO.File]::WriteAllLines($boot, @(
             '@echo off',
-            "call `"$script:Here\mcp\scripts\windows\build.bat`"",
+            "call `"$script:Here\mcp\scripts\windows\$mcpScript`"",
             'exit /b %ERRORLEVEL%'
         ))
         $out = & cmd /c "call $boot" 2>&1
         $out | ForEach-Object { Write-Host "    $_" }
-        if (-not (Test-Path -LiteralPath $script:McpExe)) {
+        $buildRc = $LASTEXITCODE
+        if ($buildRc -ne 0) {
             if (($out -join "`n") -match 'no Visual Studio|OpenSSL for MSVC not found|amalgamation not found') {
                 Skip '38 mcp_https (no toolchain for the MCP server binary build -- install VS2022 C++ + vcpkg openssl:x64-windows-static)'
             }
             else {
-                Fail '38 mcp_https: MCP server build failed'
+                Fail "38 mcp_https: the MCP server build failed (exit $buildRc)"
             }
+            return
+        }
+        if (-not (Test-Path -LiteralPath $script:McpExe)) {
+            Fail '38 mcp_https: MCP server build failed'
             return
         }
     }
@@ -4107,6 +4392,13 @@ function Gate-38-McpHttps {
     $env:MCP_HTTPS_KEY             = $tlsKey
     $env:SQLITE_DB_PATH            = $script:Db
     $env:FRACTALSQL_EXTENSION_PATH = $script:ExtAbs
+    # Same reasoning as gate 37: the server runs with CWD at the scratch
+    # BTROOT, so its default lock lookup (a walk up from the CWD looking
+    # for a checkout root) resolves Absent -- and the server is fail-closed
+    # about a missing lock (hard exit 3). Point it at the repo's committed
+    # locks so the HTTPS gate actually exercises the server.
+    $env:FSQL_MCP_SCHEMA_LOCK      = Join-Path $script:Here 'mcp\.mcp-schema-lock'
+    $env:FSQL_MCP_SAFETY_LOCK      = Join-Path $script:Here 'mcp\.mcp-safety-annotations-lock'
 
     & $script:Py -u (Join-Path $script:Here 'mcp\tests\mcp_https_smoke_client.py') 2>&1 |
         ForEach-Object { Write-Host "    $_" }
@@ -4115,6 +4407,275 @@ function Gate-38-McpHttps {
     }
     else {
         Fail "38 mcp_https: client driver exited $LASTEXITCODE"
+    }
+}
+
+# MCP server fuzz targets (JSON-RPC line handler, vector coercion and secret
+# redaction). Same capability probe and corpus handling as gate 21; the
+# targets are C++ so clang++ is resolved next to the clang found there. The
+# vendored SQLite amalgamation is built once, plain.
+function Gate-44-McpFuzz {
+    if (-not (Test-Path -LiteralPath (Join-Path $script:Here 'tests\fuzz\fuzz_mcp_jsonrpc.cpp')) -or
+            -not (Test-Path -LiteralPath (Join-Path $script:Here 'mcp\src\main.cpp'))) {
+        Skip '44 mcp_fuzz (mcp/ server code or fuzz targets not present)'
+        return
+    }
+    $fuzzcc = $env:FSQL_FUZZ_CC
+    if (-not $fuzzcc) {
+        $c = Get-Command clang -ErrorAction SilentlyContinue
+        if ($c) { $fuzzcc = $c.Source }
+    }
+    if (-not $fuzzcc) {
+        Skip '44 mcp_fuzz (no clang on PATH; libFuzzer drivers need it)'
+        return
+    }
+    $fuzzcxx = Join-Path (Split-Path -Parent $fuzzcc) 'clang++.exe'
+    if (-not (Test-Path -LiteralPath $fuzzcxx)) {
+        Skip "44 mcp_fuzz (no clang++.exe next to $fuzzcc)"
+        return
+    }
+    $probe = Join-Path $script:PlugDir 'probe44.c'
+    Write-TextFile $probe 'int LLVMFuzzerTestOneInput(const unsigned char*d, unsigned long s){(void)d;(void)s;return 0;}'
+    & $fuzzcc -fsanitize=fuzzer -O0 $probe `
+        -o (Join-Path $script:PlugDir 'fuzz_probe44.exe') `
+        1>(Join-Path $script:PlugDir 'probe44.log') 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Skip "44 mcp_fuzz ($([IO.Path]::GetFileName($fuzzcc)) lacks -fsanitize=fuzzer)"
+        return
+    }
+    $sqlobj = Join-Path $script:PlugDir 'fuzz_mcp_sqlite3.obj'
+    & $fuzzcc -O1 -c -DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_LOAD_EXTENSION=1 `
+        deps/sqlite/sqlite3.c -o $sqlobj `
+        1>(Join-Path $script:PlugDir 'fuzz_mcp_sqlite3.log') 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Fail "44 mcp_fuzz: the SQLite amalgamation failed to build; see $(Join-Path $script:PlugDir 'fuzz_mcp_sqlite3.log')"
+        return
+    }
+    # logging.cpp includes <openssl/evp.h>: the targets compile against the
+    # vcpkg headers but link tests\fuzz\mcp_evp_stub.cpp, not OpenSSL.
+    $opensslDir = $null
+    foreach ($root in @($env:VCPKG_ROOT, (Join-Path $script:Here '..\vcpkg'))) {
+        if (-not $root) { continue }
+        $cand = Join-Path $root 'installed\x64-windows-static'
+        if (Test-Path -LiteralPath (Join-Path $cand 'include\openssl\evp.h')) { $opensslDir = $cand; break }
+    }
+    if (-not $opensslDir) {
+        Skip '44 mcp_fuzz (OpenSSL headers not found -- vcpkg install openssl:x64-windows-static and set VCPKG_ROOT)'
+        return
+    }
+    $fuzzTime = if ($env:FSQL_FUZZ_TIME) { $env:FSQL_FUZZ_TIME } else { '30' }
+    foreach ($t in @('fuzz_mcp_vectors', 'fuzz_mcp_jsonrpc')) {
+        $srcs = @('mcp/src/errors.cpp')
+        if ($t -eq 'fuzz_mcp_vectors') { $srcs += 'mcp/src/vectors.cpp' }
+        else {
+            $srcs += @('mcp/src/jsonrpc_server.cpp', 'mcp/src/tool_registry.cpp', 'mcp/src/logging.cpp',
+                       'mcp/src/prompts.cpp', 'mcp/src/resources.cpp',
+                       'tests/fuzz/mcp_evp_stub.cpp', $sqlobj)
+        }
+        $exe = Join-Path $script:PlugDir "$t.exe"
+        # libFuzzer's runtime on clang for Windows breaks reading any caught C++ exception object
+        # (even a plain std::runtime_error's what() crashes with 0x80000003, with or without ASan),
+        # so fuzz_mcp_jsonrpc, whose error replies are exceptions, is built with a standalone
+        # mutation driver instead; the Linux gate keeps the real libFuzzer run.
+        # The targets build with ASan (see Enable-FuzzAsan). The
+        # MSVC STL turns on container annotations under ASan and libFuzzer's prebuilt library has
+        # them off, which fails to link ("mismatch detected for 'annotate_string'"), so the
+        # annotations are disabled.
+        $asan = Enable-FuzzAsan $fuzzcc
+        [string[]]$fzFlags = if ($asan -and $t -eq 'fuzz_mcp_jsonrpc') { '-fsanitize=address', '-DFSQL_FUZZ_STANDALONE', '-D_DISABLE_STRING_ANNOTATION', '-D_DISABLE_VECTOR_ANNOTATION' }
+                             elseif ($asan) { '-fsanitize=fuzzer,address', '-D_DISABLE_STRING_ANNOTATION', '-D_DISABLE_VECTOR_ANNOTATION' }
+                             elseif ($t -eq 'fuzz_mcp_jsonrpc') { '-DFSQL_FUZZ_STANDALONE' }
+                             else { '-fsanitize=fuzzer' }
+        & $fuzzcxx -std=c++17 -O1 -g @fzFlags -Imcp/src -Imcp/vendor -Ideps/sqlite "-I$opensslDir\include" `
+            '-DFSQL_MCP_VERSION="fuzz"' "tests/fuzz/$t.cpp" @srcs -o $exe `
+            1>(Join-Path $script:PlugDir "$t.log") 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Fail "44 mcp_fuzz: $t failed to build; see $(Join-Path $script:PlugDir "$t.log")"
+            Get-Content (Join-Path $script:PlugDir "$t.log") -Tail 8 -ErrorAction SilentlyContinue |
+                ForEach-Object { Write-Host "         $_" }
+            continue
+        }
+        $seed = Join-Path $script:PlugDir "${t}_seed"
+        New-Item -ItemType Directory -Force $seed | Out-Null
+        $env:FSQL_FUZZ_LAST = Join-Path $script:PlugDir "$t.last_input"
+        $env:FSQL_FUZZ_TRACE = Join-Path $script:Here "$t.trace.txt"
+        Remove-Item -LiteralPath $env:FSQL_FUZZ_TRACE -ErrorAction SilentlyContinue
+        & $exe $seed "tests/fuzz/corpus_$($t.Substring(5))" `
+            "-max_total_time=$fuzzTime" -print_final_stats=1 `
+            "-artifact_prefix=$($script:PlugDir)\$t." `
+            1>(Join-Path $script:PlugDir "$t.run.log") 2>&1
+        $rc = $LASTEXITCODE
+        Remove-Item Env:FSQL_FUZZ_LAST, Env:FSQL_FUZZ_TRACE -ErrorAction SilentlyContinue
+        if ($rc -eq 0) {
+            Pass "44 mcp_fuzz: $t ($fuzzTime s, corpus-seeded)"
+        }
+        else {
+            Fail "44 mcp_fuzz: $t exited rc=$rc; see $(Join-Path $script:PlugDir "$t.run.log")"
+            Get-Content (Join-Path $script:PlugDir "$t.run.log") -Tail 12 `
+                -ErrorAction SilentlyContinue |
+                ForEach-Object { Write-Host "         $_" }
+            $last = Join-Path $script:PlugDir "$t.last_input"
+            if (Test-Path -LiteralPath $last) {
+                $bytes = [System.IO.File]::ReadAllBytes($last)
+                $text = ($bytes | ForEach-Object {
+                    if ($_ -ge 32 -and $_ -lt 127 -and $_ -ne 92) { [char]$_ } else { '\x{0:x2}' -f $_ } }) -join ''
+                Write-Host "         input that was running ($($bytes.Length) bytes): $last"
+                Write-Host "         text:   $text"
+                Write-Host "         base64: $([Convert]::ToBase64String($bytes))"
+                & $exe $last 1>$null 2>$null
+                Write-Host "         that input run alone: rc=$LASTEXITCODE"
+                $st = Join-Path $script:Here "$t.selftest.txt"
+                $env:FSQL_FUZZ_SELFTEST = $st
+                $empty = Join-Path $script:PlugDir "${t}_empty"
+                New-Item -ItemType Directory -Force $empty | Out-Null
+                & $exe -runs=0 $empty 1>$null 2>$null
+                Write-Host "         self-test, all steps in one process: rc=$LASTEXITCODE (steps in $st)"
+                # Then each step in its own process, so one run shows every step that crashes.
+                $stderrFile = Join-Path $script:PlugDir "${t}_step.err"
+                for ($i = 1; $i -le 30; $i++) {
+                    $env:FSQL_FUZZ_SELFTEST_ONLY = "$i"
+                    & $exe -runs=0 $empty 1>$null 2>$stderrFile
+                    $r = $LASTEXITCODE
+                    $line = Get-Content -LiteralPath $st -TotalCount 1 -ErrorAction SilentlyContinue
+                    $nm = if ($line -match '^step \d+ begin: (.*)$') { $Matches[1] } else { '' }
+                    if (-not $nm) { continue }
+                    Write-Host ("         step {0,2}: rc={1,-12} {2}" -f $i, $r, $nm)
+                    if ($r -ne 0) {
+                        # Any sanitizer report from the step: the error line, its summary and the top frames.
+                        Get-Content -LiteralPath $stderrFile -ErrorAction SilentlyContinue |
+                            Where-Object { $_ -match 'FZ|ERROR: |SUMMARY|^\s*#[0-7] ' } |
+                            Select-Object -First 12 | ForEach-Object { Write-Host "                  $_" }
+                    }
+                }
+                # Same self-test steps from builds that vary the C runtime and optimizer, to
+                # tell a mixed-CRT link (libFuzzer's static runtime vs the dynamic one) from a
+                # code-generation problem.
+                foreach ($v in @(@('O0', @('-O0', '-fsanitize=fuzzer')),
+                                 @('crt-static', @('-O1', '-fsanitize=fuzzer', '-fms-runtime-lib=static')),
+                                 @('no-fuzzer', @('-O1', '-DFSQL_FUZZ_STANDALONE')),
+                                 @('no-fuzzer-O0', @('-O0', '-DFSQL_FUZZ_STANDALONE')))) {
+                    $vexe = Join-Path $script:PlugDir "${t}_$($v[0]).exe"
+                    & $fuzzcxx -std=c++17 @($v[1]) -g -Imcp/src -Imcp/vendor -Ideps/sqlite "-I$opensslDir\include" `
+                        '-DFSQL_MCP_VERSION="fuzz"' "tests/fuzz/$t.cpp" @srcs -o $vexe `
+                        1>(Join-Path $script:PlugDir "${t}_$($v[0]).build.log") 2>&1
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Host "         variant $($v[0]): build failed"
+                        Get-Content (Join-Path $script:PlugDir "${t}_$($v[0]).build.log") -Tail 3 -ErrorAction SilentlyContinue |
+                            ForEach-Object { Write-Host "                  $_" }
+                        continue
+                    }
+                    $bad = @()
+                    for ($i = 9; $i -le 30; $i++) {
+                        $env:FSQL_FUZZ_SELFTEST_ONLY = "$i"
+                        & $vexe -runs=0 $empty 1>$null 2>$null
+                        if ($LASTEXITCODE -ne 0) { $bad += $i }
+                    }
+                    Write-Host "         variant $($v[0]): steps 9-30 failing: $(if ($bad) { $bad -join ',' } else { 'none' })"
+                }
+                Remove-Item Env:FSQL_FUZZ_SELFTEST_ONLY -ErrorAction SilentlyContinue
+                Remove-Item Env:FSQL_FUZZ_SELFTEST -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
+# Gate 45: the conformance driver (mcp\tests\mcp_conformance.py). It starts
+# the server the way each kind of client starts it and checks the protocol
+# eras, the authentication, the framing, the operator switches and the
+# catalog against the published rules. It needs no third-party SDK, only
+# python3, and it starts and stops the servers it needs by itself.
+function Gate-45-McpConformance {
+    if (-not (Test-Path -LiteralPath (Join-Path $script:Here 'mcp\tests\mcp_conformance.py')) -or
+            -not (Test-Path -LiteralPath (Join-Path $script:Here 'mcp\src\main.cpp'))) {
+        Skip '45 mcp_conformance (mcp/ server code not present)'
+        return
+    }
+    if (-not $script:Py) {
+        Skip '45 mcp_conformance (no python3 on PATH -- the conformance driver needs it)'
+        return
+    }
+    if (-not (Resolve-Ext)) {
+        Fail '45 mcp_conformance: no extension found (run gate 01 first)'
+        return
+    }
+
+    # The server binary: mcp\dist\windows-mcp (built by mcp\scripts\windows\
+    # build.bat). Rebuilt only when missing or stale against mcp\src, the
+    # same rule gate 37 uses -- a full recompile of the vendored
+    # amalgamation on every gate run would dominate the harness runtime.
+    $script:McpExe = Join-Path $script:Here 'mcp\dist\windows-mcp\fractalsql-sqlite-mcp.exe'
+    $needsBuild = -not (Test-Path -LiteralPath $script:McpExe)
+    if (-not $needsBuild) {
+        $exeTime = (Get-Item -LiteralPath $script:McpExe).LastWriteTimeUtc
+        $newer = Get-ChildItem -LiteralPath (Join-Path $script:Here 'mcp\src') -Recurse -File |
+            Where-Object { $_.LastWriteTimeUtc -gt $exeTime }
+        $needsBuild = [bool]($newer)
+    }
+    if ($needsBuild) {
+        $boot = Join-Path $script:BTROOT 'fractalsql_bt_mcp_conformance_build_cmd.bat'
+        [IO.File]::WriteAllLines($boot, @(
+            '@echo off',
+            "call `"$script:Here\mcp\scripts\windows\build.bat`"",
+            'exit /b %ERRORLEVEL%'
+        ))
+        $out = & cmd /c "call $boot" 2>&1
+        $out | ForEach-Object { Write-Host "    $_" }
+        $buildRc = $LASTEXITCODE
+        if ($buildRc -ne 0) {
+            if (($out -join "`n") -match 'no Visual Studio|OpenSSL for MSVC not found|amalgamation not found') {
+                Skip '45 mcp_conformance (no toolchain for the MCP server binary build -- install VS C++ + vcpkg openssl:x64-windows-static)'
+            }
+            else {
+                Fail "45 mcp_conformance: the MCP server build failed (exit $buildRc)"
+            }
+            return
+        }
+        if (-not (Test-Path -LiteralPath $script:McpExe)) {
+            Fail '45 mcp_conformance: MCP server build failed'
+            return
+        }
+    }
+
+    # The server looks for its two lock files beside the executable when no
+    # path is configured, so putting them there is what makes the installed
+    # layout start from any working directory.
+    $exeDir = Split-Path -Parent $script:McpExe
+    foreach ($lockName in @('.mcp-schema-lock', '.mcp-safety-annotations-lock')) {
+        $src = Join-Path $script:Here "mcp\$lockName"
+        if (Test-Path -LiteralPath $src) {
+            Copy-Item -LiteralPath $src -Destination (Join-Path $exeDir $lockName) -Force
+        }
+    }
+
+    $env:MCP_SERVER_EXE            = $script:McpExe
+    $env:MCP_SERVER_CWD            = $script:BTROOT
+    $env:MCPC_TOKEN                = 'conformance-token'
+    $env:MCPC_GATE                 = '45'
+    $env:MCPC_LOCK_DIR             = Join-Path $script:Here 'mcp'
+    $env:MCPC_PASSTHROUGH_ENV      = 'SQLITE_DB_PATH,FRACTALSQL_EXTENSION_PATH'
+    $env:MCPC_READ_TOOL            = 'fractalsql_get_version'
+    $env:MCPC_READ_ARGS            = '{}'
+    $env:MCPC_STATE_TOOL           = 'fractal_diversify_enable'
+    $env:MCPC_STATE_ARGS           = '{}'
+    $env:MCPC_DESTRUCTIVE_TOOL     = 'fractal_diversify_enable'
+    $env:MCPC_DESTRUCTIVE_ARGS     = '{}'
+    $env:SQLITE_DB_PATH            = $script:Db
+    $env:FRACTALSQL_EXTENSION_PATH = $script:ExtAbs
+
+    $log = Join-Path $script:PlugDir 'mcp_conformance.log'
+    & $script:Py -u (Join-Path $script:Here 'mcp\tests\mcp_conformance.py') 1>$log 2>&1
+    $rc = $LASTEXITCODE
+    $text = ''
+    if (Test-Path -LiteralPath $log) { $text = (Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue) }
+    if ($rc -eq 0 -and $text -match 'ALL GREEN') {
+        Pass '45 mcp_conformance: protocol eras, authentication, framing, operator switches and catalog conformance'
+    }
+    else {
+        # The driver's own failure lines, not the server's log: they say which
+        # rule was broken and what was seen instead.
+        ($text -split "`n") | Where-Object { $_ -match '^(FAIL|SKIP) ' } |
+            ForEach-Object { Write-Host "         $_" }
+        Fail "45 mcp_conformance: the conformance driver reported failures (see $log)"
     }
 }
 
@@ -4131,7 +4692,7 @@ if ($Gate) {
     $gateList = $Gate -split ',' | ForEach-Object { $_.Trim() }
     foreach ($g in $gateList) {
         if ($script:DEFAULT_GATES -notcontains $g -and $script:FUZZ_GATES -notcontains $g) {
-            Write-Host "unknown gate: $g (use 01..30)"
+            Write-Host "unknown gate: $g (use 01..45)"
             exit 2
         }
     }

@@ -2,12 +2,11 @@
 rem SPDX-License-Identifier: Apache-2.0 AND BSD-2-Clause
 rem SPDX-FileCopyrightText: 2026 Daniel Gardiner d/b/a FractalSQLabs
 rem
-rem mcp\scripts\windows\build-asan.bat: the sanitizer leg of the MCP plugin
-rem server on Windows: the SAME tree and the same link posture as build.bat,
-rem but driven by the VS toolchain's clang-cl with -fsanitize=address (native
-rem cl.exe has no ASan support; clang-cl is exactly this repo's own precedent,
-rem the harness's UBSan leg builds the C extension with clang-cl for the same
-rem reason). Runs through an identical contract as build.bat.
+rem mcp\scripts\windows\build-asan.bat: the ASan build of the MCP server.
+rem Same tree and link posture as build.bat, plus /fsanitize=address with cl.exe,
+rem the toolchain that builds fractalsql.dll for the -Asan leg, so the server
+rem and the extension it loads share one ASan runtime. /Od keeps the optimizer
+rem from deleting the out-of-bounds accesses the sanitizer should report.
 rem
 rem Usage: build-asan.bat [output-dir]   (default: dist\windows-mcp-asan in mcp\)
 
@@ -37,11 +36,6 @@ call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
 if errorlevel 1 exit /b 1
 if not "%INCOMING_VCPKG_ROOT%"=="" set VCPKG_ROOT=%INCOMING_VCPKG_ROOT%
 
-rem clang-cl lives in VS's own LLVM tools dir (the same location the repo's
-rem UBSan leg resolves).
-set CLANGCL=%VSPATH%\VC\Tools\Llvm\x64\bin\clang-cl.exe
-if not exist "%CLANGCL%" set CLANGCL=clang-cl.exe
-
 set OPENSSL_DIR=%VCPKG_ROOT%\installed\x64-windows-static
 if not exist "%OPENSSL_DIR%\include\openssl\evp.h" (
   set CANDIDATE=%REPO_DIR%\..\vcpkg
@@ -59,17 +53,27 @@ if not exist "%SQLITE_DIR%\sqlite3.c" (
 
 if not exist "%OUTDIR%" mkdir "%OUTDIR%"
 
-"%CLANGCL%" -std:c++17 /utf-8 /EHsc /O1 /W3 -fsanitize=address ^
-  /DFSQL_MCP_VERSION="\"2.0.11\"" ^
+rem /DNOMINMAX suppresses windows.h's function-like min()/max() macros so they
+rem do not rewrite std::min/std::max -- see build.bat for the full rationale.
+cl.exe /nologo /std:c++17 /utf-8 /EHsc /MT /Od /W3 /Zi /fsanitize=address /DNOMINMAX ^
+  /DFSQL_MCP_VERSION="\"2.0.12\"" ^
   /I "%MCP_DIR%\vendor" /I "%MCP_DIR%\src" /I "%SQLITE_DIR%" ^
   /I "%OPENSSL_DIR%\include" ^
   "%SQLITE_DIR%\sqlite3.c" ^
   "%MCP_DIR%\src\*.cpp" "%MCP_DIR%\src\adapters\*.cpp" ^
   /Fo"%OUTDIR%\\" ^
   /Fe"%OUTDIR%\fractalsql-sqlite-mcp.exe" ^
-  /link /LIBPATH:"%OPENSSL_DIR%\lib" libssl.lib libcrypto.lib ws2_32.lib advapi32.lib user32.lib crypt32.lib
+  /link /STACK:8388608 /DEBUG /LIBPATH:"%OPENSSL_DIR%\lib" libssl.lib libcrypto.lib ws2_32.lib advapi32.lib user32.lib crypt32.lib
 if errorlevel 1 (
   echo FATAL: asan mcp build failed 1>&2
+  exit /b 1
+)
+
+rem The exe imports the ASan runtime DLL by name. Stage the toolset's own copy
+rem next to it so the loader never picks a same-named DLL from elsewhere on PATH.
+copy /y "%VCToolsInstallDir%bin\Hostx64\x64\clang_rt.asan_dynamic-x86_64.dll" "%OUTDIR%\" >nul
+if errorlevel 1 (
+  echo FATAL: could not stage the ASan runtime DLL 1>&2
   exit /b 1
 )
 echo asan mcp build OK: %OUTDIR%\fractalsql-sqlite-mcp.exe

@@ -234,3 +234,9 @@ Two issues surfaced while building these composition patterns, and apply equally
 - **Validate your composition** against the same demo path the shipped agents
   use → `demo/demo-agents.sql`, which exercises all sixteen installable
   agents' reference compositions end to end.
+
+  The file prints one expected error on a Community build: an
+  enterprise-tier call reports that the tier is not loaded. The `sqlite3`
+  shell carries on past it (its default is not to stop at the first
+  error), so the rest of the file still runs and the shell's exit code is
+  the file's verdict - read the log rather than assuming a fault.

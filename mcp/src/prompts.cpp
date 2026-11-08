@@ -312,10 +312,18 @@ namespace fsqlmcp
         std::string value = slotValue( args, arg );
         if( std::string( arg.name ) == "table_names" )
             value = formatTableNamesValue( value );
+        else if( args.contains( arg.name ) && !args.at( arg.name ).is_null() )
+            value = Json( value ).dump( -1, ' ', false, Json::error_handler_t::replace );   // caller text is DATA: quoted + escaped
         const std::string placeholder = "{" + std::string( arg.name ) + "}";
-        std::size_t pos;
-        while( ( pos = text.find( placeholder ) ) != std::string::npos )
+        // Advance past each substituted value: a value that contains its own
+        // placeholder (question="{question}") must not be re-scanned, or the
+        // loop never terminates.
+        std::size_t pos = 0;
+        while( ( pos = text.find( placeholder, pos ) ) != std::string::npos )
+        {
             text.replace( pos, placeholder.size(), value );
+            pos += value.size();
+        }
     }
 
     Json Prompts::get( const std::string& name, const Json& args )

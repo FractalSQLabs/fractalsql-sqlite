@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Daniel Gardiner d/b/a FractalSQLabs
 #pragma once
 #include <string>
+#include <vector>
 #include <functional>
 #include "jsonrpc_server.h"
 
@@ -14,6 +15,13 @@ namespace fsqlmcp
         std::string path = "/mcp";        // FSQL_MCP_HTTP_PATH
         std::string authToken;            // FSQL_MCP_AUTH_TOKEN
         std::string authTokenFile;        // FSQL_MCP_AUTH_TOKEN_FILE (hot-reloaded, 10.3)
+        // Per-client credentials (FSQL_MCP_TOKEN_POLICY_FILE): a JSON file
+        // naming clients, each with the SHA-256 of its token, an optional
+        // expiry and an optional tool allowlist. The file holds no secret.
+        std::string tokenPolicyFile;
+        // Browser origins allowed to call this server (FSQL_MCP_ALLOWED_ORIGINS),
+        // comma-separated. Loopback origins are always allowed.
+        std::vector<std::string> allowedOrigins;
         int shutdownDrainMs = 5000;
         // Direct TLS (--https / FSQL_MCP_HTTPS) is optional and OFF by
         // default: the documented, zero-config posture from 10.3 remains
@@ -34,8 +42,18 @@ namespace fsqlmcp
     // (10.3). One dedicated DB session per Mcp-Session-Id (1.1's per-client
     // isolation requirement). closeSession is the factory hook into the
     // engine's db layer (14.1's "session creation plugs into db.h via a
-    // factory the caller supplies"); readinessProbe backs /readyz.
+    // factory the caller supplies"); readinessProbe backs /readyz;
+    // selectSession binds the calling thread to the engine connection that
+    // serves this request (the legacy era's session id, the modern era's
+    // context handle, or the caller's own connection).
     int runHttpTransport( JsonRpcServer& server, const HttpConfig& cfg,
                           std::function<bool()> readinessProbe,
-                          std::function<void( const std::string& sessionId )> closeSession );
+                          std::function<void( const std::string& sessionId )> closeSession,
+                          std::function<void( const std::string& connKey )> selectSession );
+
+    // The startup check for the per-client credential file: an empty string
+    // means the file is absent or valid; a non-empty one says what is wrong
+    // with it. A credential file that cannot be read or parsed is a startup
+    // failure, never a silent "no authentication".
+    std::string tokenPolicyError( const HttpConfig& cfg );
 }

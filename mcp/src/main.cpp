@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Daniel Gardiner d/b/a FractalSQLabs
 // fractalsql-sqlite-mcp entrypoint: builds the full tool table up front and
 // wires the stdio or HTTP transport.
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <cctype>
@@ -18,6 +19,8 @@
 #include "schema_lock.h"
 #include "safety_lock.h"
 #include "logging.h"
+#include "lock_paths.h"
+#include "policy.h"
 #include "db.h"
 #include "resources.h"
 #include "prompts.h"
@@ -60,12 +63,21 @@ static std::vector<ToolSpec> buildAllTools( Db& db )
     // idempotentHint derivation, in ONE place: a genuinely read-only
     // tool is idempotent by definition, plus the documented diversify
     // enable/disable no-op pair.
+    classifyStateMutatingTools( all );
     for( ToolSpec& t : all )
         if( t.readOnlyHint )
             t.idempotentHint = true;
     for( ToolSpec& t : all )
         if( t.name == "fractal_diversify_enable" || t.name == "fractal_diversify_disable" )
             t.idempotentHint = true;
+    // The context-scoped tools take an optional context_id: the modern
+    // protocol era has no protocol session, so the handle that names the
+    // engine state is passed explicitly. It is added here, in one place,
+    // so the schema, the manifest and the locks all describe the same
+    // argument.
+    for( ToolSpec& t : all )
+        if( isContextScopedTool( t.name ) )
+            t.params.push_back( contextIdParam() );
     return all;
 }
 
@@ -78,6 +90,26 @@ static int envIntOr( const char* name, int def )
 {
     const char* v = std::getenv( name );
     return ( v && *v ) ? std::atoi( v ) : def;
+}
+// A knob that must be a whole number of at least `minValue`. Unset or empty keeps the default; anything
+// else that is not such a number (text, a fraction, a negative, zero) is refused with the variable named.
+// envIntOr's atoi turns "abc" into 0, and a concurrency limit of 0 makes every call wait out the whole
+// queue timeout, so those knobs are checked here instead of silently becoming a hang.
+static bool envIntAtLeast( const char* name, int def, int minValue, int* out, std::string* err )
+{
+    const char* v = std::getenv( name );
+    if( !v || !*v ) { *out = def; return true; }
+    char* end = nullptr;
+    errno = 0;
+    const long n = std::strtol( v, &end, 10 );
+    if( end == v || *end != '\0' || errno == ERANGE || n < minValue || n > 2147483647L )
+    {
+        *err = std::string( name ) + " must be a whole number of at least " + std::to_string( minValue )
+               + " (got '" + v + "')";
+        return false;
+    }
+    *out = static_cast<int>( n );
+    return true;
 }
 static bool envBool( const char* name, bool def )
 {
@@ -298,6 +330,17 @@ static int maybeRunOneShot( const CliArgs& args, const std::vector<ToolSpec>& to
 // a hard mismatch.
 static int checkSafetyGate( const std::string& safetyLockPath, const std::vector<ToolSpec>& tools )
 {
+    if( !lockFileExists( safetyLockPath ) )
+    {
+        if( requireLocks() )
+        {
+            std::cerr << "ERROR: safety-annotation lock '" << safetyLockPath << "' is missing; refusing to start without "
+                      << "the tool-annotation drift check (generate it with --write-safety-annotations-lock, or set "
+                      << "FSQL_MCP_ALLOW_MISSING_LOCKS=true to run without it)\n";
+            return 3;
+        }
+        std::cerr << "WARN: safety-annotation lock '" << safetyLockPath << "' not found; the tool-annotation drift check is skipped\n";
+    }
     std::string diffOut;
     if( !checkSafetyAnnotations( safetyLockPath, renderSafetyAnnotations( tools ), &diffOut ) )
     {
@@ -315,13 +358,23 @@ static int checkSchemaGate( const std::string& lockPath, const std::string& hash
 {
     std::string expected;
     const LockCheckResult lockResult = checkSchemaLock( lockPath, hash, &expected );
+    if( lockResult == LockCheckResult::Absent )
+    {
+        if( requireLocks() )
+        {
+            std::cerr << "ERROR: schema lock '" << lockPath << "' is missing; refusing to start without the tool-surface "
+                      << "drift check (generate it with --write-schema-lock, or set FSQL_MCP_ALLOW_MISSING_LOCKS=true to run without it)\n";
+            return 2;
+        }
+        std::cerr << "WARN: schema lock '" << lockPath << "' not found; the tool-surface drift check is skipped\n";
+    }
     std::string filtered = ( tools.size() == 82 ) ? std::string() : " (filtered surface)";
     if( lockResult == LockCheckResult::Warn )
     {
         std::cerr << "schema hash mismatch: expected " << expected << " got " << hash << " ("
                   << tools.size() << " tools" << filtered << "); regenerate via "
                   "fractalsql-sqlite-mcp --write-schema-lock\n";
-        if( envBool( "FSQL_MCP_STRICT_SCHEMA_HASH", false ) ) return 2;
+        if( envBool( "FSQL_MCP_STRICT_SCHEMA_HASH", true ) ) return 2;
     }
     else if( lockResult == LockCheckResult::Ok )
         logging::event( "schema_lock_ok", Json{ { "hash", hash } } );
@@ -340,14 +393,16 @@ static int runHttpMode( JsonRpcServer& server, const CliArgs& args, Db& db )
     httpCfg.path = args.httpPath;
     httpCfg.authToken     = envOr( "FSQL_MCP_AUTH_TOKEN", "" );
     httpCfg.authTokenFile = envOr( "FSQL_MCP_AUTH_TOKEN_FILE", "" );
+    httpCfg.tokenPolicyFile = envOr( "FSQL_MCP_TOKEN_POLICY_FILE", "" );
+    httpCfg.allowedOrigins  = splitCsv( envOr( "FSQL_MCP_ALLOWED_ORIGINS", "" ) );
     httpCfg.shutdownDrainMs = envIntOr( "FSQL_MCP_SHUTDOWN_DRAIN_MS", 5000 );
     httpCfg.tlsEnabled  = args.httpsMode || envBool( "FSQL_MCP_HTTPS", false );
     httpCfg.tlsCertFile = args.tlsCertFile;
     httpCfg.tlsKeyFile  = args.tlsKeyFile;
-    if( httpCfg.authToken.empty() && httpCfg.authTokenFile.empty() )
+    if( httpCfg.authToken.empty() && httpCfg.authTokenFile.empty() && httpCfg.tokenPolicyFile.empty() )
     {
-        std::cerr << "the HTTP transport requires FSQL_MCP_AUTH_TOKEN or "
-                     "FSQL_MCP_AUTH_TOKEN_FILE\n";
+        std::cerr << "the HTTP transport requires FSQL_MCP_AUTH_TOKEN, "
+                     "FSQL_MCP_AUTH_TOKEN_FILE or FSQL_MCP_TOKEN_POLICY_FILE\n";
         return 2;
     }
     if( httpCfg.tlsEnabled && ( httpCfg.tlsCertFile.empty() || httpCfg.tlsKeyFile.empty() ) )
@@ -356,8 +411,19 @@ static int runHttpMode( JsonRpcServer& server, const CliArgs& args, Db& db )
                      "FSQL_MCP_TLS_CERT_FILE/FSQL_MCP_TLS_KEY_FILE\n";
         return 2;
     }
+    // A credential file that cannot be read or parsed is a startup failure,
+    // never a silent "no authentication".
+    {
+        const std::string policyErr = tokenPolicyError( httpCfg );
+        if( !policyErr.empty() )
+        {
+            std::cerr << policyErr << "\n";
+            return 2;
+        }
+    }
     return runHttpTransport( server, httpCfg, [ &db ] { return db.probeAlive(); },
-                             [ &db ]( const std::string& key ) { db.closeSession( key ); } );
+                             [ &db ]( const std::string& key ) { db.closeSession( key ); },
+                             [ &db ]( const std::string& key ) { db.selectSession( key ); } );
 }
 
 static std::string findRepoLockPath( const char* fname )
@@ -440,36 +506,47 @@ int main( int argc, char** argv )
         envIntOr( "FSQL_MCP_MAX_ROWS_CEILING", 1000 );   // set BEFORE the handlers capture it
 
     std::vector<ToolSpec> tools = buildAllTools( db );
+    // The committed locks always describe the FULL catalog, so a --tool / --category / whitelist deployment is
+    // checked against the same locks (the filtered list below is only what gets served).
+    const std::vector<ToolSpec> fullCatalog = tools;
     // 15.1: env vars feed the same filters the flags set (flags win).
     if( args.toolWhitelist.empty() ) args.toolWhitelist = splitCsv( envOr( "FSQL_MCP_TOOL_WHITELIST", "" ) );
     if( args.enabledCategories.empty() ) args.enabledCategories = splitCsv( envOr( "FSQL_MCP_ENABLED_CATEGORIES", "" ) );
     tools = filterTools( std::move( tools ), args.enabledCategories, args.toolWhitelist );
 
-    if( args.lockPath.empty() ) args.lockPath = findRepoLockPath( ".mcp-schema-lock" );
-    if( args.safetyLockPath.empty() ) args.safetyLockPath = findRepoLockPath( ".mcp-safety-annotations-lock" );
+    if( args.lockPath.empty() ) args.lockPath = withInstalledFallback( findRepoLockPath( ".mcp-schema-lock" ) );
+    if( args.safetyLockPath.empty() ) args.safetyLockPath = withInstalledFallback( findRepoLockPath( ".mcp-safety-annotations-lock" ) );
 
-    const std::string hash = computeSchemaHash( tools );
-    const int oneShotExit = maybeRunOneShot( args, tools, hash );
+    const std::string hash = computeSchemaHash( fullCatalog );
+    const int oneShotExit = maybeRunOneShot( args, fullCatalog, hash );
     if( oneShotExit >= 0 ) return oneShotExit;
 
-    if( const int safetyExit = checkSafetyGate( args.safetyLockPath, tools ) ) return safetyExit;
-    if( const int schemaExit = checkSchemaGate( args.lockPath, hash, tools ) ) return schemaExit;
+    if( const int safetyExit = checkSafetyGate( args.safetyLockPath, fullCatalog ) ) return safetyExit;
+    if( const int schemaExit = checkSchemaGate( args.lockPath, hash, fullCatalog ) ) return schemaExit;
 
     logging::init( { envOr( "FSQL_MCP_LOG_LEVEL", "info" ) == "verbose" ||
                              envOr( "FSQL_MCP_LOG_LEVEL", "info" ) == "debug"
                          ? logging::Level::Debug : logging::Level::Info } );
 
     ConcurrencyConfig concCfg;
-    concCfg.cheapLimit         = envIntOr( "FSQL_MCP_MAX_CONCURRENT_CHEAP", 50 );
-    concCfg.expensiveLimit     = envIntOr( "FSQL_MCP_MAX_CONCURRENT_EXPENSIVE", 5 );
-    concCfg.expensivePerClient = envIntOr( "FSQL_MCP_MAX_CONCURRENT_EXPENSIVE_PER_CLIENT", 2 );
-    concCfg.maxQueueWaitMs     = envIntOr( "FSQL_MCP_MAX_QUEUE_WAIT_MS", 900'000 );
+    {
+        std::string concErr;
+        if( !envIntAtLeast( "FSQL_MCP_MAX_CONCURRENT_CHEAP", 50, 1, &concCfg.cheapLimit, &concErr )
+            || !envIntAtLeast( "FSQL_MCP_MAX_CONCURRENT_EXPENSIVE", 5, 1, &concCfg.expensiveLimit, &concErr )
+            || !envIntAtLeast( "FSQL_MCP_MAX_CONCURRENT_EXPENSIVE_PER_CLIENT", 2, 1, &concCfg.expensivePerClient, &concErr )
+            || !envIntAtLeast( "FSQL_MCP_MAX_QUEUE_WAIT_MS", 900'000, 1, &concCfg.maxQueueWaitMs, &concErr ) )
+        {
+            std::cerr << concErr << "\n";
+            return 2;
+        }
+    }
 
     ServerConfig serverCfg;
     serverCfg.serverName    = kMcpPluginName;
     serverCfg.serverVersion = kMcpPluginVersion;
     serverCfg.rowLimits = sharedRowLimitConfig();   // the same object the handlers captured
     serverCfg.readOnlyMode  = envBool( "FSQL_MCP_READ_ONLY", false );   // 15.4
+    serverCfg.modernOnly    = modernEraOnly();   // FSQL_MCP_PROTOCOL_ERA=modern
 
     JsonRpcServer server( serverCfg, std::move( tools ), concCfg );
     server.interruptHook = [ &db ]( const std::string& clientKey ) { db.interrupt( clientKey ); };

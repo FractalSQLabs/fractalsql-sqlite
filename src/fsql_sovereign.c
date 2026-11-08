@@ -75,12 +75,14 @@
 
 #include <math.h>
 #include <stdarg.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "fsql_hmac.h"
+#include "fractalsql_parse.h"
 #include "fsql_sqlite_internal.h"
 
 SQLITE_EXTENSION_INIT3
@@ -366,7 +368,7 @@ static void dim_drift_fn(sqlite3_context *ctx, int argc,
             "float32 BLOB)", -1);
         return;
     }
-    int window = sqlite3_value_int(argv[1]);
+    int window = fsql_value_int(argv[1]);
     if (window <= 0) {
         free(series);
         sqlite3_result_error(ctx, "fractalsql: window must be > 0", -1);
@@ -409,7 +411,7 @@ static void dim_boxcount_fn(sqlite3_context *ctx, int argc,
             "float32 BLOB)", -1);
         return;
     }
-    int dim = sqlite3_value_int(argv[1]);
+    int dim = fsql_value_int(argv[1]);
     if (dim <= 0 || flat_n % dim != 0) {
         free(points);
         char buf[128];
@@ -428,7 +430,8 @@ static void dim_boxcount_fn(sqlite3_context *ctx, int argc,
         char buf[160];
         snprintf(buf, sizeof buf,
                  "fractalsql: fractal_dimension_boxcount rc=%d "
-                 "(need >= 8 points, non-degenerate bounding box)", rc);
+                 "(need >= 8 finite points, a non-degenerate bounding box, and "
+                 "points x dim <= 4194304)", rc);
         sqlite3_result_error(ctx, buf, -1);
         return;
     }
@@ -502,7 +505,7 @@ static int portfolio_decode(sqlite3_context *ctx, const PortfolioArgs *args,
         return -1;
     }
 
-    int k = sqlite3_value_int(args->k_v);
+    int k = fsql_value_int(args->k_v);
     if (k <= 0 || k > n_assets) {
         char buf[128];
         snprintf(buf, sizeof buf,
@@ -528,7 +531,7 @@ static uint64_t opt_seed(int argc, sqlite3_value **argv, int idx) {
 }
 static int opt_bool(int argc, sqlite3_value **argv, int idx) {
     if (argc <= idx || sqlite3_value_type(argv[idx]) == SQLITE_NULL) return 0;
-    return sqlite3_value_int(argv[idx]) != 0;
+    return fsql_value_int(argv[idx]) != 0;
 }
 static double opt_double(int argc, sqlite3_value **argv, int idx,
                          double dflt) {
@@ -539,7 +542,7 @@ static double opt_double(int argc, sqlite3_value **argv, int idx,
 static int opt_int(int argc, sqlite3_value **argv, int idx, int dflt) {
     if (argc <= idx || sqlite3_value_type(argv[idx]) == SQLITE_NULL)
         return dflt;
-    return sqlite3_value_int(argv[idx]);
+    return fsql_value_int(argv[idx]);
 }
 /* Returns the FSQL_SFS_DIFFUSE_* value, or -1 with err filled in. */
 static int opt_diffusion(int argc, sqlite3_value **argv, int idx,
@@ -1153,7 +1156,7 @@ static void cortical_fn(sqlite3_context *ctx, int argc,
         char buf[160];
         snprintf(buf, sizeof buf,
                  "fractalsql: fractal_cortical_folding rc=%d "
-                 "(need >= 4 non-coplanar vertices)", rc);
+                 "(need >= 4 finite, non-coplanar vertices, at most 4194304)", rc);
         sqlite3_result_error(ctx, buf, -1);
         return;
     }
@@ -1186,7 +1189,7 @@ static void nerve_fn(sqlite3_context *ctx, int argc,
         return;
     }
 
-    int dim = sqlite3_value_int(argv[1]);
+    int dim = fsql_value_int(argv[1]);
     if (dim <= 0 || nc_n % dim != 0) {
         char buf[128];
         snprintf(buf, sizeof buf,
@@ -1242,7 +1245,7 @@ static void morphology_fn(sqlite3_context *ctx, int argc,
         return;
     }
 
-    int dim = sqlite3_value_int(argv[1]);
+    int dim = fsql_value_int(argv[1]);
     if (dim <= 0 || p_n % dim != 0) {
         char buf[128];
         snprintf(buf, sizeof buf,
@@ -1263,7 +1266,8 @@ static void morphology_fn(sqlite3_context *ctx, int argc,
         char buf[176];
         snprintf(buf, sizeof buf,
                  "fractalsql: fractal_morphological_complexity rc=%d "
-                 "(need >= 8 points, non-degenerate bounding box)", rc);
+                 "(need >= 8 finite points, a non-degenerate bounding box, and "
+                 "points x dim <= 4194304)", rc);
         sqlite3_result_error(ctx, buf, -1);
         return;
     }
@@ -1283,8 +1287,9 @@ static void morphology_fn(sqlite3_context *ctx, int argc,
 static void diversify_enable_fn(sqlite3_context *ctx, int argc,
                                 sqlite3_value **argv) {
     (void)argc; (void)argv;
-    const FsqlState *st = sovereign_state(ctx);
+    FsqlState *st = sovereign_state(ctx);
     if (!st) return;
+    FSQL_REFUSE_IN_GENERATED_SQL(ctx, st, "fractal_diversify_enable");
     int rc = fsql_diversify_enable(st->ctx);
     if (rc != FSQL_OK) {
         char buf[192];
@@ -1294,14 +1299,16 @@ static void diversify_enable_fn(sqlite3_context *ctx, int argc,
         sqlite3_result_error(ctx, buf, -1);
         return;
     }
+    st->diversify_enabled = 1;
     sqlite3_result_null(ctx);
 }
 
 static void diversify_disable_fn(sqlite3_context *ctx, int argc,
                                  sqlite3_value **argv) {
     (void)argc; (void)argv;
-    const FsqlState *st = sovereign_state(ctx);
+    FsqlState *st = sovereign_state(ctx);
     if (!st) return;
+    FSQL_REFUSE_IN_GENERATED_SQL(ctx, st, "fractal_diversify_disable");
     int rc = fsql_diversify_disable(st->ctx);
     if (rc != FSQL_OK) {
         char buf[192];
@@ -1311,6 +1318,7 @@ static void diversify_disable_fn(sqlite3_context *ctx, int argc,
         sqlite3_result_error(ctx, buf, -1);
         return;
     }
+    st->diversify_enabled = 0;
     sqlite3_result_null(ctx);
 }
 
@@ -1320,16 +1328,7 @@ static void diversify_disable_fn(sqlite3_context *ctx, int argc,
  * attempted (the params document has none). */
 
 static const char *json_value_ptr(const char *s, const char *key) {
-    if (!s || !*s) return NULL;
-    char needle[64];
-    snprintf(needle, sizeof needle, "\"%s\"", key);
-    const char *p = strstr(s, needle);
-    if (!p) return NULL;
-    p = strchr(p, ':');
-    if (!p) return NULL;
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
-    return p;
+    return fsql_json_top_level_value(s, key);
 }
 
 static int json_get_int(const char *s, const char *key, int *found) {
@@ -1340,7 +1339,7 @@ static int json_get_int(const char *s, const char *key, int *found) {
     long v = strtol(p, &end, 10);
     if (end == p) return 0;
     *found = 1;
-    return (int)v;
+    return v > INT_MAX ? INT_MAX : (v < INT_MIN ? INT_MIN : (int)v);
 }
 
 static double json_get_double(const char *s, const char *key, int *found) {
@@ -1369,6 +1368,7 @@ static void diversify_set_params_fn(sqlite3_context *ctx, int argc,
     (void)argc;
     const FsqlState *st = sovereign_state(ctx);
     if (!st) return;
+    FSQL_REFUSE_IN_GENERATED_SQL(ctx, st, "fractal_diversify_set_params");
 
     /* A NULL/absent params document changes nothing: every field left
      * NULL keeps the core's current value. */
@@ -1475,6 +1475,7 @@ static void feedback_report_fn(sqlite3_context *ctx, int argc,
                                sqlite3_value **argv) {
     const FsqlState *st = sovereign_state(ctx);
     if (!st) return;
+    FSQL_REFUSE_IN_GENERATED_SQL(ctx, st, "fractal_feedback_report");
 
     char err[192];
 
@@ -1507,7 +1508,7 @@ static void feedback_report_fn(sqlite3_context *ctx, int argc,
 
     uint32_t dwell_ms = 0;
     if (argc > 2 && sqlite3_value_type(argv[2]) != SQLITE_NULL)
-        dwell_ms = (uint32_t)sqlite3_value_int(argv[2]);
+        dwell_ms = (uint32_t)fsql_value_int(argv[2]);
 
     int rc = fsql_feedback_report(st->ctx, handle,
                                   (fsql_engagement_kind_t)kind, dwell_ms);
@@ -1530,6 +1531,7 @@ static void isolate_background_fn(sqlite3_context *ctx, int argc,
     (void)argc;
     const FsqlState *st = sovereign_state(ctx);
     if (!st) return;
+    FSQL_REFUSE_IN_GENERATED_SQL(ctx, st, "fractal_isolate_background");
     if (sqlite3_value_type(argv[0]) == SQLITE_NULL) {
         sqlite3_result_null(ctx);
         return;
@@ -1586,7 +1588,7 @@ static void change_point_fn(sqlite3_context *ctx, int argc,
             "float32 BLOB)", -1);
         return;
     }
-    int window = sqlite3_value_int(argv[1]);
+    int window = fsql_value_int(argv[1]);
     double threshold = sqlite3_value_double(argv[2]);
     int max_points = opt_int(argc, argv, 3, 64);
     if (window <= 0 || threshold <= 0.0 || max_points <= 0) {
@@ -1640,12 +1642,20 @@ static void periodogram_fn(sqlite3_context *ctx, int argc,
             "float32 BLOB)", -1);
         return;
     }
+    if (n > FSQL_PERIODOGRAM_MAX_SAMPLES) {
+        free(series);
+        sqlite3_result_error(ctx,
+            "fractalsql: series longer than 1048576 samples", -1);
+        return;
+    }
     int max_peaks = opt_int(argc, argv, 1, 8);
     if (max_peaks <= 0) {
         free(series);
         sqlite3_result_error(ctx, "fractalsql: max_peaks must be > 0", -1);
         return;
     }
+    /* At most n/2 peaks exist; do not size the buffers by a larger request. */
+    if (n >= 4 && max_peaks > n / 2) max_peaks = n / 2;
 
     double *out_freqs = (double *)malloc((size_t)max_peaks * sizeof(double));
     double *out_power = (double *)malloc((size_t)max_peaks * sizeof(double));
@@ -1793,7 +1803,7 @@ static void optimize_subset_fn(sqlite3_context *ctx, int argc,
             return;
         }
     }
-    int k = sqlite3_value_int(argv[2]);
+    int k = fsql_value_int(argv[2]);
     if (k <= 0 || k > n_items) {
         free(item_values); free(upper); free(prev);
         char buf[96];
@@ -1801,6 +1811,12 @@ static void optimize_subset_fn(sqlite3_context *ctx, int argc,
                  "fractalsql: k must satisfy 1 <= k <= item_values "
                  "length (%d)", n_items);
         sqlite3_result_error(ctx, buf, -1);
+        return;
+    }
+    if ((unsigned long long)n_items * (unsigned long long)k > FSQL_SUBSET_MAX_WORK) {
+        free(item_values); free(upper); free(prev);
+        sqlite3_result_error(ctx,
+            "fractalsql: item count x k must not exceed 16777216", -1);
         return;
     }
     double turnover_penalty = opt_double(argc, argv, 4, 0.0);
@@ -1858,10 +1874,17 @@ static void state_fingerprint_fn(sqlite3_context *ctx, int argc,
             "float32 BLOB)", -1);
         return;
     }
-    int n_bits = sqlite3_value_int(argv[1]);
-    if (n_bits <= 0) {
+    int n_bits = fsql_value_int(argv[1]);
+    if (n_bits <= 0 || n_bits > FSQL_FINGERPRINT_MAX_BITS) {
         free(v);
-        sqlite3_result_error(ctx, "fractalsql: n_bits must be > 0", -1);
+        sqlite3_result_error(ctx,
+            "fractalsql: n_bits must be between 1 and 33554424", -1);
+        return;
+    }
+    if (dim > 0 && (size_t)n_bits > (size_t)FSQL_FINGERPRINT_MAX_WORK / (size_t)dim) {
+        free(v);
+        sqlite3_result_error(ctx,
+            "fractalsql: n_bits x vector length must not exceed 268435456", -1);
         return;
     }
     double seed = opt_double(argc, argv, 2, 0.0);
@@ -1919,9 +1942,10 @@ static void cycle_detect_fn(sqlite3_context *ctx, int argc,
         sqlite3_value_type(argv[1]) == SQLITE_NULL) {
         sqlite3_result_null(ctx); return;
     }
-    int n_bits = sqlite3_value_int(argv[1]);
-    if (n_bits <= 0) {
-        sqlite3_result_error(ctx, "fractalsql: n_bits must be > 0", -1);
+    int n_bits = fsql_value_int(argv[1]);
+    if (n_bits <= 0 || n_bits > FSQL_FINGERPRINT_MAX_BITS) {
+        sqlite3_result_error(ctx,
+            "fractalsql: n_bits must be between 1 and 33554424", -1);
         return;
     }
     size_t n_bytes = ((size_t)n_bits + 7) / 8;
@@ -2039,8 +2063,8 @@ static void tda_persistence_fn(sqlite3_context *ctx, int argc,
             "float32 BLOB)", -1);
         return;
     }
-    int dim = sqlite3_value_int(argv[1]);
-    int max_dim = sqlite3_value_int(argv[2]);
+    int dim = fsql_value_int(argv[1]);
+    int max_dim = fsql_value_int(argv[2]);
     double max_thresh = sqlite3_value_double(argv[3]);
     int max_h0_bars = opt_int(argc, argv, 4, 64);
     if (dim <= 0 || flat_n % dim != 0 || (max_dim != 0 && max_dim != 1) ||
@@ -2104,11 +2128,15 @@ static int reg_fn(sqlite3 *db, const char *name, int narg, int flags,
 
 int fsql_sovereign_register(sqlite3 *db, FsqlState *st) {
     /* Pure math over caller-supplied data: deterministic + innocuous.
-     * The portfolio family is stochastic (RNG seeded from SQL input)
-     * and the diversify/feedback family mutates shared ctx state, so
-     * both drop DETERMINISTIC while staying innocuous. */
+     * The portfolio family is stochastic (RNG seeded from SQL input), so
+     * it drops DETERMINISTIC; the diversify/feedback family mutates
+     * shared session state, so it drops DETERMINISTIC and INNOCUOUS. */
     const int f_pure  = SQLITE_UTF8 | SQLITE_DETERMINISTIC | SQLITE_INNOCUOUS;
-    const int f_run   = SQLITE_UTF8 | SQLITE_INNOCUOUS;
+    /* NOT innocuous: SQLITE_INNOCUOUS asserts "no side effects", which is
+     * false for the diversify/feedback/isolate family (they mutate shared
+     * session state), and it would let them run from views, triggers and
+     * CHECK constraints -- a stored-SQL persistence path. */
+    const int f_run   = SQLITE_UTF8;
     int rc;
 
     struct { const char *name; int narg; void *fn; } pure[] = {

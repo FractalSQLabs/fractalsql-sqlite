@@ -113,6 +113,14 @@ jobs:
           # /usr/local/lib/sqlite3/ by convention on both distros.
           test -f /usr/local/lib/sqlite3/fractalsql.so
 
+          # The MCP server ships in the package, with its lock files beside the binary (where the server looks
+          # for them). Run it from another directory so that lookup is what has to find them.
+          test -x /usr/local/bin/fractalsql-sqlite-mcp
+          test -f /usr/local/bin/.mcp-schema-lock && test -f /usr/local/bin/.mcp-safety-annotations-lock
+          /usr/local/bin/fractalsql-sqlite-mcp --version
+          test "$(cd /tmp && /usr/local/bin/fractalsql-sqlite-mcp --list-tools | wc -l)" -ge 60
+          test -f /usr/share/doc/sqlite3-fractalsql/mcp/manifest.json || test -f /usr/share/doc/fractalsql-sqlite/mcp/manifest.json
+
           # python3 already on ubuntu:24.04. Run the full smoke suite —
           # edition + version + fractal_search ordering — via the
           # repo's existing test/test_sqlite.py.
@@ -150,6 +158,14 @@ jobs:
 
           test -f /usr/local/lib/sqlite3/fractalsql.so
 
+          # The MCP server ships in the package, with its lock files beside the binary (where the server looks
+          # for them). Run it from another directory so that lookup is what has to find them.
+          test -x /usr/local/bin/fractalsql-sqlite-mcp
+          test -f /usr/local/bin/.mcp-schema-lock && test -f /usr/local/bin/.mcp-safety-annotations-lock
+          /usr/local/bin/fractalsql-sqlite-mcp --version
+          test "$(cd /tmp && /usr/local/bin/fractalsql-sqlite-mcp --list-tools | wc -l)" -ge 60
+          test -f /usr/share/doc/sqlite3-fractalsql/mcp/manifest.json || test -f /usr/share/doc/fractalsql-sqlite/mcp/manifest.json
+
           dnf install -qy python3
           EXT_PATH=/usr/local/lib/sqlite3/fractalsql.so \
               python3 /work/test/test_sqlite.py
@@ -160,6 +176,9 @@ jobs:
           PLUGIN=/usr/local/lib/sqlite3/fractalsql-reasoning-http.so
           test -f "${PLUGIN}" \
               || { echo "FAIL: reasoning plugin missing at ${PLUGIN}"; exit 1; }
+          # The package must ship the detached signature beside the plugin (64 raw bytes).
+          test "$(wc -c < "${PLUGIN}.sig")" -eq 64 \
+              || { echo "FAIL: ${PLUGIN}.sig missing or not 64 bytes"; exit 1; }
 
           # .rpm Requires: libcurl -- the container's libcurl-minimal
           # conflicts with the full libcurl, same as above.
@@ -233,6 +252,9 @@ jobs:
           PLUGIN=/usr/local/lib/sqlite3/fractalsql-reasoning-http.so
           test -f "${PLUGIN}" \
               || { echo "FAIL: reasoning plugin missing at ${PLUGIN}"; exit 1; }
+          # The package must ship the detached signature beside the plugin (64 raw bytes).
+          test "$(wc -c < "${PLUGIN}.sig")" -eq 64 \
+              || { echo "FAIL: ${PLUGIN}.sig missing or not 64 bytes"; exit 1; }
           dnf install -qy --allowerasing libcurl
           ldd "${PLUGIN}" | grep -qi libcurl \
               || { echo "FAIL: reasoning plugin not linked to libcurl"; ldd "${PLUGIN}"; exit 1; }
@@ -275,6 +297,9 @@ jobs:
           PLUGIN=/usr/local/lib/sqlite3/fractalsql-reasoning-http.so
           test -f "${PLUGIN}" \
               || { echo "FAIL: reasoning plugin missing at ${PLUGIN}"; exit 1; }
+          # The package must ship the detached signature beside the plugin (64 raw bytes).
+          test "$(wc -c < "${PLUGIN}.sig")" -eq 64 \
+              || { echo "FAIL: ${PLUGIN}.sig missing or not 64 bytes"; exit 1; }
           echo "ok: reasoning plugin file present (alpine:3.20)"
           SCRIPT
           chmod +x test-apk.sh
@@ -283,7 +308,7 @@ jobs:
 
   macos-install:
     name: "macOS — build + install + .load + reason (arm64)"
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
@@ -311,7 +336,7 @@ jobs:
           set -euo pipefail
           brew install sqlite
           chmod +x scripts/package-darwin.sh
-          ./scripts/package-darwin.sh
+          FSQL_REQUIRE_MCP=1 ./scripts/package-darwin.sh
           sudo mkdir -p /usr/local/lib/sqlite3
           # Keep the native name: `.load /usr/local/lib/sqlite3/fractalsql`
           # (bare, no extension) resolves through SQLite's loader suffix
@@ -320,7 +345,28 @@ jobs:
           sudo install -m0755 fractalsql.dylib /usr/local/lib/sqlite3/fractalsql.dylib
           sudo install -m0755 include/darwin-arm64/fractalsql-reasoning-http.so \
               /usr/local/lib/sqlite3/
+          sudo install -m0644 include/darwin-arm64/fractalsql-reasoning-http.so.sig \
+              /usr/local/lib/sqlite3/
           ls -l /usr/local/lib/sqlite3
+
+      # The release tarball must carry the MCP server, with its lock files beside the binary. Unpack it as a
+      # user would and run it from a different directory, so the lock lookup beside the executable is what
+      # has to find them.
+      - name: MCP server in the release tarball (arm64)
+        run: |
+          set -euo pipefail
+          tgz="$(ls dist/packages/fractalsql-sqlite-*-darwin-arm64.tar.gz | head -1)"
+          D="$(mktemp -d)"
+          tar -xzf "${tgz}" -C "${D}"
+          M="$(find "${D}" -type d -name mcp | head -1)"
+          test -n "${M}" || { echo "FAIL: no mcp/ folder in ${tgz}"; exit 1; }
+          for f in fractalsql-sqlite-mcp .mcp-schema-lock .mcp-safety-annotations-lock manifest.json README.md; do
+              test -e "${M}/${f}" || { echo "FAIL: ${f} missing from the tarball's mcp/"; ls -la "${M}"; exit 1; }
+          done
+          cd "${D}"
+          "${M}/fractalsql-sqlite-mcp" --version
+          test "$("${M}/fractalsql-sqlite-mcp" --list-tools | wc -l)" -ge 60
+          echo "ok: macOS tarball ships the MCP server with its lock files; it runs from the package"
 
       - name: .load + edition/version + search + reason (mock endpoint)
         env:
@@ -331,7 +377,7 @@ jobs:
           VERSION=$("${SQLITE3_BIN}" :memory: ".load /usr/local/lib/sqlite3/fractalsql" "SELECT fractalsql_version();")
           echo "edition=${EDITION} version=${VERSION}"
           test "${EDITION}" = "Community"
-          test "${VERSION}" = "2.0.11"
+          test "${VERSION}" = "2.0.12"
 
           # Search works with no further config.
           "${SQLITE3_BIN}" :memory: \
@@ -392,6 +438,7 @@ jobs:
           apt-get install -qq -y ./dist/packages/sqlite3-fractalsql-amd64.deb
           test -f /usr/local/lib/sqlite3/fractalsql.so
           test -f /usr/local/lib/sqlite3/fractalsql-reasoning-http.so
+          test -f /usr/local/lib/sqlite3/fractalsql-reasoning-http.so.sig
 
           chmod +x /work/scripts/easy_install.sh
           # Mock LLM prints its bound port on stdout (single line).
@@ -425,16 +472,75 @@ jobs:
           VERSION=$(sqlite3 :memory: ".read /usr/local/lib/sqlite3/load_fractalsql.sql" "SELECT fractalsql_version();" | tail -1)
           echo "edition=${EDITION} version=${VERSION}"
           test "${EDITION}" = "Community"
-          test "${VERSION}" = "2.0.11"
+          test "${VERSION}" = "2.0.12"
           echo "ok: easy_install.sh end-to-end (Debian)"
           SCRIPT
           chmod +x test-easy-install.sh
           docker run --rm -v "${{ github.workspace }}:/work" -w /work \
               ubuntu:24.04 bash /work/test-easy-install.sh
 
+  # Intel macOS: cross-built on an Apple Silicon runner the way release.yml builds it (static x86_64 OpenSSL from
+  # source, -arch x86_64). The package must carry an x86_64 MCP server that links no library outside the system's.
+  macos-mcp-intel:
+    name: "macOS Intel (x86_64) — MCP cross-build + package"
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: SQLite amalgamation (for the bundled MCP server)
+        run: |
+          set -euo pipefail
+          zip_name="sqlite-amalgamation-${SQLITE_VERSION}.zip"
+          mkdir -p deps
+          curl -fsSL --proto '=https' -o deps/sqlite.zip "https://www.sqlite.org/${SQLITE_YEAR}/${zip_name}"
+          unzip -q deps/sqlite.zip -d deps
+          mv "deps/sqlite-amalgamation-${SQLITE_VERSION}" deps/sqlite
+
+      - name: Cross-build x86_64 OpenSSL from source
+        run: |
+          set -euo pipefail
+          curl -fsSLO --proto '=https' https://github.com/openssl/openssl/releases/download/openssl-3.5.8/openssl-3.5.8.tar.gz
+          echo "a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2  openssl-3.5.8.tar.gz" | shasum -a 256 -c -
+          tar xf openssl-3.5.8.tar.gz
+          cd openssl-3.5.8
+          ./Configure darwin64-x86_64 no-shared no-tests --prefix=/tmp/openssl-x64 -mmacosx-version-min=13.3 -fPIC
+          make -j1 -s build_generated
+          make -j"$(sysctl -n hw.ncpu)" -s build_libs
+          make -s install_sw
+
+      - name: Package the x86_64 tarball
+        env:
+          OPENSSL_PREFIX: /tmp/openssl-x64
+        run: |
+          set -euo pipefail
+          brew install sqlite
+          chmod +x scripts/package-darwin.sh
+          FSQL_DARWIN_ARCH=x86_64 FSQL_REQUIRE_MCP=1 ./scripts/package-darwin.sh
+          ls -l dist/packages
+
+      - name: The tarball's MCP server is x86_64, self-contained, and complete
+        run: |
+          set -euo pipefail
+          tgz="$(ls dist/packages/fractalsql-sqlite-*-darwin-x86_64.tar.gz | head -1)"
+          D="$(mktemp -d)"
+          tar -xzf "${tgz}" -C "${D}"
+          M="$(find "${D}" -type d -name mcp | head -1)"
+          test -n "${M}" || { echo "FAIL: no mcp/ folder in ${tgz}"; exit 1; }
+          for f in fractalsql-sqlite-mcp .mcp-schema-lock .mcp-safety-annotations-lock manifest.json README.md; do
+              test -e "${M}/${f}" || { echo "FAIL: ${f} missing from the tarball's mcp/"; ls -la "${M}"; exit 1; }
+          done
+          lipo -info "${M}/fractalsql-sqlite-mcp" | tee /dev/stderr | grep -q x86_64 || { echo "FAIL: not an x86_64 binary"; exit 1; }
+          otool -L "${M}/fractalsql-sqlite-mcp"
+          if otool -L "${M}/fractalsql-sqlite-mcp" | tail -n +2 | awk '{print $1}' | grep -vE '^(/usr/lib/|/System/Library/)'; then
+              echo "FAIL: the binary links a library outside the system's"; exit 1
+          fi
+          # Runs only if Rosetta is present on the runner; the checks above are the gate.
+          "${M}/fractalsql-sqlite-mcp" --version || echo "note: the x86_64 binary could not run on this arm64 runner"
+
   easy-install-macos:
     name: "easy_install.sh: macOS wizard, non-interactive (arm64)"
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
@@ -453,10 +559,12 @@ jobs:
           set -euo pipefail
           brew install sqlite
           chmod +x scripts/package-darwin.sh
-          ./scripts/package-darwin.sh
+          FSQL_REQUIRE_MCP=1 ./scripts/package-darwin.sh
           sudo mkdir -p /usr/local/lib/sqlite3
           sudo install -m0755 fractalsql.dylib /usr/local/lib/sqlite3/
           sudo install -m0755 include/darwin-arm64/fractalsql-reasoning-http.so \
+              /usr/local/lib/sqlite3/
+          sudo install -m0644 include/darwin-arm64/fractalsql-reasoning-http.so.sig \
               /usr/local/lib/sqlite3/
           ls -l /usr/local/lib/sqlite3
 
@@ -580,6 +688,28 @@ jobs:
           $p = Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /quiet /norestart" -Wait -PassThru
           if ($p.ExitCode -ne 0) { Write-Host "FATAL: msiexec exited $($p.ExitCode)"; exit 1 }
           Get-ChildItem 'C:\Program Files\FractalSQL'
+          # The MSI must install the plugin together with its detached signature (64 raw bytes).
+          foreach ($f in 'fractalsql-reasoning-http.dll','fractalsql-reasoning-http.dll.sig') {
+              if (-not (Test-Path (Join-Path 'C:\Program Files\FractalSQL' $f))) { Write-Host "FATAL: $f missing after the MSI install"; exit 1 }
+          }
+          if ((Get-Item 'C:\Program Files\FractalSQL\fractalsql-reasoning-http.dll.sig').Length -ne 64) { Write-Host 'FATAL: fractalsql-reasoning-http.dll.sig is not 64 bytes'; exit 1 }
+
+      - name: Run the installed MCP server
+        shell: pwsh
+        run: |
+          $dir = 'C:\Program Files\FractalSQL\mcp'
+          foreach ($f in 'fractalsql-sqlite-mcp.exe','.mcp-schema-lock','.mcp-safety-annotations-lock','manifest.json','README.md') {
+              if (-not (Test-Path (Join-Path $dir $f))) { Get-ChildItem $dir -Force | Format-Table Name; Write-Host "FATAL: $f missing from the installed mcp folder"; exit 1 }
+          }
+          # From another directory: the lock files must be found beside the executable.
+          Push-Location $env:RUNNER_TEMP
+          & "$dir\fractalsql-sqlite-mcp.exe" --version
+          if ($LASTEXITCODE -ne 0) { Write-Host 'FATAL: --version failed'; exit 1 }
+          $n = (& "$dir\fractalsql-sqlite-mcp.exe" --list-tools | Measure-Object -Line).Lines
+          Write-Host "tools: $n"
+          if ($n -lt 60) { Write-Host 'FATAL: too few tools'; exit 1 }
+          Pop-Location
+          Write-Host 'ok: the MSI installs the MCP server with its lock files; it runs from the install folder'
 
       - name: Install sqlite3 CLI
         shell: pwsh

@@ -49,7 +49,7 @@ esac
 FSQL_PLATFORM="darwin-${ARCH}"
 CORE_A="include/${FSQL_PLATFORM}/libfractalsql-community-sovereign-c.a"
 REASONING_SO="include/${FSQL_PLATFORM}/fractalsql-reasoning-http.so"
-for f in src/*.c "${CORE_A}" "${REASONING_SO}" \
+for f in src/*.c "${CORE_A}" "${REASONING_SO}" "${REASONING_SO}.sig" \
          LICENSE THIRD-PARTY-NOTICES.md sql/fractalsql--1.0.sql; do
     [[ -e "${f}" ]] \
         || { echo "missing ${f} — re-run the vendored-artifact deploy step" >&2; exit 1; }
@@ -81,6 +81,10 @@ HAVE_MCP=0
 OPENSSL_PREFIX="${OPENSSL_PREFIX:-$(brew --prefix openssl@3 2>/dev/null || true)}"
 if [[ -z "${OPENSSL_PREFIX}" || ! -f "${OPENSSL_PREFIX}/include/openssl/evp.h" ]]; then
     echo "warning: Homebrew openssl@3 not found — skipping the MCP server (brew install openssl@3 to include it)" >&2
+    if [[ "${FSQL_REQUIRE_MCP:-0}" = "1" ]]; then
+        echo "error: FSQL_REQUIRE_MCP=1 and the MCP server could not be built" >&2
+        exit 1
+    fi
 else
     echo "== building fractalsql-sqlite-mcp for darwin-${ARCH} ==" >&2
     CC=clang CXX=clang++ \
@@ -99,7 +103,7 @@ echo "== building fractalsql.dylib for darwin-${ARCH} (core: community-sovereign
 # the Makefile. No -fvisibility=hidden — sqlite3_fractalsql_init must
 # stay exported for SQLite's loader.
 #
-# -arch is not optional: both release legs run on the arm64 macos-14
+# -arch is not optional: both release legs run on the arm64 macos-15
 # image, and without it clang targets the host (arm64) even on the
 # x86_64 leg — arm64 objects against the x86_64 vendored archive make
 # ld silently skip every archive member, so all core symbols go
@@ -134,6 +138,7 @@ mkdir -p "${STAGE}" "${DIST}"
 
 install -m 0755 fractalsql.dylib              "${STAGE}/fractalsql.dylib"
 install -m 0755 "${REASONING_SO}"             "${STAGE}/fractalsql-reasoning-http.so"
+install -m 0644 "${REASONING_SO}.sig"         "${STAGE}/fractalsql-reasoning-http.so.sig"
 install -m 0644 LICENSE                       "${STAGE}/LICENSE"
 install -m 0644 THIRD-PARTY-NOTICES.md        "${STAGE}/THIRD-PARTY-NOTICES.md"
 install -m 0644 sql/fractalsql--1.0.sql       "${STAGE}/fractalsql--1.0.sql"
@@ -154,7 +159,8 @@ FractalSQL for SQLite (Community) ${VERSION} — macOS ${ARCH}
 Install:
   mkdir -p /usr/local/lib/sqlite3
   cp fractalsql.dylib /usr/local/lib/sqlite3/
-  cp fractalsql-reasoning-http.so /usr/local/lib/sqlite3/
+  cp fractalsql-reasoning-http.so fractalsql-reasoning-http.so.sig /usr/local/lib/sqlite3/
+  (keep the .sig beside the plugin: the plugin loads only with its signature)
 
   Unsigned release: clear Gatekeeper quarantine once after extraction
   (required for binaries downloaded from GitHub Releases):

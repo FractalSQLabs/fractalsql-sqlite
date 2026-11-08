@@ -124,7 +124,11 @@ namespace fsqlmcp
         {
             std::lock_guard<std::mutex> lk( clientMu_ );
             auto it = clientCounts_.find( key );
-            if( it != clientCounts_.end() && it->second > 0 ) --it->second;
+            if( it == clientCounts_.end() ) return;
+            if( it->second > 0 ) --it->second;
+            // Drop the key once idle, or the map grows with every distinct
+            // client key the server ever saw.
+            if( it->second <= 0 ) clientCounts_.erase( it );
         }
 
         ConcurrencyConfig cfg_;

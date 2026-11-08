@@ -44,12 +44,12 @@
  * check; weakening it requires a process-environment opt-out that no
  * SQL statement can touch:
  *
- *   - FSQL_ENTERPRISE_ALLOW_UNVERIFIED unset (the default): signature
- *     verification is MANDATORY -- the library must carry a .sig that
- *     verifies, or the load is refused, regardless of the SQL key.
- *   - FSQL_ENTERPRISE_ALLOW_UNVERIFIED set to a non-empty value: the
- *     SQL key governs, restoring the original "loading unverified is
- *     the operator's choice" behavior:
+ *   - FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE unset (the default):
+ *     signature verification is MANDATORY -- the library must carry a
+ *     .sig that verifies, or the load is refused, regardless of the SQL key.
+ *   - FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0: the SQL key governs,
+ *     restoring the "loading unverified is the operator's choice"
+ *     behavior:
  *       - enterprise_require_signature = 0 (default): a missing .sig is
  *         tolerated; a PRESENT .sig is still fully verified -- if it
  *         doesn't check out the load is refused regardless (see
@@ -130,8 +130,7 @@ static void ent_dlclose_failed(void *handle) {
  * private key -- no change to this extension required.
  *
  * FractalSQLabs's long-lived Ed25519 signing public key
- * (FSQL_ENTERPRISE_PUBKEY). The matching private key is held offline
- * in the enterprise release process, never in this git repo.
+ * (FSQL_ENTERPRISE_PUBKEY).
  * ------------------------------------------------------------------- */
 
 static const unsigned char FSQL_ENTERPRISE_PUBKEY[32] = {
@@ -217,18 +216,17 @@ static int ent_signature_gate(const char *lib, int require,
          * enterprise_require_signature -- a corrupt/tampered file must
          * never load silently just because verification is optional. */
         if (err) snprintf(err, err_cap,
-            "fractalsql: enterprise library failed signature "
+            "fractalsql: enterprise library \"%s\" failed signature "
             "verification -- refusing to load (the library or its "
-            ".sig does not match the expected FractalSQLabs signing "
-            "key; the file may be corrupt or tampered)");
+            ".sig is corrupt or not from FractalSQLabs)", lib);
         return 0;
     }
     if (sig == ENT_SIG_MISSING && require) {
         if (err) snprintf(err, err_cap,
             "fractalsql: no signature found for enterprise library "
-            "(expected a .sig sidecar) -- signature verification is "
-            "mandatory unless FSQL_ENTERPRISE_ALLOW_UNVERIFIED is set "
-            "in the process environment");
+            "\"%s\" (expected \"%s.sig\"); place the .sig beside the "
+            "library, or set FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 to "
+            "load an unsigned library", lib, lib);
         return 0;
     }
     if (sig == ENT_SIG_IOERROR && require) {
@@ -238,8 +236,8 @@ static int ent_signature_gate(const char *lib, int require,
          * through to the dlopen attempt, which fails cleanly on
          * a genuinely unreadable/absent file.) */
         if (err) snprintf(err, err_cap,
-            "fractalsql: could not read enterprise library for "
-            "signature verification -- refusing to load");
+            "fractalsql: could not read enterprise library \"%s\" for "
+            "signature verification -- refusing to load", lib);
         return 0;
     }
     /* ENT_SIG_OK, ENT_SIG_MISSING+require=off, and ENT_SIG_IOERROR
@@ -328,8 +326,8 @@ static int ent_resolve_symbols(FsqlState *st, void *h,
  * can raise the bar, never lower it below the env-decided default. */
 static int ent_effective_require(const FsqlState *st) {
     int require = st->cfg.enterprise_require_signature;
-    const char *allow_unverified = getenv("FSQL_ENTERPRISE_ALLOW_UNVERIFIED");
-    if (!allow_unverified || !allow_unverified[0]) require = 1;
+    const char *rq = getenv("FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE");
+    if (!(rq && rq[0] == '0')) require = 1;
     return require;
 }
 

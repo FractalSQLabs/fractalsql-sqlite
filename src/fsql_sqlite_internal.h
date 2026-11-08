@@ -53,16 +53,58 @@
 #  define SQLITE_INNOCUOUS 0
 #endif
 
+/* SQLITE_DIRECTONLY arrived in SQLite 3.30.0, so the same older dev headers lack it too. Unlike the flag above this
+ * one is a safety control (it keeps triggers, views and CHECK constraints from calling the config and ledger
+ * functions), so it is defined with its real, fixed bit value: a newer host SQLite that loads this extension still
+ * enforces it, and a host predating the flag ignores the unknown create_function bit. */
+#ifndef SQLITE_DIRECTONLY
+#  define SQLITE_DIRECTONLY 0x000080000
+#endif
+
 #include "fractalsql.h"
 #include "fractalsql_sql.h"
+
+#include <limits.h>
+
+/* sqlite3_value_int() wraps a 64-bit value to 32 bits, so 4294967297 reads as
+ * 1 and passes a range check meant to refuse it. fsql_value_int() clamps
+ * instead, so an out-of-range value stays out of range. A macro, not a
+ * function: sqlite3_value_int64 goes through each TU's own sqlite3_api. */
+static inline int fsql_clamp_to_int(sqlite3_int64 n)
+{
+    return n > INT_MAX ? INT_MAX : (n < INT_MIN ? INT_MIN : (int)n);
+}
+#define fsql_value_int(v) fsql_clamp_to_int(sqlite3_value_int64(v))
 
 /* ------------------------------------------------------------------ */
 /* Constants                                                           */
 /* ------------------------------------------------------------------ */
 
+/* Widest SimHash fingerprint fractal_state_fingerprint / fractal_cycle_detect
+ * accept: 4 MiB of fingerprint. Past it a single call only burns CPU and
+ * memory (2^31 bits took 37 s and 520 MB). The same ceiling as the MariaDB
+ * edition, where it follows from the 16 MiB result limit. */
+#define FSQL_FINGERPRINT_MAX_BITS 33554424
+
+/* Work bounds, the same as the core's. A single call cannot be interrupted,
+ * and each cost is a product no individual limit controls:
+ *   search:    iterations x population_size x diffusion_factor x dim (about
+ *              30 ns a unit, so 2^31 is roughly a minute);
+ *   subset:    items x k (about 3 us a unit, 2^24 is roughly a minute);
+ *   periodogram: series length, an FFT (2^20 is a few seconds). */
+#define FSQL_SEARCH_MAX_WORK        2147483648ULL
+#define FSQL_SUBSET_MAX_WORK        16777216ULL
+#define FSQL_PERIODOGRAM_MAX_SAMPLES 1048576
+
+/* Most random draws one fingerprint (n_bits x vector length) may cost: about
+ * 4 ns each, so 2^28 is roughly a second, and the loop cannot be interrupted.
+ * Applied to a whole state log by fractal_agent_detect_loop. The same bound
+ * as the core's. */
+#define FSQL_FINGERPRINT_MAX_WORK 268435456
+
 /* Extension version. Single source of truth for fractalsql_version()
  * and the smoke gate; bumped in lockstep with packaging scripts. */
-#define FSQL_SQLITE_VERSION_STR   "2.0.11"
+#define FSQL_SQLITE_VERSION_STR   "2.0.12"
 #define FSQL_SQLITE_EDITION_STR   "Community"
 
 /* SFS tuning: same values the pre-2.x path used. */
@@ -87,7 +129,7 @@
  * and the Scout explore path's clamping (both feed the same core
  * arena). */
 #define FSQL_AGENTS_MAX_ITERATIONS   10000
-#define FSQL_AGENTS_MAX_POPULATION   100000
+#define FSQL_AGENTS_MAX_POPULATION   10000   /* the core's own ceiling */
 #define FSQL_AGENTS_MAX_DIFFUSION    32
 
 /* fractal_vector BLOB-convention limits. */
@@ -224,6 +266,12 @@ typedef struct FsqlState {
     FsqlConfig   cfg;
     sqlite3     *db;                 /* owning connection              */
 
+    /* Non-zero while fractal_sql_agent runs model-generated SQL. Functions
+     * that change configuration, write, or call out refuse to run then
+     * (FSQL_REFUSE_IN_GENERATED_SQL), so a prompt-injected statement cannot
+     * use them. Counted, not a flag, so it nests. */
+    int          generated_sql_depth;
+
     /* Ledger storage VFS (fsql_ledger.c). fsql_new_sovereign copies
      * the struct by value at construction, so it is populated BEFORE
      * ctx creation; ledger_ctx backs the callbacks and is valid for
@@ -284,6 +332,30 @@ typedef struct FsqlState {
      * connections when FSQL_MCP_READ_ONLY=true. */
     int          destructive_locked;
 
+    /* Per-chain-kind high-water mark of the audit rows this process has
+     * appended or verified (index = kind, 0..16). The chain lives in an
+     * ordinary table that plain SQL can DROP or DELETE FROM, and
+     * ledger_ensure_table() quietly recreates it empty -- so without this a
+     * wiped chain verified as {"ok":true,"rows_verified":0}.
+     * fractal_ledger_verify now reports a chain that is shorter than this
+     * as FAILED. In-process only: it cannot see a wipe that happened
+     * before this connection first touched the chain. */
+    long long    ledger_watermark[17];
+
+    /* Client label stamped into audit-chain entries. Set by the
+     * MCP server per call via fractal_set_actor(); empty when unset. A label
+     * only: SQLite has no authenticated principal to attest it. */
+    char         actor[96];
+
+    /* Whether the Diversify/Repulsion layer is on for THIS connection.
+     * The core keeps the setting on its per-connection context but exposes
+     * no getter for it, so the flag is mirrored here: the enable and
+     * disable functions set it and fractal_explain_result() reports it.
+     * Deriving the report from the params getter instead would always say
+     * "enabled", because that getter succeeds on a connection that never
+     * asked for it. */
+    int          diversify_enabled;
+
     /* Diffusion arena for fractal_search memoization (see the entry TU). */
     double       query[FSQL_ARENA_MAX_DIM];
     double       best_point[FSQL_ARENA_MAX_DIM];
@@ -292,6 +364,18 @@ typedef struct FsqlState {
     int          best_valid;
     uint64_t     best_hash;          /* FNV-1a of the cached query     */
 } FsqlState;
+
+/* Refuses the calling SQL function while the agent runs model-generated SQL.
+ * `name` must be a string literal. A macro, not a function: it returns from
+ * the caller and reports through that TU's own sqlite3_api. */
+#define FSQL_REFUSE_IN_GENERATED_SQL(ctx, st, name)                          \
+    do {                                                                     \
+        if ((st)->generated_sql_depth > 0) {                                 \
+            sqlite3_result_error((ctx),                                      \
+                name " is not permitted from model-generated SQL", -1);      \
+            return;                                                          \
+        }                                                                    \
+    } while (0)
 
 /* --- lifecycle (fractalsql_sqlite.c) -------------------------------- */
 
@@ -337,9 +421,15 @@ int  fsql_config_set(FsqlState *st, const char *name,
  * same key. */
 const char *fsql_config_get(const FsqlState *st, const char *name);
 
-/* Path validation shared by config + gate 09: accepts absolute POSIX
- * paths, Windows drive-letter paths, and UNC; rejects empty, relative,
- * and traversal-containing ("..", "/./") paths. Returns 0 if valid. */
+/* Apply the documented default of every key that has one. Called once
+ * per connection, when the state is created, so a session that never
+ * calls fractalsql_set() still starts from the documented values. */
+void fsql_config_apply_defaults(FsqlState *st);
+
+/* Path validation shared by config and the configuration tests: accepts
+ * absolute POSIX paths, Windows drive-letter paths, and UNC; rejects empty,
+ * relative, and traversal-containing ("..", "/./") paths. Returns 0 if
+ * valid. */
 int fsql_config_validate_plugin_path(const char *path);
 
 /* --- reasoning attach + dispatch (fsql_reasoning.c) ------------------ */

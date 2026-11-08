@@ -24,9 +24,9 @@ namespace fsqlmcp
     inline ToolParam NullableStr( std::string_view n, std::string_view d )
     { return ToolParam{ n, JsonType::String, false, nullptr, d, true }; }
     inline ToolParam IntArray( std::string_view n, bool req, std::string_view d, Json def = nullptr )
-    { return ToolParam{ n, JsonType::Array, req, def, d }; }   // element type enforced by vectors::intArrayToJsonText at call time
+    { return ToolParam{ n, JsonType::Array, req, def, d, false, JsonType::Integer }; }   // element type enforced by vectors::intArrayToJsonText at call time
     inline ToolParam StrArray( std::string_view n, bool req, std::string_view d, Json def = nullptr )
-    { return ToolParam{ n, JsonType::Array, req, def, d }; }
+    { return ToolParam{ n, JsonType::Array, req, def, d, false, JsonType::String }; }
     inline ToolParam StrEnum( std::string_view n, bool req, std::string_view d, Json def = nullptr )
     { return ToolParam{ n, JsonType::String, req, def, d }; }   // allowed values documented in d; handler enforces
     inline ToolParam RowLimit()

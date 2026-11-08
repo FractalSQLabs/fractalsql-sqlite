@@ -115,17 +115,55 @@ Sanity check without a database: `fractalsql-sqlite-mcp --version` and
 | `FRACTALSQL_BOOTSTRAP_SQL` | recommended | The per-connection `fractalsql_set(...)` snippet the server applies at session start: the same `load_fractalsql.sql` text [easy_install](getting-started.md) generates (`.load` lines in it are honored-but-skipped; the extension loads via the driver first). |
 | `FSQL_MCP_HTTP_HOST` / `FSQL_MCP_HTTP_PORT` / `FSQL_MCP_HTTP_PATH` | no | HTTP transport bind address (default `127.0.0.1:8765`, path `/mcp`); transport is chosen by flag (`--http`/`--https`), not env. Default posture is TLS terminating **in front** (reverse proxy/LB); see [Security](#security). |
 | `FSQL_MCP_AUTH_TOKEN` / `FSQL_MCP_AUTH_TOKEN_FILE` | http(s) only | Opaque Bearer token (or a mtime-hot-reloaded token file for rotation without downtime). Required for the HTTP/HTTPS transport, never used on stdio; TLS is never a substitute for it. |
+| `FSQL_MCP_TOKEN_POLICY_FILE` | no | Per-client credentials: a JSON file naming clients, each with the SHA-256 of its token, an optional expiry and an optional tool allowlist. See [Authentication](#authentication). |
+| `FSQL_MCP_ALLOWED_ORIGINS` | no | Comma-separated browser origins allowed to make cross-origin requests. A request with an `Origin` header that is not on the list is refused with `403`; a request with no `Origin` header is not a browser request and is served. |
+| `FSQL_MCP_PROTOCOL_ERA` | no | `dual` (default) serves both protocol eras; `modern` serves the modern era only and refuses the legacy handshake. See [Protocol versions](#protocol-versions). |
+| `FSQL_MCP_SESSION_TTL_SECS` | no | How long a session-state handle stays valid (default 3600). |
+| `FSQL_MCP_MAX_SESSIONS` | no | How many session-state handles one deployment may hold at once (default 64). |
+| `FSQL_MCP_ALLOW_AUTO_EXECUTE` | no | `off` (default) refuses `auto_execute` on the two tools that take it, whatever the caller asks for; `on` lets a model ask for it. See [Safety](#safety). |
+| `FSQL_MCP_CONFIG_WRITES` | no | `off`, `safe` (default) or `all`: whether the config-writing admin tools may write, and which keys. `safe` allows only the model names and the think mode; every other key, and every key this build does not know about, is refused. |
+| `FSQL_MCP_ALLOW_MISSING_LOCKS` | no | `true` starts the server when the schema lock or the safety lock is absent. Off by default: without the locks the tool surface is unverified, and the server refuses to start. |
+| `FSQL_MCP_REQUIRE_LOCKS` | no | Alias of the lock requirement, kept for deployments that name it that way; the locks are required unless `FSQL_MCP_ALLOW_MISSING_LOCKS=true`. |
+| `FSQL_MCP_SCHEMA_LOCK` / `FSQL_MCP_SAFETY_LOCK` | no | Paths to the schema lock and the safety lock. The default is the file beside the executable. |
+| `FSQL_MCP_MANIFEST_PATH` | no | Path to the distribution manifest (default: beside the executable). |
+| `FSQL_MCP_ALLOW_PLAINTEXT_NONLOOPBACK` | no | `true` permits a plaintext HTTP bind to a non-loopback address. Off by default: plaintext is refused off the loopback interface. |
 | `FSQL_MCP_HTTPS` | no | `true` is equivalent to launching with `--https` (direct TLS, off by default); see [`--https`](#2-run-it) below. |
 | `FSQL_MCP_TLS_CERT_FILE` / `FSQL_MCP_TLS_KEY_FILE` | https only | PEM certificate (chain OK) and unencrypted PEM private key for direct TLS; equivalent to `--tls-cert`/`--tls-key`. |
 | `FSQL_MCP_MAX_ROWS_CEILING` | no | Hard server-enforced row ceiling (default 1000). |
-| `FSQL_MCP_MAX_CONCURRENT_CHEAP` / `FSQL_MCP_MAX_CONCURRENT_EXPENSIVE` / `FSQL_MCP_MAX_CONCURRENT_EXPENSIVE_PER_CLIENT` | no | Concurrency caps (defaults 50 / 5 / 2); see [Concurrency](#concurrency). |
+| `FSQL_MCP_MAX_CONCURRENT_CHEAP` / `FSQL_MCP_MAX_CONCURRENT_EXPENSIVE` / `FSQL_MCP_MAX_CONCURRENT_EXPENSIVE_PER_CLIENT` | no | Concurrency caps (defaults 50 / 5 / 2; each a whole number of at least 1, and anything else, including 0, makes the server refuse to start instead of hanging every call); see [Concurrency](#concurrency). |
 | `FSQL_MCP_MAX_QUEUE_WAIT_MS` | no | How long a request beyond a cap waits for a slot before a "server busy" error (default 900000). |
 | `FSQL_MCP_SHUTDOWN_DRAIN_MS` | no | Graceful-shutdown drain window (default 5000). |
-| `FSQL_MCP_STRICT_SCHEMA_HASH` | no | `true` turns a tool-surface schema-hash mismatch into a hard start failure. |
-| `FSQL_MCP_READ_ONLY` | no | Deployment-wide kill switch: the server refuses every `destructiveHint` tool call with a clear error, before the call reaches the engine (default off). It keys on `destructiveHint`, not on `readOnlyHint` — the seven destructive tools (ledger write/reset, `fractal_vectorizer_drop`, the two config tools), not every write. |
+| `FSQL_MCP_STRICT_SCHEMA_HASH` | yes | A tool-surface schema-hash mismatch is a hard start failure; set `false` to downgrade it to a warning. |
+| `FSQL_MCP_READ_ONLY` | no | Deployment-wide kill switch: the server refuses every `destructiveHint` tool call with a clear error, before the call reaches the engine (default off). It keys on `destructiveHint`, not on `readOnlyHint` — every tool marked destructive, not every write. |
 | `FSQL_MCP_TOOL_WHITELIST` / `FSQL_MCP_ENABLED_CATEGORIES` | no | Runtime narrowing of the catalog: a comma-separated tool list or category list (`discovery,cognition,agency,analytics,enterprise,vectorizer,admin`). The demo container uses `FSQL_MCP_TOOL_WHITELIST`'s flag form, `--tool`. |
 | `FSQL_MCP_LOG_LEVEL` | no | `info` (default), `verbose` (redacted argument bodies in the per-call log), or `debug`. |
 | `FSQL_MCP_AGENT_PARTIAL` | no | `on` (default) opts every session into the engine's `agent_partial_reasoning_fail` mode: partial-result honesty. `off` keeps the engine's documented raise behavior for reasoning-endpoint failures inside agent calls. |
+| `FSQL_MCP_MAX_CONNECTIONS` | http(s) only | Most connections served at once (default 256, never more than half the process's file-descriptor limit). A connection past the limit is answered `503` and closed. |
+
+The three settings below are **engine** settings, not MCP-layer ones: the
+extension reads them in-process, so they work the same whether the
+database is reached through this server, through `sqlite3`, or through
+an application that loads the extension.
+
+| Variable | Required | What it is |
+| --- | --- | --- |
+| `FSQL_AUDIT_REDACT` | no | `none` (default), `hash` or `truncate`: how much of the text the audit chain keeps. See [Data at rest](#data-at-rest). |
+| `FSQL_LEDGER_ANCHOR_LOG` | no | `off` (default), `stderr` or `syslog`: publish the audit chain's head to an external log so a truncated chain is detectable off-host. See [Data at rest](#data-at-rest). |
+| `FSQL_LEDGER_MAX_ROWS` | no | The highest row id the audit chain may reach (default 10,000,000; `0` removes the cap). |
+
+A reasoning plugin is a shared object mapped into the server process, so
+loading one is arbitrary code execution, and the engine will not do it
+unchecked. The plugin must have its detached signature, `<plugin>.sig` (64
+bytes), beside it, and that signature must verify against the FractalSQLabs
+reasoning-plugin signing key built into the engine. The plugin and its `.sig`
+ship together in the release packages; keep the two together. The check is on
+by default. One setting turns it off:
+
+| Variable | Required | What it is |
+| --- | --- | --- |
+| `FSQL_REASONING_REQUIRE_SIGNATURE` | no | `1` (the default) requires a valid signature. Set it to `0` to load a plugin that has no `.sig` (one warning goes to stderr), for example a plugin you built yourself. A `.sig` that is present but does not verify is always refused. |
+
+Requests whose JSON nests deeper than 128 levels are rejected with a parse error, and an HTTP request with ambiguous framing (a repeated or non-numeric `Content-Length`, or an unsupported `Transfer-Encoding`) is refused with `400`.
 
 Reasoning/embedding provider config (chat URL, models, etc.) stays
 where the engine's own docs put it: per-connection `fractalsql_set`
@@ -258,7 +296,7 @@ Each agent is one JSON document back: the real computed numbers plus the LLM's r
 | `fractal_agent_schedule_workload` | `fractal_search` refinement + nearest-node lookup → LLM rationale |
 | `fractal_agent_outlier_intercept` | Distance-to-known-bad-state barrier (`cosine`/`l2`) → LLM justification |
 | `fractal_agent_patient_deterioration_triage` | Caller-built cohort search + baseline→current drift → LLM triage |
-| `fractal_agent_data_analyst` | NL question → SQL → execute → LLM analysis (the horizontal catch-all) |
+| `fractal_agent_data_analyst` | NL question → SQL → LLM analysis (the horizontal catch-all). **Nothing runs unless you pass `auto_execute: true`** — otherwise the statement comes back in `generated_sql` and `result_json`/`analysis` stay null. |
 | `fractal_agent_recall_hybrid` | Cohort-restricted vector recall. **No LLM.** |
 | `fractal_agent_recommend_diverse` | Repulsion-diverse top-k, avoiding recently-rejected items. **No LLM. Leaves Diversify ON.** |
 | `fractal_agent_feedback_audit` | Self-contained Diversify health-check cycle. **No LLM. Self-disables.** |
@@ -428,6 +466,42 @@ compliance coverage must not assume otherwise. Connection strings and
 credential fragments are scrubbed by a shared sanitizer before any
 exception reaches a log line.
 
+### Operator switches at a glance
+
+| Setting | Values | Default |
+| --- | --- | --- |
+| `FSQL_MCP_ALLOW_AUTO_EXECUTE` | `off` / `on` | `off` |
+| `FSQL_MCP_CONFIG_WRITES` | `off` / `safe` / `all` | `safe` |
+| `FSQL_MCP_PROTOCOL_ERA` | `dual` / `modern` | `dual` |
+| `FSQL_MCP_SESSION_TTL_SECS` | seconds | `3600` |
+| `FSQL_MCP_MAX_SESSIONS` | count | `64` |
+| `FSQL_MCP_ALLOWED_ORIGINS` | comma-separated origins | none (every `Origin` header is refused) |
+| `FSQL_MCP_ALLOW_MISSING_LOCKS` | `off` / `on` | `off` |
+| `FSQL_MCP_ALLOW_PLAINTEXT_NONLOOPBACK` | `off` / `on` | `off` |
+| `FSQL_AUDIT_REDACT` | `none` / `hash` / `truncate` | `none` |
+| `FSQL_LEDGER_ANCHOR_LOG` | `off` / `stderr` / `syslog` | `off` |
+| `FSQL_LEDGER_MAX_ROWS` | rows | `10000000` |
+
+Four behaviors are worth knowing about without reading the source:
+
+- **A session-state handle belongs to the credential that created it.**
+  Another token is told the handle does not exist — not that it exists
+  but is forbidden — so a client cannot even probe for someone else's
+  handle.
+- **The audit chain stops growing at a limit.** With
+  `FSQL_LEDGER_MAX_ROWS` reached, an append fails with a clear error
+  instead of filling the disk. The chain is self-contained and
+  verifiable on its own, so archiving the database and starting a new one
+  loses nothing that cannot be verified afterwards.
+- **The vectorizer registry and its queue are per-connection TEMP
+  objects.** They live on the server's own session connection, so they
+  belong to that process and are not shared with another server pointed at
+  the same file.
+- **A chunked request body is refused with `411`.** Send a
+  `Content-Length` instead; the server does not read a chunked body it
+  cannot bound.
+
+
 ## Enterprise integration points
 
 - **Identity / SSO.** Put an identity-aware reverse proxy (Okta, Entra
@@ -462,9 +536,12 @@ exception reaches a log line.
   defaulted to true by the MCP layer**: a client must pass it
   explicitly, and every relevant description names the consequence (the
   generated SQL runs under whatever the server's connection can touch).
-- `fractal_agent_data_analyst` executes its internally-generated
-  (read-only-allowlisted) SQL by recipe design; the least-privilege
-  connection guidance applies to the server process's DB file.
+- `fractal_agent_data_analyst` is the same: `auto_execute` defaults to
+  false and is never defaulted to true by the MCP layer. Without an
+  explicit `auto_execute: true` the statement is generated and validated
+  only — `generated_sql` comes back and `result_json`/`analysis` stay
+  null. When you do opt in, the least-privilege connection guidance
+  applies to the server process's DB file.
 - Enterprise write-path tools and destructive vectorizer operations
   carry `destructiveHint` annotations; reasoning-config changes are
   similarly flagged and always logged with old + new values.
@@ -508,13 +585,13 @@ exception reaches a log line.
   in-band error, before the call reaches the engine: a fast lever for
   incident response and scheduled export/reporting windows that doesn't
   require re-permissioning the database file. It keys on
-  `destructiveHint`, not on `readOnlyHint`, so it stops the seven
-  destructive tools (the four ledger write/reset tools,
-  `fractal_vectorizer_drop`, and the two config tools) — NOT every
-  write: `fractal_store_morphology`, the four `fractal_vectorizer_*`
-  lifecycle tools, and `fractal_audit_log` also write to the database,
-  do not carry `destructiveHint`, and stay callable under the switch.
-  (`fractal_audit_log` is enterprise-gated, so on Community it returns
+  `destructiveHint`, not on `readOnlyHint`, so it stops every tool
+  marked destructive — every tool the safety-annotation lock marks
+  destructive, not a fixed list — and NOT every write: the agent
+  engines that are not themselves destructive still record their
+  decision document in the audit chain, so the switch is not a
+  blanket "no writes" switch. (`fractal_audit_log` is enterprise-gated,
+  so on Community it returns
   the clean "enterprise tier not loaded" error and writes nothing; on an
   enterprise install it appends audit rows — including the ones the
   agent engines emit.) For a genuine no-write posture, scope the DB file
@@ -546,7 +623,7 @@ exception reaches a log line.
   The committed `mcp/.mcp-schema-lock` holds the SHA-256 over the
   canonical (key-sorted, whitespace-free) JSON of every tool's name /
   description / schema; the server compares it at startup and warns on
-  a mismatch (set `FSQL_MCP_STRICT_SCHEMA_HASH=true` to hard-fail). A
+  a mismatch (a hard failure unless `FSQL_MCP_STRICT_SCHEMA_HASH=false`). A
   second committed lock, `mcp/.mcp-safety-annotations-lock`, covers the
   tools' safety annotations (`readOnlyHint` / `destructiveHint` /
   `idempotentHint` / `openWorldHint`) the same way, so a client that
@@ -568,6 +645,172 @@ exception reaches a log line.
   running admin tools (`fractalsql_set_config` et al.) against a
   separately-scoped server instance in production; the server soft-warns
   once when it detects the shared case.
+
+### Authentication
+
+On the HTTP transport a bearer token is the credential, and there are two
+ways to hold one.
+
+**The deployment token.** `FSQL_MCP_AUTH_TOKEN` (or
+`FSQL_MCP_AUTH_TOKEN_FILE`, hot-reloaded on mtime change so a secrets
+manager can rotate it in place without a restart) is one secret for the
+whole deployment. Every holder of it is the same identity.
+
+**Per-client credentials.** `FSQL_MCP_TOKEN_POLICY_FILE` points at a JSON
+file that names clients, so each caller can be revoked on its own and can be
+given its own tool allowlist:
+
+```json
+{
+  "tokens": [
+    { "name": "analyst", "sha256": "<hex sha256 of that client's token>",
+      "tools": ["fractal_search", "fractal_agent_data_analyst"],
+      "expires": "2027-01-31T00:00:00Z" },
+    { "name": "batch", "sha256": "<hex sha256>", "tools": "*" }
+  ]
+}
+```
+
+The file holds the SHA-256 of each token, never the token itself, so it is
+safe to keep in a repository or a config store. A client that presents its
+own token *is* that client: its name is its fairness key (the per-client
+concurrency share) and its allowlist bounds what it can call. `expires` is
+optional and is an ISO-8601 date or date-time; an expired credential is
+refused. `tools` is either `"*"` or a list of tool names. A malformed file is
+reported at startup and the last good policy is kept — a typo never widens
+access.
+
+What the server does with a request that arrives at the JSON-RPC path:
+
+| Situation | Answer |
+| --- | --- |
+| No token, or a token that matches nothing | `401` with `WWW-Authenticate: Bearer realm="fractalsql-mcp"` |
+| A token that has expired | `401` with `WWW-Authenticate: Bearer realm="fractalsql-mcp", error="invalid_token"` |
+| A token in the query string instead of the `Authorization` header | `401` — a query string lands in proxy logs and access logs, so it is not accepted |
+| A browser `Origin` header that is not on `FSQL_MCP_ALLOWED_ORIGINS` | `403`, checked **before** the token, so an unapproved origin never reaches the credential check |
+| A chunked request body | `411` — send a `Content-Length` instead |
+| A declared `Content-Length` over 32 MB | `413` |
+| A repeated `Content-Length`, or both `Content-Length` and `Transfer-Encoding` | `400` — the framing is ambiguous and is never resolved in favor of one reading |
+| `GET /healthz` and `GET /readyz` | served without a token |
+
+Repeated failed authentications are slowed down (the wait grows with the
+number of consecutive failures, capped at two seconds), so a stolen-token
+guessing attempt is not free. The comparison itself is constant-time, and no
+token is ever written to a log line.
+
+There is no request-signing scheme, and that is deliberate: a standard MCP
+client cannot sign its requests, so making a signature mandatory would
+break every client while a *replay* of a captured request stays possible
+either way. The controls that do work are the ones a deployment can
+actually operate: a token that can be rotated without downtime, credentials
+that can expire, credentials that can be revoked one client at a time, and
+per-client allowlists that bound what a leaked token can reach.
+
+### Protocol versions
+
+The server speaks both protocol eras at once, and the era a call arrived
+in is on the operator's log line for that call.
+
+**The legacy era** is the handshake-based one: `initialize` first, a
+`Mcp-Session-Id` for the calls that follow, and the protocol revision
+carried in the handshake. The revisions served are `2024-11-05`,
+`2025-03-26`, `2025-06-18`, `2025-11-25` and `2026-07-28`.
+
+**The modern era** is the stateless one: every request carries its own
+metadata, and there is no protocol session at all. A modern request must
+carry three headers — `MCP-Protocol-Version`, `Mcp-Method`, and, for the
+methods that address something by name (`tools/call`, `prompts/get`,
+`resources/read`), `Mcp-Name` — and the headers must agree with the body:
+
+| Mismatch | Answer |
+| --- | --- |
+| A required header is missing, or a header disagrees with the body | `-32020` (HeaderMismatch), HTTP `400` |
+| The revision is not one this server serves | `-32022` (UnsupportedProtocolVersionError), HTTP `400`, with `data.supported` (the revisions served) and `data.requested` (the one asked for) |
+| A method this server does not have | `-32601`, HTTP `404` |
+
+The modern era also adds the discovery method `server/discover`, and every
+result carries `resultType` (`complete`), `ttlMs` (`0`) and `cacheScope`
+(`session`).
+
+`FSQL_MCP_PROTOCOL_ERA` chooses what is served: `dual` (the default)
+serves both, `modern` serves the modern era only and refuses the legacy
+handshake. The tools, the arguments and the results are the same in both
+eras; only the framing differs.
+
+### Session state
+
+Two kinds of server-side state exist, and both are bounded.
+
+A **session-state handle** is an opaque 128-bit hex string the server
+mints. A caller that passes no handle gets one back in the result; a
+caller that passes one back keeps using the same engine state. The handle
+is bound to the credential that created it: a different token is told the
+handle does not exist, so a client can neither use nor probe for a handle
+it does not own.
+
+| Setting | Default | What it bounds |
+| --- | --- | --- |
+| `FSQL_MCP_SESSION_TTL_SECS` | 3600 | How long an idle handle survives. |
+| `FSQL_MCP_MAX_SESSIONS` | 64 | How many handles exist at once. |
+
+Expired handles are dropped together with the engine connections behind
+them, so neither the registry nor the connections behind it can grow
+without bound.
+
+### Data at rest
+
+The audit chain lives **inside the database file**, in the
+`fractalsql_ledger` table: one append-only row per entry, each row
+carrying the hash of the previous row, so a chain is verifiable on its own.
+Three things follow from that, and they are worth stating plainly.
+
+**There is no separate ledger file and no CSV mirror.** Everything the
+chain holds is in the database, which means the database file *is* the
+protected object: its permissions, its backups and its volume encryption
+are the whole story. Give the database file the same protection as the
+data it holds — `0600` for a file only its owner reads, and encryption at
+rest on the volume when the data warrants it.
+
+**There is no separate head record with its own MAC.** In deployments
+where the chain is a file, a head record can be kept outside it, so that
+deleting the tail of the chain is detectable. Here the head *is* the
+newest row of the table, so a separate head record would only duplicate
+state the chain already protects: whoever can write to the table can
+rewrite the head too. The protection against a truncated chain is
+therefore published off-host, which is what the anchor log is for.
+
+**The head can be published to a log you control.** With
+`FSQL_LEDGER_ANCHOR_LOG=stderr` (or `syslog` where the platform has one)
+the extension emits one JSON line on every append:
+
+```json
+{"event":"ledger_head","kind":2,"rows":17,"hash":"<hex of the newest entry hash>"}
+```
+
+`kind` is the chain, `rows` is how many rows that chain holds after the
+append, and `hash` is the newest entry hash. A chain whose tail was
+deleted no longer matches the last line published, so a truncation is
+visible from the log even though it is invisible from the database alone.
+The line is published as the row is appended, before the enclosing write
+transaction commits.
+
+**The text of an audit entry can be redacted.** The question an agent was
+asked, the SQL it generated, the analysis it wrote and the rows it read
+can all carry customer data. `FSQL_AUDIT_REDACT` decides what the chain
+keeps:
+
+| `FSQL_AUDIT_REDACT` | What is stored |
+| --- | --- |
+| `none` (default) | The text, as it is. |
+| `hash` | `sha256:<hex> len=<bytes>` — the fingerprint of the text and its length, so equal texts stay comparable and the length is known, but the text is not. |
+| `truncate` | The first 64 characters of the text. |
+
+Redaction reaches the fields nested inside the entry as well as the entry
+itself, and leaves everything else alone: identifiers, counts, statuses
+and the attribution block are stored as they are. The values returned to
+the caller are never redacted — the agent still answers with the real
+question, the real SQL and the real analysis; only what is persisted
+changes.
 
 ## Troubleshooting
 

@@ -82,7 +82,30 @@ die()  { local msg="$1"; err "${msg}"; exit 1; }
 # network, so all of them go through this wrapper, which pins curl to
 # https via --proto (same pin the release workflow's own downloads use).
 fetch() {
-    curl -fsSL --proto '=https' "$@"
+    curl -fsSL --proto '=https' "$@" || return $?
+    # Release assets are verified against the release's SHA256SUMS before anything installs them.
+    # Set FSQL_ALLOW_UNVERIFIED=1 only for a release that predates SHA256SUMS.
+    local url="" out="" prev="" a
+    for a in "$@"; do
+        [[ "$prev" == "-o" ]] && out="$a"
+        [[ "$a" == https://* ]] && url="$a"
+        prev="$a"
+    done
+    [[ -n "$url" && -n "$out" && "$url" == */releases/download/* && "${url##*/}" != "SHA256SUMS" ]] || return 0
+    local sums="${out}.SHA256SUMS.check" want got
+    if ! curl -fsSL --proto '=https' "${url%/*}/SHA256SUMS" -o "$sums" 2>/dev/null; then
+        rm -f "$sums"
+        if [[ "${FSQL_ALLOW_UNVERIFIED:-0}" == "1" ]]; then echo "WARNING: no SHA256SUMS for this release; installing unverified (FSQL_ALLOW_UNVERIFIED=1)" >&2; return 0; fi
+        echo "ERROR: ${url%/*}/SHA256SUMS could not be fetched; refusing to install an unverified download (set FSQL_ALLOW_UNVERIFIED=1 to override)" >&2
+        rm -f "$out"; return 1
+    fi
+    want="$(awk -v f="${url##*/}" '{n=$2; sub(/^\*/,"",n); if (n==f) {print $1; exit}}' "$sums")"
+    rm -f "$sums"
+    got="$(sha256sum "$out" 2>/dev/null | awk '{print $1}')"; [[ -n "$got" ]] || got="$(shasum -a 256 "$out" | awk '{print $1}')"
+    if [[ -z "$want" || "$want" != "$got" ]]; then
+        echo "ERROR: checksum mismatch or missing entry for ${url##*/} (expected '${want:-none}', got '$got'); removing the download" >&2
+        rm -f "$out"; return 1
+    fi
 }
 
 # --- /dev/tty-aware prompting --------------------------------------------
@@ -282,6 +305,9 @@ phase_b_install() {
                 "${TMP_DIR}/${asset%.tar.gz}/fractalsql.dylib" "${INSTALL_DIR}/"
             [[ "${DRY_RUN}" -eq 1 ]] || sudo install -m0755 \
                 "${TMP_DIR}/${asset%.tar.gz}/fractalsql-reasoning-http.so" "${INSTALL_DIR}/"
+            # The plugin loads only with its detached signature beside it.
+            [[ "${DRY_RUN}" -eq 1 ]] || sudo install -m0644 \
+                "${TMP_DIR}/${asset%.tar.gz}/fractalsql-reasoning-http.so.sig" "${INSTALL_DIR}/"
             ;;
         *)
             die "unsupported OS family: ${OS_FAMILY}"
@@ -462,6 +488,7 @@ uninstall_flow() {
         else
             sudo rm -f "${INSTALL_DIR}/fractalsql.${EXT_SUFFIX}" \
                        "${INSTALL_DIR}/fractalsql-reasoning-http.so" \
+                       "${INSTALL_DIR}/fractalsql-reasoning-http.so.sig" \
                        "${SNIPPET}"
             ok "Files removed. Nothing was registered anywhere else — SQLite extensions leave no other trace."
         fi

@@ -38,6 +38,8 @@ fractal_search(
 
 *SQLite difference:* the `iterations` / `population_size` / `diffusion_factor` tuning arguments are fixed at their SFS defaults here (`fractal_search` is a per-row scalar run once per distinct query per scan). Use `fractal_search_debug(query, ...)` when you need the tunable form.
 
+`iterations` x `population_size` x `diffusion_factor` x the vector length must not exceed 2,147,483,648 (about a minute of work) in one call; each limit is checked on its own and then their product, and a larger search is refused.
+
 ---
 
 ## `fractal_search_debug`

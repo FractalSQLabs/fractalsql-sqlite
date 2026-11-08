@@ -358,6 +358,7 @@ static void fsqlv_embed_fn(sqlite3_context *ctx, int argc,
                            sqlite3_value **argv) {
     (void)argc;
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
+    FSQL_REFUSE_IN_GENERATED_SQL(ctx, st, "fractal_embed");
 
     if (sqlite3_value_type(argv[0]) == SQLITE_NULL) {
         sqlite3_result_error(ctx, "fractal_embed: input must not be NULL",
@@ -723,6 +724,7 @@ static int fsqlv_backfill(const FsqlState *st, sqlite3_int64 vid,
 static void fsqlv_create_fn(sqlite3_context *ctx, int argc,
                             sqlite3_value **argv) {
     const FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
+    FSQL_REFUSE_IN_GENERATED_SQL(ctx, st, "fractal_vectorizer_create");
     char err[FSQLV_ERR_MAX];
     err[0] = '\0';
 
@@ -855,12 +857,16 @@ static void fsqlv_pause_resume_impl(sqlite3_context *ctx,
 static void fsqlv_pause_fn(sqlite3_context *ctx, int argc,
                            sqlite3_value **argv) {
     (void)argc;
+    FSQL_REFUSE_IN_GENERATED_SQL(ctx, (const FsqlState *)sqlite3_user_data(ctx),
+                                 "fractal_vectorizer_pause");
     fsqlv_pause_resume_impl(ctx, argv[0], 0, "fractal_vectorizer_pause");
 }
 
 static void fsqlv_resume_fn(sqlite3_context *ctx, int argc,
                             sqlite3_value **argv) {
     (void)argc;
+    FSQL_REFUSE_IN_GENERATED_SQL(ctx, (const FsqlState *)sqlite3_user_data(ctx),
+                                 "fractal_vectorizer_resume");
     fsqlv_pause_resume_impl(ctx, argv[0], 1, "fractal_vectorizer_resume");
 }
 
@@ -873,6 +879,7 @@ static void fsqlv_drop_fn(sqlite3_context *ctx, int argc,
                           sqlite3_value **argv) {
     (void)argc;
     const FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
+    FSQL_REFUSE_IN_GENERATED_SQL(ctx, st, "fractal_vectorizer_drop");
 
     if (sqlite3_value_type(argv[0]) == SQLITE_NULL) {
         sqlite3_result_error(ctx,
@@ -1076,7 +1083,7 @@ static void fsqlv_done_row(sqlite3_stmt *done_u, sqlite3_int64 qid) {
  * or SQL NULL; the text twin lives in the create section). */
 static int fsqlv_arg_int(int argc, sqlite3_value **argv, int i, int dflt) {
     return (argc > i && sqlite3_value_type(argv[i]) != SQLITE_NULL)
-         ? sqlite3_value_int(argv[i]) : dflt;
+         ? fsql_value_int(argv[i]) : dflt;
 }
 
 /* Stale reclaim: rows stranded in 'processing' by a caller that
@@ -1107,6 +1114,13 @@ static int fsqlv_reclaim_stale(FsqlState *st, int stale_secs,
         fsqlv_set_err(err, err_cap, "%s", sqlite3_errmsg(st->db));
         return -1;
     }
+    /* Retention: finished work is not kept forever. 'done' rows older than an hour and 'failed' rows older
+     * than a day are dropped on every pass, so the (temp) queue cannot grow without bound. Best effort. */
+    sqlite3_exec(st->db,
+        "DELETE FROM fractal_vectorizer_queue "
+        "WHERE (status='done'   AND updated_at < CAST(strftime('%s','now') AS INTEGER) - 3600) "
+        "   OR (status='failed' AND updated_at < CAST(strftime('%s','now') AS INTEGER) - 86400)",
+        NULL, NULL, NULL);
     return 0;
 }
 
@@ -1386,6 +1400,7 @@ static int fsqlv_process_one_row(FsqlState *st, sqlite3_stmt *row_q,
 static void fsqlv_process_fn(sqlite3_context *ctx, int argc,
                              sqlite3_value **argv) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
+    FSQL_REFUSE_IN_GENERATED_SQL(ctx, st, "fractal_vectorizer_process_queue");
     char err[FSQLV_ERR_MAX];
     err[0] = '\0';
 

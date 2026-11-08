@@ -458,11 +458,19 @@ to synthesize a read of the result. No vertical demo is wired to it.
 | `table_names` | `text[]` | `NULL` | the tables the agent may query |
 | `max_retries` | `int` | `2` | how many correction loops on EXPLAIN/execution failure |
 | `context` | `text` | `'{}'` | optional label passed to the reason call |
+| `auto_execute` | `int` | `0` | whether the generated SQL is actually run |
 
-**How it works.** (1) `fractal_sql_agent(question, table_names, max_retries, true)`:
-NL→SQL→execute with `auto_execute=true` so `result_json` carries the real row
-count (or a captured execution-failure reason); with `false`, `result_json` is
-always NULL. (2) `fractal_reason` writes a one-paragraph analysis over the result.
+**How it works.** (1) `fractal_sql_agent(question, table_names, max_retries, auto_execute)`:
+NL→SQL, with `auto_execute=1` so the statement is run and `result_json` carries
+the real row count (or a captured execution-failure reason); with `auto_execute=0`
+the statement is validated but not run and `result_json` is NULL. (2) `fractal_reason`
+writes a one-paragraph analysis over the result -- only when the statement was run.
+
+**Execution is opt-in.** The agent never runs a statement it generated unless the
+caller asks it to. The default call generates and validates the SQL and hands it
+back in `generated_sql`, so you can read it and run it yourself; `analysis` and
+`result_json` are then NULL. Pass `auto_execute` as `1` for the full
+NL→SQL→run→reason path.
 
 **Returns** `(analysis text, generated_sql text, result_json jsonb)`:
 `analysis` is the LLM's read; `generated_sql` and `result_json` are the SQL
@@ -479,7 +487,7 @@ INSERT INTO agents_demo_data VALUES
 SELECT analysis, generated_sql, result_json
 FROM fractal_agent_data_analyst(
     'total amount spent per category in agents_demo_data',
-    ARRAY['agents_demo_data'], 2);
+    ARRAY['agents_demo_data'], 2, '{}', 1);
 ```
 
 **Notes.** No empty-table guard: there is no fixed table to pre-check;
@@ -1155,6 +1163,10 @@ fractal_sql_agent(
 - `retry_count`: Number of correction loops performed.
 - `result_json`: JSON representation of the query results (if `auto_execute` was set).
 
+With `auto_execute`, the statement runs read-only, and while it runs the functions that change configuration, write to a table or call the reasoning endpoint refuse to run: `fractalsql_set`, the ledger write functions, `fractal_embed`, `fractal_reason`, the vectorizer functions and the agents themselves. A generated statement that calls one is reported as `"execution_failed"`.
+
+The agents that call the reasoning endpoint, and the functions that write, are not marked `SQLITE_INNOCUOUS`. On a connection with `trusted_schema` off, SQLite therefore refuses to run them inside a view, trigger or `CHECK` constraint; call them from a top-level statement instead.
+
 ### `fractal_agent_plan_explore`
 **Strategy Trajectory Exploration**
 
@@ -1169,7 +1181,7 @@ fractal_agent_plan_explore(
 ) RETURNS TEXT          -- one JSON document of explored branches
 ```
 
-`max_branches` is required (no default). `initial_state` is `text`: the
+`max_branches` is required (no default) and must be between 1 and 10,000. `initial_state` is `text`: the
 exploration seeds from the vector nearest to this state label, not from a
 raw vector. The function is NULL-propagating (the server edition marks it
 `STRICT`): a `NULL` argument returns `NULL` rather than executing.
@@ -1231,6 +1243,8 @@ fractal_agent_detect_loop(
     [, hamming_threshold int DEFAULT 0]]])
 RETURNS TEXT               -- one JSON document: {agent_id, dfa_exponent, is_loop_detected}
 ```
+
+`n_bits` must be between 1 and 33,554,424, and the whole log (`n_states * dim`) times `n_bits` must not exceed 268,435,456; a larger request is refused.
 
 `state_log` is the **flattened state-vector log** (row-major:
 `n_states * dim` doubles per call, the same flattening convention the
@@ -1375,16 +1389,18 @@ for `fractal_sql_agent`, and a copy-paste skeleton.
 
 ## Validate
 
-Gate 29 of `build_test.sh`/`build_test.ps1` smoke-tests three representative
+The `build_test.sh` / `build_test.ps1` harness smoke-tests three representative
 installable agents (`anomaly_triage`, `recall_hybrid`, `regime_triage`) end to
 end against a mock reasoning canary, covering the three composition shapes
-(table-backed + LLM, pure retrieval with a cohort filter, array-in + LLM); the
-existing gate 23 covers the six Universal Agents the same way. Run either with:
+(table-backed + LLM, pure retrieval with a cohort filter, array-in + LLM); a
+second phase covers the six Universal Agents the same way. Both run in the
+harness's default flow:
 
 ```sh
-./build_test.sh --gate 29
-./build_test.sh --gate 23
+./build_test.sh
 ```
+
+Use `./build_test.sh --list` to see the phases it runs.
 
 `demo/demo-agents.sql` exercises all sixteen installable agents end to end:
 each section runs its raw-primitive blueprint, then a `.print --- the shipped

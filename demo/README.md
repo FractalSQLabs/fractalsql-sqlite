@@ -202,8 +202,8 @@ build, active with a licensed enterprise core.
 > tampered bytes.
 >
 > **Concurrency / cross-session** coverage (parallel last-writer-wins
-> flush, and load-in-a-fresh-connection) is exercised by `build_test`
-> **gate 25** (`gate_25_enterprise_stress`), which drives a real
+> flush, and load-in-a-fresh-connection) is exercised by the `build_test`
+> harness's enterprise-stress phase, which drives a real
 > enterprise core through Python's `sqlite3` stdlib — not something a
 > single `.read` script can do without a scripting language's control
 > flow. This demo's own invariant checks (e.g. "expect truth=64

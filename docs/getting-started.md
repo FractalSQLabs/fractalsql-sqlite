@@ -256,6 +256,8 @@ tar xzf fractalsql-sqlite-2.0.5-darwin-arm64.tar.gz
 sudo mkdir -p /usr/local/lib/sqlite3
 sudo install -m0755 fractalsql.dylib /usr/local/lib/sqlite3/
 sudo install -m0755 fractalsql-reasoning-http.so /usr/local/lib/sqlite3/
+# the plugin loads only with its detached signature beside it
+sudo install -m0644 fractalsql-reasoning-http.so.sig /usr/local/lib/sqlite3/
 # then, per session: .load /usr/local/lib/sqlite3/fractalsql
 ```
 

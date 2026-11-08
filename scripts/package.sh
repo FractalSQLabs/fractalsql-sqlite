@@ -86,8 +86,15 @@ fi
 # provides it for this platform. Optional: a build without it still
 # exposes the full non-reasoning surface.
 PLUGIN_SRC="include/linux-${RPM_ARCH}/fractalsql-reasoning-http.so"
+PLUGIN_SIG="${PLUGIN_SRC}.sig"
 HAVE_PLUGIN=0
-if [[ -f "${PLUGIN_SRC}" ]]; then HAVE_PLUGIN=1; fi
+if [[ -f "${PLUGIN_SRC}" ]]; then
+    # The host loads the plugin only when its detached Ed25519 signature
+    # sits beside it, so a package must never carry one without the other.
+    [[ -f "${PLUGIN_SIG}" && "$(wc -c < "${PLUGIN_SIG}")" -eq 64 ]] \
+        || { echo "error: ${PLUGIN_SRC} has no valid ${PLUGIN_SIG} (64 bytes) -- re-run the vendored-artifact deploy step" >&2; exit 1; }
+    HAVE_PLUGIN=1
+fi
 
 # ---------------------------------------------------------------------
 # MCP server — produced by ../build.sh's Docker build (see header
@@ -112,6 +119,7 @@ trap 'rm -rf "${STAGE_ZIP}"' EXIT
 install -Dm0755 "${SO}"                  "${STAGE_ZIP}/fractalsql.so"
 if [[ "${HAVE_PLUGIN}" = "1" ]]; then
 install -Dm0755 "${PLUGIN_SRC}"          "${STAGE_ZIP}/fractalsql-reasoning-http.so"
+install -Dm0644 "${PLUGIN_SIG}"          "${STAGE_ZIP}/fractalsql-reasoning-http.so.sig"
 fi
 install -Dm0644 sql/load_extension.sql   "${STAGE_ZIP}/load_extension.sql"
 install -Dm0644 sql/fractalsql--1.0.sql  "${STAGE_ZIP}/fractalsql--1.0.sql"
@@ -174,7 +182,8 @@ DEB_ARGS=(
     ./THIRD-PARTY-NOTICES.md=/usr/share/doc/${DEB_NAME}/LICENSE-THIRD-PARTY
 )
 if [[ "${HAVE_PLUGIN}" = "1" ]]; then
-    DEB_ARGS+=(./${PLUGIN_SRC}=/usr/local/lib/sqlite3/fractalsql-reasoning-http.so)
+    DEB_ARGS+=(./${PLUGIN_SRC}=/usr/local/lib/sqlite3/fractalsql-reasoning-http.so
+               ./${PLUGIN_SIG}=/usr/local/lib/sqlite3/fractalsql-reasoning-http.so.sig)
 fi
 DEB_DEPENDS=(
     --depends "libc6 (>= ${GLIBC_DEP})"
@@ -182,10 +191,11 @@ DEB_DEPENDS=(
 )
 if [[ "${HAVE_MCP}" = "1" ]]; then
     DEB_ARGS+=(
+        # the two lock files go beside the binary: the server looks for them in its own directory
         ./${MCP_BIN}=/usr/local/bin/fractalsql-sqlite-mcp
         ./mcp/README.md=/usr/share/doc/${DEB_NAME}/mcp/README.md
-        ./mcp/.mcp-schema-lock=/usr/share/doc/${DEB_NAME}/mcp/.mcp-schema-lock
-        ./mcp/.mcp-safety-annotations-lock=/usr/share/doc/${DEB_NAME}/mcp/.mcp-safety-annotations-lock
+        ./mcp/.mcp-schema-lock=/usr/local/bin/.mcp-schema-lock
+        ./mcp/.mcp-safety-annotations-lock=/usr/local/bin/.mcp-safety-annotations-lock
         ./mcp/manifest.json=/usr/share/doc/${DEB_NAME}/mcp/manifest.json
     )
     # OR-dependency across the Debian/Ubuntu OpenSSL 3 SONAME split,
@@ -219,6 +229,8 @@ install -Dm0755 "${SO}" \
 if [[ "${HAVE_PLUGIN}" = "1" ]]; then
 install -Dm0755 "${PLUGIN_SRC}" \
     "${STAGE_PKG}/usr/local/lib/sqlite3/fractalsql-reasoning-http.so"
+install -Dm0644 "${PLUGIN_SIG}" \
+    "${STAGE_PKG}/usr/local/lib/sqlite3/fractalsql-reasoning-http.so.sig"
 fi
 install -Dm0644 sql/load_extension.sql \
     "${STAGE_PKG}/usr/share/doc/${RPM_NAME}/load_extension.sql"
@@ -235,9 +247,9 @@ install -Dm0755 "${MCP_BIN}" \
 install -Dm0644 mcp/README.md \
     "${STAGE_PKG}/usr/share/doc/${RPM_NAME}/mcp/README.md"
 install -Dm0644 mcp/.mcp-schema-lock \
-    "${STAGE_PKG}/usr/share/doc/${RPM_NAME}/mcp/.mcp-schema-lock"
+    "${STAGE_PKG}/usr/local/bin/.mcp-schema-lock"
 install -Dm0644 mcp/.mcp-safety-annotations-lock \
-    "${STAGE_PKG}/usr/share/doc/${RPM_NAME}/mcp/.mcp-safety-annotations-lock"
+    "${STAGE_PKG}/usr/local/bin/.mcp-safety-annotations-lock"
 install -Dm0644 mcp/manifest.json \
     "${STAGE_PKG}/usr/share/doc/${RPM_NAME}/mcp/manifest.json"
 fi

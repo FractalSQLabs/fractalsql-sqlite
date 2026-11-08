@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Daniel Gardiner d/b/a FractalSQLabs
 #include "tool_registry.h"
 
+#include <exception>
+
 namespace fsqlmcp
 {
     // validate -> handler -> classify -> always log (13.3.3). Tool-level errors
@@ -15,14 +17,19 @@ namespace fsqlmcp
         {
             const ToolSpec& spec; const Json& args; const char*& errClass;
             std::chrono::steady_clock::time_point t0;
+            const std::string& clientKey;
+            const std::string& era;
             ~LogGuard()
             {
                 const double ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0 ).count();
-                logging::toolCall( spec.name, logging::redactAndCap( args ), ms, errClass );
+                logging::toolCall( spec.name, logging::redactAndCap( args ), ms, errClass, clientKey, era );
             }
-        } guard{ spec, args, errClass, t0 };
+        } guard{ spec, args, errClass, t0, ctx.clientKey, ctx.era };
 
+        // The error is rethrown after the handlers, never from inside one: a throw
+        // from a catch block miscompiles under clang on Windows (MSVC unwinder crash).
+        std::exception_ptr pending;
         try
         {
             validateArgs( spec, args );
@@ -34,14 +41,15 @@ namespace fsqlmcp
         catch( const ToolError& e )
         {
             errClass = errorClassName( e.errorClass );
-            throw;
+            pending = std::current_exception();
         }
         catch( const std::exception& e )
         {
             errClass = errorClassName( ErrorClass::ServerInternal );
             logging::exceptionDetail( spec.name, sanitizeSecrets( e.what() ) );
-            throw ToolError( ErrorClass::ServerInternal, "internal error",
-                             sanitizeSecrets( e.what() ) );
+            pending = std::make_exception_ptr( ToolError( ErrorClass::ServerInternal, "internal error",
+                                                          sanitizeSecrets( e.what() ) ) );
         }
+        std::rethrow_exception( pending );
     }
 }

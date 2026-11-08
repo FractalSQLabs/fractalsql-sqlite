@@ -296,6 +296,8 @@
 #   ./build_test.sh --quick
 #   ./build_test.sh --fuzz          # gate 21 only -- libFuzzer smoke
 #   ./build_test.sh --gate 04
+#   ./build_test.sh --gate mcp      # only the MCP server gates (37 38 40 41 42);
+#                                    # combine with --asan/--ubsan/--tsan/--coverage
 #   ./build_test.sh --asan          # or --ubsan, composable with each other
 #   ./build_test.sh --tsan          # NOT composable with --asan (see note)
 #   ./build_test.sh --coverage      # gcov-instrumented build; DEFAULT
@@ -400,6 +402,8 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
+# Test fixtures load unsigned mock reasoning plugins; the product default (a valid signature required) is bypassed explicitly here.
+export FSQL_REASONING_REQUIRE_SIGNATURE="${FSQL_REASONING_REQUIRE_SIGNATURE:-0}"
 
 # Captured before the arg-parsing loop below consumes $@ via `shift` --
 # needed later to re-exec this same invocation under setarch (--tsan
@@ -474,9 +478,9 @@ wpath() {
   fi
 }
 
-DEFAULT_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 31 32 34 35 36 37 38 39 40 41 42 43)
+DEFAULT_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 31 32 34 35 36 37 38 39 40 41 42 43 45 46)
 QUICK_GATES=(01 02)
-FUZZ_GATES=(21)
+FUZZ_GATES=(21 44)
 
 MODE="default"
 ONE_GATE=""
@@ -1163,9 +1167,9 @@ gate_01_build() {
 
 gate_02_smoke() {
   local ver; ver=$(sqlq "SELECT fractalsql_version();")
-  [[ "$ver" = "2.0.11" ]] \
+  [[ "$ver" = "2.0.12" ]] \
     && pass "02 smoke: version=$ver" \
-    || fail "02 smoke: version='$ver' (want 2.0.11)"
+    || fail "02 smoke: version='$ver' (want 2.0.12)"
   # fractal_search convergence: self-distance ~0
   local d; d=$(sqlq "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');")
   if [[ "$d" = "0.0" ]] || python_abs_lt_1e6 "$d"; then
@@ -1349,6 +1353,31 @@ gate_04_text_to_sql() {
   [[ $? -eq 0 ]] \
     && pass "04 auto-discovery: text_to_sql off the auto-built context" \
     || fail "04 auto-discovery: got '$auto'"
+  # Model-generated SQL run by fractal_sql_agent(auto_execute) must not reach
+  # the functions that change configuration. The model's reply is a SELECT:
+  # read-only, so it passes validation, but it calls fractalsql_set.
+  printf '%s' "SELECT fractalsql_set('text_to_sql_max_attempts','9')" > "$SQLTXT"
+  local gen; gen=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractalsql_set('text_to_sql_max_attempts','1');" \
+    "SELECT fractal_sql_agent('q', NULL, 1, 1);" \
+    "SELECT fractalsql_get('text_to_sql_max_attempts');")
+  if grep -q '"execution_status":"execution_failed"' <<< "$gen" \
+      && [[ "$(tail -n 1 <<< "$gen")" = "1" ]]; then
+    pass "04 model-generated SQL cannot change configuration (auto_execute)"
+  else
+    fail "04 model-generated SQL reached fractalsql_set: $gen"
+  fi
+  # Control: the same path does run a harmless generated SELECT, so the
+  # refusal above is the guard and not a broken auto_execute.
+  printf '%s' "SELECT count(*) FROM bt_orders" > "$SQLTXT"
+  gen=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractalsql_set('text_to_sql_max_attempts','1');" \
+    "SELECT fractal_sql_agent('q', NULL, 1, 1);")
+  grep -q '"execution_status":"executed"' <<< "$gen" \
+    && pass "04 auto_execute still runs a harmless generated SELECT" \
+    || fail "04 auto_execute control: got '$gen'"
 }
 
 # Guard-page plugin: the response is deliberately NOT NUL-terminated and
@@ -1632,9 +1661,7 @@ gate_11_scout() {
     grep <<< "$r" -q "population" \
       && pass "11 scout: population key present (python absent, JSON unverified)" \
       || fail "11 scout: no population key: $r"
-    return
-  fi
-  if "$PY" -c '
+  elif "$PY" -c '
 import json, sys
 d = json.loads(sys.stdin.read())
 pop = d.get("population")
@@ -1653,6 +1680,29 @@ print("ok: %d population points, %d distinct x-groups" % (len(pop), len(groups))
   [[ $? -eq 0 ]] \
     && pass "11 scout: options-JSON variant accepted" \
     || fail "11 scout: options variant failed: $r"
+  # The same corpus in the canonical fractal_vector form, which is what
+  # the constructors write: the search functions read that form too.
+  r=$(sqlq "CREATE TABLE bt_explore_fv(v BLOB);
+            INSERT INTO bt_explore_fv(v)
+            SELECT fractal_vector_from_text(embedding) FROM bt_explore;
+            SELECT fractal_search_explore(v, '1.0,0.05,0.0,0.0') FROM bt_explore_fv;")
+  if [[ $? -ne 0 ]]; then
+    fail "11 scout: fractal_search_explore failed on a canonical fractal_vector column: $r"
+  elif [[ -z "$PY" ]]; then
+    grep <<< "$r" -q "population" \
+      && pass "11 scout: canonical fractal_vector column accepted (python absent, JSON unverified)" \
+      || fail "11 scout: no population key from the canonical column: $r"
+  elif "$PY" -c '
+import json, sys
+d = json.loads(sys.stdin.read())
+pop = d.get("population")
+assert pop and len(pop) >= 5, "population missing/short: %s" % (pop and len(pop))
+print("ok: %d population points from the canonical column" % (len(pop),))
+' <<< "$r"; then
+    pass "11 scout: canonical fractal_vector column searched and returned a population"
+  else
+    fail "11 scout: canonical fractal_vector column check failed: $r"
+  fi
 }
 
 write_py_gate12() {
@@ -2440,7 +2490,11 @@ gate_20_api_func() {
 #      versioned sibling does.
 # $FSQL_FUZZ_CC is still an explicit override (trusted as given, not
 # probed) for a caller who already knows which clang to use.
+# $1 is the -fsanitize= list the caller will build with (default "fuzzer"):
+# the probe links with the same list, so a clang that has libFuzzer but not
+# the ASan/UBSan runtimes is skipped by the probe instead of failing the build.
 find_fuzz_clang() {
+  local san="${1:-fuzzer}"
   if [[ -n "${FSQL_FUZZ_CC:-}" ]]; then
     printf '%s' "$FSQL_FUZZ_CC"
     return 0
@@ -2453,7 +2507,7 @@ find_fuzz_clang() {
               /opt/homebrew/opt/llvm/bin/clang /usr/local/opt/llvm/bin/clang; do
     command -v "$cand" >/dev/null 2>&1 || continue
     real="$(command -v "$cand")"
-    if "$real" -fsanitize=fuzzer -O0 -x c - -o "$PDIRW/fuzz_probe$PLUGSUF" \
+    if "$real" -fsanitize="$san" -O0 -x c - -o "$PDIRW/fuzz_probe$PLUGSUF" \
          >/dev/null 2>&1 <<<'#include <stdint.h>
 #include <stddef.h>
 int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n){(void)d;(void)n;return 0;}'; then
@@ -2466,14 +2520,20 @@ int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n){(void)d;(void)n;return 0;
 
 gate_21_fuzz_smoke() {
   local fuzzcc
-  if ! fuzzcc="$(find_fuzz_clang)"; then
-    skip "21 fuzz_smoke (no clang on PATH with a working -fsanitize=fuzzer; checked \$FSQL_FUZZ_CC, clang, clang-15..19, and common LLVM install paths)"; return
+  # The parser targets are built with ASan and UBSan: libFuzzer alone only
+  # finds crashes and hangs, while a parser's real bugs are silent heap
+  # overreads and undefined behavior. UBSan is built non-recovering so a
+  # finding aborts the run (libFuzzer then reports it as a crash with an
+  # artifact) instead of printing a line and carrying on to a pass.
+  local fz_san="fuzzer,address,undefined"
+  if ! fuzzcc="$(find_fuzz_clang "$fz_san")"; then
+    skip "21 fuzz_smoke (no clang on PATH that links -fsanitize=$fz_san; checked \$FSQL_FUZZ_CC, clang, clang-15..19, and common LLVM install paths)"; return
   fi
   local t src rc
   for t in fuzz_parse_embedding_array fuzz_extract_best_point \
            fuzz_extract_population; do
     src="tests/fuzz/$t.c"
-    if ! "$fuzzcc" -O1 -g -fsanitize=fuzzer -Iinclude -Isrc \
+    if ! "$fuzzcc" -O1 -g -fsanitize="$fz_san" -fno-sanitize-recover=undefined -Iinclude -Isrc \
           "$src" src/fsql_parse.c -o "$PDIRW/$t" \
           >"$PDIR/$t.log" 2>&1; then
       fail "21 fuzz_smoke: $t failed to build; see $PDIR/$t.log"
@@ -2487,11 +2547,100 @@ gate_21_fuzz_smoke() {
     mkdir -p "$PDIR/${t}_seed"
     "$PDIRW/$t" tests/fuzz/corpus_extract_population "$PDIRW/${t}_seed" \
       -max_total_time="${FSQL_FUZZ_TIME:-30}" -print_final_stats=1 \
+      -artifact_prefix="$PDIR/$t." \
       >"$PDIR/$t.run.log" 2>&1 || rc=$?
     if [[ $rc -eq 0 ]]; then
-      pass "21 fuzz_smoke: $t (${FSQL_FUZZ_TIME:-30}s, corpus-seeded)"
+      pass "21 fuzz_smoke: $t (${FSQL_FUZZ_TIME:-30}s, corpus-seeded, ASan+UBSan)"
     else
       fail "21 fuzz_smoke: $t exited rc=$rc; see $PDIR/$t.run.log"
+      tail -5 "$PDIR/$t.run.log" 2>/dev/null | sed 's/^/         /'
+    fi
+  done
+}
+
+# ----------------------------------------------------------------------
+# gate 44: mcp_fuzz (FUZZ ONLY, --fuzz). libFuzzer over the MCP server's two
+# client-facing surfaces, built with ASan alongside libFuzzer:
+#   fuzz_mcp_vectors  the argument coercion (mcp/src/vectors.cpp) and the
+#                     secret redaction applied to engine error text
+#                     (sanitizeSecrets in mcp/src/errors.cpp)
+#   fuzz_mcp_jsonrpc  JsonRpcServer::handleLine, the entry point both
+#                     transports feed every client line to, with two stub
+#                     tools so no database is needed
+# Seeded from tests/fuzz/corpus_mcp_*/. Linux and macOS; skips without a
+# clang that can link -fsanitize=fuzzer (same probe as gate 21).
+# ----------------------------------------------------------------------
+gate_44_mcp_fuzz() {
+  if [[ ! -f "$HERE/tests/fuzz/fuzz_mcp_jsonrpc.cpp" || ! -f "$HERE/mcp/src/main.cpp" ]]; then
+    skip "44 mcp_fuzz (mcp/ server code or fuzz targets not present)"; return
+  fi
+  if [[ "$IS_MSYS" -eq 1 ]]; then
+    skip "44 mcp_fuzz (POSIX only; Windows runs -Fuzz through build_test.ps1)"; return
+  fi
+  local fuzzcc
+  # ASan and UBSan, as gate 21: the server's JSON and vector parsers are where a silent overread
+  # or undefined behavior would hide. UBSan is non-recovering so a finding aborts the run.
+  local fz_san="fuzzer,address,undefined"
+  if ! fuzzcc="$(find_fuzz_clang "$fz_san")"; then
+    skip "44 mcp_fuzz (no clang on PATH that links -fsanitize=$fz_san; checked \$FSQL_FUZZ_CC, clang, clang-15..19, and common LLVM install paths)"; return
+  fi
+  local fuzzcxx="${fuzzcc/clang/clang++}"
+  if ! command -v "$fuzzcxx" >/dev/null 2>&1; then
+    skip "44 mcp_fuzz (no $fuzzcxx next to $fuzzcc)"; return
+  fi
+  local mflags=(-std=c++17 -O1 -g -fsanitize="$fz_san" -fno-sanitize-recover=undefined -Imcp/src -Imcp/vendor -Ideps/sqlite)
+  # std::to_chars(double) in mcp/src/vectors.cpp needs macOS >= 13.3 (see mcp/Makefile)
+  [[ "$(uname -s)" = "Darwin" ]] && mflags+=(-mmacosx-version-min=13.3)
+  # The JSON-RPC target links the server, which links the vendored SQLite
+  # amalgamation (db.h); build that once, plain.
+  local sqlobj="$PDIR/fuzz_mcp_sqlite3.o"
+  if ! "$fuzzcc" -O1 -c -fPIC -DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_LOAD_EXTENSION=1 \
+        deps/sqlite/sqlite3.c -o "$sqlobj" >"$PDIR/fuzz_mcp_sqlite3.log" 2>&1; then
+    fail "44 mcp_fuzz: the SQLite amalgamation failed to build; see $PDIR/fuzz_mcp_sqlite3.log"; return
+  fi
+  local libs=(-lssl -lcrypto -lpthread -ldl)
+  if [[ "$(uname -s)" = "Darwin" ]]; then
+    local openssl_prefix; openssl_prefix="$(brew --prefix openssl@3 2>/dev/null || true)"
+    [[ -n "$openssl_prefix" ]] && mflags+=(-I"${openssl_prefix}/include") && libs=(-L"${openssl_prefix}/lib" "${libs[@]}")
+  fi
+  # The JSON-RPC target compiles mcp/src/logging.cpp (<openssl/evp.h>) and
+  # links -lssl/-lcrypto, so the OpenSSL development files have to be
+  # there. Without them the compile dies with an opaque "openssl/evp.h: No
+  # such file or directory" -- name the missing package instead.
+  local ossl_probe_flags=""
+  [[ "$(uname -s)" = "Darwin" ]] && {
+    local openssl_prefix; openssl_prefix="$(brew --prefix openssl@3 2>/dev/null || true)"
+    [[ -n "$openssl_prefix" ]] && ossl_probe_flags="-I${openssl_prefix}/include -L${openssl_prefix}/lib"
+  }
+  if ! mcp_openssl_dev_present "$ossl_probe_flags"; then
+    skip "44 mcp_fuzz (OpenSSL development headers not found -- install libssl-dev (Debian/Ubuntu) or openssl-devel (Fedora/RHEL))"; return
+  fi
+  local t rc
+  for t in fuzz_mcp_vectors fuzz_mcp_jsonrpc; do
+    local srcs=(mcp/src/errors.cpp)
+    if [[ "$t" = fuzz_mcp_vectors ]]; then
+      srcs+=(mcp/src/vectors.cpp)
+    else
+      srcs+=(mcp/src/jsonrpc_server.cpp mcp/src/tool_registry.cpp mcp/src/logging.cpp
+             mcp/src/prompts.cpp mcp/src/resources.cpp "$sqlobj")
+    fi
+    if ! "$fuzzcxx" "${mflags[@]}" -DFSQL_MCP_VERSION='"fuzz"' \
+          "tests/fuzz/$t.cpp" "${srcs[@]}" "${libs[@]}" -o "$PDIRW/$t" \
+          >"$PDIR/$t.log" 2>&1; then
+      fail "44 mcp_fuzz: $t failed to build; see $PDIR/$t.log"
+      continue
+    fi
+    mkdir -p "$PDIR/${t}_seed"
+    rc=0
+    ASAN_OPTIONS="detect_leaks=0:abort_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" \
+      "$PDIRW/$t" "$PDIRW/${t}_seed" "tests/fuzz/corpus_${t#fuzz_}" \
+      -max_total_time="${FSQL_FUZZ_TIME:-30}" -print_final_stats=1 \
+      -artifact_prefix="$PDIR/$t." \
+      >"$PDIR/$t.run.log" 2>&1 || rc=$?
+    if [[ $rc -eq 0 ]]; then
+      pass "44 mcp_fuzz: $t (${FSQL_FUZZ_TIME:-30}s, corpus-seeded, ASan+UBSan)"
+    else
+      fail "44 mcp_fuzz: $t exited rc=$rc; see $PDIR/$t.run.log"
       tail -5 "$PDIR/$t.run.log" 2>/dev/null | sed 's/^/         /'
     fi
   done
@@ -2551,7 +2700,7 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
   else
     fail "22 v2_functions: boxcount happy path: $r"
   fi
-  if expect_err "need >= 8 points" \
+  if expect_err "need >= 8 finite points" \
       "SELECT fractal_dimension_boxcount('0,0,1,0,0,1,1,1', 2);"; then
     pass "22 v2_functions: degenerate boxcount rejected"
   else
@@ -2992,7 +3141,7 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
   else
     fail "22 v2_functions: state_fingerprint: $r"
   fi
-  if expect_err "n_bits must be > 0" \
+  if expect_err "n_bits must be between 1 and" \
       "SELECT fractal_state_fingerprint('1.0,0.0,0.0', 0);"; then
     pass "22 v2_functions: state_fingerprint rejects n_bits<=0"
   else
@@ -3019,7 +3168,7 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
   else
     fail "22 v2_functions: cycle_detect: $r"
   fi
-  if expect_err "n_bits must be > 0" \
+  if expect_err "n_bits must be between 1 and" \
       "SELECT fractal_cycle_detect('[]', 0);"; then
     pass "22 v2_functions: cycle_detect rejects n_bits<=0"
   else
@@ -3730,6 +3879,100 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
     fail "22 v2_functions: search_explore accepted a dim-mismatched row"
   fi
   sqlq "DROP TABLE IF EXISTS bt_v22_explore;" >/dev/null 2>&1
+
+  # Integer arguments past int range. SQL integers are narrowed to 32 bits for
+  # the range checks, so a value that wraps back into range (2^32 plus a valid
+  # value) must be refused, not run as the smaller value. Each row is
+  # "label|call with {N} for the argument|a valid value of it".
+  local wrap_rows=(
+    "drift window|SELECT fractal_dimension_drift('$s200', {N});|64"
+    "boxcount dim|SELECT fractal_dimension_boxcount('$boxpts', {N});|2"
+    "morphology dim|SELECT fractal_morphological_complexity('$boxpts', {N});|2"
+    "spectrogram window|SELECT fractal_spectrogram_entropy('2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2',{N},8);|8"
+    "change_point window|SELECT fractal_change_point_detect('1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0', {N}, 1.0);|10"
+    "optimize_subset k|SELECT fractal_optimize_subset('10,9,8,7,6,5,4,3,2,1','1,1,1,1,1,1,1,1,1,1',{N});|5"
+    "search_debug iterations|SELECT fractal_search_debug('1.0,0.0,0.0',{N},50,2);|30"
+    "search_debug population|SELECT fractal_search_debug('1.0,0.0,0.0',30,{N},2);|50"
+    "search_debug diffusion|SELECT fractal_search_debug('1.0,0.0,0.0',30,50,{N});|2"
+    "state_fingerprint n_bits|SELECT length(fractal_state_fingerprint('1.0,0.0,0.0', {N}));|64"
+  )
+  local wrap_row wrap_label wrap_sql wrap_base wrap_val wrap_out wrap_rc wrap_bad=()
+  for wrap_row in "${wrap_rows[@]}"; do
+    IFS='|' read -r wrap_label wrap_sql wrap_base <<< "$wrap_row"
+    if ! sqlq "${wrap_sql//\{N\}/$wrap_base}" >/dev/null 2>&1; then
+      wrap_bad+=("$wrap_label: the valid value $wrap_base was refused"); continue
+    fi
+    wrap_val=$((wrap_base + 4294967296))
+    wrap_out=$(sqlq "${wrap_sql//\{N\}/$wrap_val}"); wrap_rc=$?
+    if crashed "$wrap_out" "$wrap_rc"; then
+      wrap_bad+=("$wrap_label: $wrap_val crashed the process")
+    elif [[ $wrap_rc -eq 0 ]]; then
+      wrap_bad+=("$wrap_label: $wrap_val ran as $wrap_base")
+    fi
+  done
+  if [[ ${#wrap_bad[@]} -eq 0 ]]; then
+    pass "22 v2_functions: ${#wrap_rows[@]} integer arguments reject a value that wraps back into range"
+  else
+    fail "22 v2_functions: integer arguments past int range: ${wrap_bad[*]}"
+  fi
+  if expect_err "n_bits must be between 1 and 33554424" \
+      "SELECT fractal_state_fingerprint('1.0,0.0,0.0', 33554425);"; then
+    pass "22 v2_functions: state_fingerprint refuses an n_bits past the 4 MiB ceiling"
+  else
+    fail "22 v2_functions: state_fingerprint accepted an n_bits past the ceiling"
+  fi
+  # The cost is n_bits x vector length, so that product is bounded as well.
+  if expect_err "n_bits x vector length must not exceed 268435456" \
+      "SELECT fractal_state_fingerprint('1,2,3,4,5,6,7,8,9', 33554424);"; then
+    pass "22 v2_functions: state_fingerprint refuses a fingerprint whose n_bits x length is past the work bound"
+  else
+    fail "22 v2_functions: state_fingerprint accepted n_bits x length past the work bound"
+  fi
+  if expect_err "n_bits must be between 1 and 33554424" \
+      "SELECT fractal_agent_detect_loop('a','1,2,3,4,5,6',3,33554425);"; then
+    pass "22 v2_functions: agent_detect_loop refuses an n_bits past the ceiling"
+  else
+    fail "22 v2_functions: agent_detect_loop accepted an n_bits past the ceiling"
+  fi
+  if expect_err "item count x k must not exceed 16777216" \
+      "WITH RECURSIVE g(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM g WHERE i<6000) SELECT fractal_optimize_subset((SELECT group_concat(5,',') FROM g), (SELECT group_concat(1,',') FROM g), 3000);"; then
+    pass "22 v2_functions: optimize_subset refuses items x k past the work bound"
+  else
+    fail "22 v2_functions: optimize_subset accepted items x k past the work bound"
+  fi
+  if expect_err "series longer than 1048576 samples" \
+      "WITH RECURSIVE g(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM g WHERE i<1048577) SELECT fractal_periodogram((SELECT group_concat(i%7,',') FROM g), 3);"; then
+    pass "22 v2_functions: periodogram refuses a series past 1048576 samples"
+  else
+    fail "22 v2_functions: periodogram accepted a series past 1048576 samples"
+  fi
+  if expect_err "malformed points" \
+      "WITH RECURSIVE g(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM g WHERE i<4194306) SELECT fractal_dimension_boxcount((SELECT group_concat(i%97,',') FROM g), 2);"; then
+    pass "22 v2_functions: boxcount refuses a point cloud past the 4 MiB input cap"
+  else
+    fail "22 v2_functions: boxcount accepted a point cloud past the 4 MiB input cap"
+  fi
+  if expect_err "fractalsql" \
+      "SELECT fractal_dimension_boxcount('0,0,1,0,0,1,1,1,2,2,3,1,1,3,4,4,nan,5', 2);"; then
+    pass "22 v2_functions: boxcount refuses a non-finite coordinate"
+  else
+    fail "22 v2_functions: boxcount accepted a non-finite coordinate"
+  fi
+  local big_dim; big_dim=$(awk 'BEGIN{for(i=0;i<1000;i++)printf "%s0.5",(i?",":"")}')
+  if expect_err "search too large" \
+      "SELECT fractal_search_debug('$big_dim',1000,1000,8);"; then
+    pass "22 v2_functions: search_debug refuses iterations x population x diffusion x dim past the work bound"
+  else
+    fail "22 v2_functions: search_debug accepted a search past the work bound"
+  fi
+  if expect_err "population_size 1 out of range [2, 10000]" \
+      "SELECT fractal_search_debug('1.0,0.0,0.0',30,1,2);" \
+      && expect_err "population_size 10001 out of range [2, 10000]" \
+      "SELECT fractal_search_debug('1.0,0.0,0.0',30,10001,2);"; then
+    pass "22 v2_functions: search_debug reports the core's population range (2..10000)"
+  else
+    fail "22 v2_functions: search_debug population range is not the core's"
+  fi
 }
 
 gate_23_agents() {
@@ -4075,7 +4318,7 @@ gate_23_agents() {
     "dim must be > 0" \
     "SELECT fractal_agent_detect_loop('agent-t4', '1.0,0.0,0.0,1.0', 0);"
   agent_err "detect_loop n_bits must be positive" \
-    "n_bits must be > 0" \
+    "n_bits must be between 1 and" \
     "SELECT fractal_agent_detect_loop('agent-t4', '1.0,0.0,0.0,1.0', 2, 0);"
   agent_err "detect_loop hamming_threshold must be non-negative" \
     "hamming_threshold must be >= 0" \
@@ -4313,7 +4556,7 @@ gate_24_enterprise() {
     local empty_so="$PDIRW/empty_lib$PLUGSUF"
     if "$CC" -shared -fPIC -std=c99 -x c /dev/null -o "$empty_so" \
           >"$PDIRW/empty_lib_build.log" 2>&1; then
-      if FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 expect_err "missing expected enterprise symbols" \
+      if FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 expect_err "missing expected enterprise symbols" \
           "SELECT fractalsql_set('enterprise_lib','$empty_so');" \
           "SELECT fractal_ledger_flush();"; then
         pass "24 enterprise: a symbol-less .so dlopens cleanly but is rejected and closed"
@@ -4330,7 +4573,7 @@ gate_24_enterprise() {
   # ---- mock enterprise core: the active-tier success/failure paths --
   # tests/mock_enterprise_core.c is a test-only stand-in for the real,
   # licensed core (same 8+3-symbol dlsym surface fsql_enterprise.c
-  # expects), unsigned -- loaded via FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1,
+  # expects), unsigned -- loaded via FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0,
   # the same dev-drop bypass gate 25 uses for a real core. This is the
   # only place any of this is exercised: without it, every ledger/
   # portfolio-multimodal UDF's resolved-pointer success branch is dead
@@ -4345,7 +4588,7 @@ gate_24_enterprise() {
             fractal_ledger_reset_soft fractal_ledger_reset_hard \
             fractal_ledger_load; do
     local r
-    r=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+    r=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
       "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
       "SELECT $fn();")
     if [[ $? -eq 0 ]]; then
@@ -4357,13 +4600,13 @@ gate_24_enterprise() {
   # fractalsql_set() itself returns "ok" as a visible row, so a
   # multi-statement sqlq call's output is "ok"\n<actual result> --
   # tail -n1 the way every exact-equality check below does.
-  local tc; tc=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+  local tc; tc=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
     "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
     "SELECT fractal_ledger_truth_count();" | tail -n1)
   [[ "$tc" = "0" ]] \
     && pass "24 enterprise: truth_count succeeds while the mock is loaded" \
     || fail "24 enterprise: expected 0 from truth_count, got: $tc"
-  local sc; sc=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+  local sc; sc=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
     "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
     "SELECT fractal_ledger_shadow_count();" | tail -n1)
   [[ "$sc" = "0" ]] \
@@ -4375,7 +4618,7 @@ gate_24_enterprise() {
   # header for why a file, not a value, is the toggle).
   local sentinel="$PDIR/fractalsql_bt_mock_ent_fail"
   rm -f "$sentinel"; touch "$sentinel"
-  local rf; rf=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 FSQL_MOCK_ENT_FAIL="$sentinel" sqlq \
+  local rf; rf=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 FSQL_MOCK_ENT_FAIL="$sentinel" sqlq \
     "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
     "SELECT fractal_ledger_flush();")
   local rfrc=$?
@@ -4389,7 +4632,7 @@ gate_24_enterprise() {
   # Portfolio multimodal family (both optional symbols present in the
   # mock: the UDF prefers _ex when available, so this also exercises
   # that resolved-pointer branch, not just the plain symbol).
-  local pm; pm=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+  local pm; pm=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
     "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
     "SELECT json_extract(fractal_optimize_portfolio_multimodal(
        '0.1,0.05','0.04,0.01,0.01,0.03',1,2),'\$.n_found');" | tail -n1)
@@ -4399,7 +4642,7 @@ gate_24_enterprise() {
   # min registered arity is 4 (mu,cov,k,n_restarts); max_front defaults
   # to 8, so n_restarts must be >= 8 unless max_front is also given --
   # pass both explicitly (2,2) to keep max_front<=n_restarts trivially.
-  local pmp; pmp=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+  local pmp; pmp=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
     "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
     "SELECT json_extract(fractal_optimize_portfolio_multimodal_pareto(
        '0.1,0.05','0.04,0.01,0.01,0.03',1,2,2),'\$.n_found');" | tail -n1)
@@ -4410,13 +4653,13 @@ gate_24_enterprise() {
   # fractal_audit_unpack: a direct decode call. The mock's audit_unpack
   # is a pure echo (its own header comment), so round-tripping a blob
   # through it is an exact equality check.
-  local au; au=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+  local au; au=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
     "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
     "SELECT fractal_audit_unpack('hello world') = 'hello world';" | tail -n1)
   [[ "$au" = "1" ]] \
     && pass "24 enterprise: audit_unpack round-trips a payload through the mock" \
     || fail "24 enterprise: expected audit_unpack to echo the payload back exactly, got: $au"
-  local aun; aun=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+  local aun; aun=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
     "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
     "SELECT fractal_audit_unpack(NULL);" | tail -n1)
   [[ -z "$aun" ]] \
@@ -4433,7 +4676,7 @@ gate_24_enterprise() {
   # actually passed (NULL/omitted defaults to 'gaussian' without
   # parsing it at all) -- 'levy' exercises the accept branch, a bogus
   # value the reject branch.
-  local dm; dm=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+  local dm; dm=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
     "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
     "SELECT json_extract(fractal_optimize_portfolio_multimodal(
        '0.1,0.05','0.04,0.01,0.01,0.03',1,2,0.15,0.9,NULL,0,'levy'),'\$.n_found');" | tail -n1)
@@ -4442,7 +4685,7 @@ gate_24_enterprise() {
     || fail "24 enterprise: expected n_found=1 with diffusion_mode=levy, got: $dm"
   # pareto has its own separate parse_diffusion_mode call site --
   # untested until now even though multimodal's is covered above.
-  local dmp; dmp=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+  local dmp; dmp=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
     "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
     "SELECT json_extract(fractal_optimize_portfolio_multimodal_pareto(
        '0.1,0.05','0.04,0.01,0.01,0.03',1,2,2,0,0,'levy'),'\$.n_found');" | tail -n1)
@@ -4451,7 +4694,7 @@ gate_24_enterprise() {
     || fail "24 enterprise: expected n_found=1 with pareto diffusion_mode=levy, got: $dmp"
   # parse_seed's TEXT branch: seed normally arrives as INTEGER; passing
   # it as a TEXT digit string exercises the strtoull parse path.
-  local sdt; sdt=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+  local sdt; sdt=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
     "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
     "SELECT json_extract(fractal_optimize_portfolio_multimodal(
        '0.1,0.05','0.04,0.01,0.01,0.03',1,2,0.15,0.9,'42',0,'levy'),'\$.n_found');" | tail -n1)
@@ -4750,12 +4993,12 @@ gate_25_enterprise_stress() {
   absw="$(wpath "$abs")"
 
   write_py_gate25
-  # FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1: a dev drop of the enterprise
+  # FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0: a dev drop of the enterprise
   # library typically ships unsigned, and signature verification is
   # mandatory by default (fsql_enterprise.c) -- the stress gate tests
   # ledger behavior, not the signature gate, so opt out here the way a
   # dev would.
-  if FSQL_BT_ENT_LIB="$absw" FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 py_run py_gate25; then
+  if FSQL_BT_ENT_LIB="$absw" FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 py_run py_gate25; then
     pass "25 enterprise_stress: fill-to-cap+churn, concurrency, MAC tamper-evidence (see driver OK lines above)"
   else
     fail "25 enterprise_stress: see driver output above"
@@ -5164,6 +5407,9 @@ gate_29_domain_agents() {
   sqlq "SELECT fractal_diversify_disable();" >/dev/null 2>&1
 
   # --- 6: fractal_agent_data_analyst (composes sql_agent -> reason) ---
+  # The generated statement runs only when the caller asks for it
+  # (auto_execute): the default call generates and validates it and hands
+  # the SQL back, with nothing executed and no reasoning done.
   sqlq "
     CREATE TABLE bt_da_data(id INTEGER PRIMARY KEY, val REAL);
     INSERT INTO bt_da_data VALUES (1,10.5),(2,20.5);
@@ -5175,28 +5421,47 @@ gate_29_domain_agents() {
   grep <<< "$r7" -q 'domain-agent-canary' \
     && pass "29 domain_agents: data_analyst composes sql_agent (generated_sql is the real LLM step, canary)" \
     || fail "29 domain_agents: expected the canary in generated_sql, got: $r7"
+  # A real, valid statement makes "was it executed?" decidable from
+  # result_json alone: null (not run) against {"status":"executed",...}
+  # (run). The canary file is restored right after.
+  printf 'SELECT id, val FROM bt_da_data' > "$SQLTXT"
   local r7b; r7b=$(sqlq \
     "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_data_analyst(
-       'sum of val','[\"bt_da_data\"]',2),'\$.result_json');")
-  grep <<< "$r7b" -q 'status' \
-    && pass "29 domain_agents: data_analyst result_json is a real jsonb (auto_execute ran)" \
-    || fail "29 domain_agents: expected a status-bearing result_json, got: $r7b"
+       'sum of val','[\"bt_da_data\"]',2),'\$.result_json') IS NULL;" | tail -n 1)
+  [[ "$r7b" = "1" ]] \
+    && pass "29 domain_agents: data_analyst does not run the generated SQL unless asked (result_json is null)" \
+    || fail "29 domain_agents: expected a null result_json on the default call, got: $r7b"
   local r7c; r7c=$(sqlq \
     "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_data_analyst(
-       'sum of val','[\"bt_da_data\"]',2),'\$.analysis');")
-  grep <<< "$r7c" -q 'domain-agent-canary' \
-    && pass "29 domain_agents: data_analyst composes sql_agent -> reason (analysis is the real reason step, canary)" \
-    || fail "29 domain_agents: expected the canary in analysis, got: $r7c"
-  if expect_err "expects 1 to 4 args" \
+       'sum of val','[\"bt_da_data\"]',2),'\$.analysis') IS NULL;" | tail -n 1)
+  [[ "$r7c" = "1" ]] \
+    && pass "29 domain_agents: data_analyst does no reasoning unless asked (analysis is null)" \
+    || fail "29 domain_agents: expected a null analysis on the default call, got: $r7c"
+  local r7d; r7d=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT json_extract(fractal_agent_data_analyst(
+       'sum of val','[\"bt_da_data\"]',2,'{}',1),'\$.result_json');")
+  grep <<< "$r7d" -q 'executed' \
+    && pass "29 domain_agents: data_analyst with auto_execute=1 runs the generated SQL" \
+    || fail "29 domain_agents: expected an executed result on the explicit opt-in, got: $r7d"
+  local r7e; r7e=$(sqlq \
+    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT json_extract(fractal_agent_data_analyst(
+       'sum of val','[\"bt_da_data\"]',2,'{}',1),'\$.analysis') IS NULL;" | tail -n 1)
+  [[ "$r7e" = "0" ]] \
+    && pass "29 domain_agents: data_analyst with auto_execute=1 reasons over the result it ran" \
+    || fail "29 domain_agents: expected an analysis on the explicit opt-in, got: $r7e"
+  printf 'domain-agent-canary' > "$SQLTXT"
+  if expect_err "expects 1 to 5 args" \
       "SELECT fractal_agent_data_analyst();"; then
     pass "29 domain_agents: data_analyst rejects zero args"
   else
     fail "29 domain_agents: data_analyst accepted zero args"
   fi
-  if expect_err "expects 1 to 4 args" \
-      "SELECT fractal_agent_data_analyst('q',NULL,2,'{}',1);"; then
+  if expect_err "expects 1 to 5 args" \
+      "SELECT fractal_agent_data_analyst('q',NULL,2,'{}',1,1);"; then
     pass "29 domain_agents: data_analyst rejects too many args"
   else
     fail "29 domain_agents: data_analyst accepted too many args"
@@ -5871,7 +6136,7 @@ gate_29_domain_agents() {
     fail "29 domain_agents: diverse_portfolios accepted a NULL mu"
   fi
   if [[ -n "$(wpath "$MOCKENT")" && -f "$(wpath "$MOCKENT")" ]]; then
-    local r17; r17=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+    local r17; r17=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
       "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
       "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
       "SELECT json_extract(fractal_agent_diverse_portfolios(
@@ -5898,7 +6163,7 @@ gate_29_domain_agents() {
 
     # Partial-result mode: data half (candidates/n_found) survives a broken
     # reasoning endpoint instead of being discarded.
-    local r17pf; r17pf=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+    local r17pf; r17pf=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
       "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
       "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
       "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
@@ -5914,7 +6179,7 @@ gate_29_domain_agents() {
     # FSQL_MOCK_ENT_FAIL above).
     local zf_sentinel="$PDIR/fractalsql_bt_mock_ent_zero_found"
     rm -f "$zf_sentinel"; touch "$zf_sentinel"
-    if FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 FSQL_MOCK_ENT_ZERO_FOUND="$zf_sentinel" \
+    if FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 FSQL_MOCK_ENT_ZERO_FOUND="$zf_sentinel" \
         expect_err "no candidates found" \
         "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
         "SELECT fractal_agent_diverse_portfolios('0.05,0.1','1.0,0.0,0.0,1.0',1);"; then
@@ -6056,7 +6321,7 @@ gate_29_domain_agents() {
     "SELECT fractal_agent_route_task('0.1,0.2,0.3','bt29x_caps','emb','capability_name',1000,200);"
 
   if [[ -n "$(wpath "$MOCKENT")" && -f "$(wpath "$MOCKENT")" ]]; then
-    local r19; r19=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+    local r19; r19=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
       "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
       "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
       "SELECT fractal_agent_diverse_portfolios(
@@ -6064,7 +6329,7 @@ gate_29_domain_agents() {
     [[ "$r19" != *ERROR* && -n "$r19" ]] \
       && pass "29 domain_agents: diverse_portfolios succeeds with all 9 args supplied (sharpe mode)" \
       || fail "29 domain_agents: diverse_portfolios 9-arg sharpe call, got: $r19"
-    local r19b; r19b=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+    local r19b; r19b=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
       "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
       "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
       "SELECT fractal_agent_diverse_portfolios(
@@ -6116,7 +6381,7 @@ gate_29_domain_agents() {
     "SELECT fractal_agent_route_task('0.1,0.2,0.3','bt29x_caps','emb','capability_name',1000,NULL);"
 
   if [[ -n "$(wpath "$MOCKENT")" && -f "$(wpath "$MOCKENT")" ]]; then
-    local r20; r20=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+    local r20; r20=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
       "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
       "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
       "SELECT fractal_agent_diverse_portfolios(
@@ -6531,7 +6796,7 @@ gate_31_ledger_chain() {
   # checks it in constant time -- both otherwise dead in this checkout.
   if [[ -n "$(wpath "$MOCKENT")" && -f "$(wpath "$MOCKENT")" ]]; then
     sqlq "DELETE FROM fractalsql_ledger WHERE kind = 2;" >/dev/null 2>&1
-    local rw; rw=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+    local rw; rw=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
       "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
       "SELECT fractalsql_set('enterprise_ledger_key','gate31-hmac-test-key');" \
       "SELECT fractal_audit_log('test.small','{\"n\":1}');" \
@@ -6545,7 +6810,7 @@ gate_31_ledger_chain() {
     # backslash in it exercise the two RFC 8259 mandatory escapes,
     # otherwise dead since every entry_type elsewhere in this suite is
     # a plain identifier-shaped string.
-    local rwe; rwe=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+    local rwe; rwe=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
       "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
       "SELECT fractal_audit_log('has\"quote\\backslash','{\"n\":2}');" \
       "SELECT fractal_audit_unpack(payload) FROM fractalsql_ledger
@@ -6556,6 +6821,81 @@ gate_31_ledger_chain() {
     grep <<< "$rwe" -Fq '"type":"has\"quote\\backslash"' \
       && pass "31 ledger_chain: audit_log entry_type escapes a quote+backslash" \
       || fail "31 ledger_chain: expected the escaped entry_type, got: $rwe"
+
+    # ---- audit redaction (FSQL_AUDIT_REDACT): what the chain keeps of
+    # the text an agent was given. "hash" keeps the fingerprint and the
+    # length, "truncate" keeps the first 64 characters, and neither
+    # keeps the whole question.
+    local qtext='how many rows mention the word zephyr in the customer notes column ENDTOKEN'
+    local red; red=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 FSQL_AUDIT_REDACT=hash sqlq \
+      "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+      "SELECT fractal_audit_log('test.redact','{\"question\":\"$qtext\",\"n\":1}');" \
+      "SELECT fractal_audit_unpack(payload) FROM fractalsql_ledger
+         WHERE kind=2 ORDER BY rowid DESC LIMIT 1;" | tail -n1)
+    if grep <<< "$red" -Fq 'zephyr'; then
+      fail "31 ledger_chain: FSQL_AUDIT_REDACT=hash still stored the question text"
+    else
+      pass "31 ledger_chain: FSQL_AUDIT_REDACT=hash keeps the question text out of the chain"
+    fi
+    if grep <<< "$red" -Fq 'sha256:'; then
+      pass "31 ledger_chain: FSQL_AUDIT_REDACT=hash stores the fingerprint instead"
+    else
+      fail "31 ledger_chain: expected a sha256 fingerprint in the stored payload, got: $red"
+    fi
+    # The fields that are not text stay readable: the entry type, the
+    # count and the attribution block are stored as they are.
+    grep <<< "$red" -Fq '"type":"test.redact"' \
+      && pass "31 ledger_chain: audit redaction leaves the non-text fields alone" \
+      || fail "31 ledger_chain: redaction damaged the non-text fields, got: $red"
+
+    local trc; trc=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 FSQL_AUDIT_REDACT=truncate sqlq \
+      "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+      "SELECT fractal_audit_log('test.truncate','{\"question\":\"$qtext\",\"n\":1}');" \
+      "SELECT fractal_audit_unpack(payload) FROM fractalsql_ledger
+         WHERE kind=2 ORDER BY rowid DESC LIMIT 1;" | tail -n1)
+    # The question is longer than the 64 characters the truncate mode
+    # keeps, so the tail of it must be gone and the head must be there.
+    if grep <<< "$trc" -Fq 'ENDTOKEN'; then
+      fail "31 ledger_chain: FSQL_AUDIT_REDACT=truncate kept more than the first 64 characters"
+    else
+      pass "31 ledger_chain: FSQL_AUDIT_REDACT=truncate keeps only the first 64 characters"
+    fi
+    grep <<< "$trc" -Fq 'how many rows mention' \
+      && pass "31 ledger_chain: FSQL_AUDIT_REDACT=truncate keeps the head of the text" \
+      || fail "31 ledger_chain: truncate mode dropped the text entirely, got: $trc"
+
+    # ---- the head anchor (FSQL_LEDGER_ANCHOR_LOG): the chain head is
+    # published outside the database, so a chain whose tail was deleted
+    # no longer matches what was published.
+    local anc; anc=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 FSQL_LEDGER_ANCHOR_LOG=stderr sqlq \
+      "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+      "SELECT fractal_audit_log('test.anchor','{\"n\":3}');")
+    local anchor_line; anchor_line=$(grep -o '{"event":"ledger_head"[^}]*}' <<< "$anc" | tail -n1)
+    if [[ -n "$anchor_line" ]]; then
+      pass "31 ledger_chain: FSQL_LEDGER_ANCHOR_LOG=stderr publishes the chain head"
+    else
+      fail "31 ledger_chain: expected a ledger_head anchor line, got: $anc"
+    fi
+    grep <<< "$anchor_line" -Fq '"kind":2' \
+      && pass "31 ledger_chain: the anchor line names the chain it belongs to" \
+      || fail "31 ledger_chain: expected kind 2 in the anchor line, got: $anchor_line"
+    local anchor_hash; anchor_hash=$(grep -o '"hash":"[0-9a-f]*"' <<< "$anchor_line" | cut -d'"' -f4)
+    local head_hash; head_hash=$(sqlq "SELECT hex(entry_hash) FROM fractalsql_ledger
+       WHERE kind=2 ORDER BY id DESC LIMIT 1;" | tail -n1 | tr '[:upper:]' '[:lower:]')
+    if [[ -n "$anchor_hash" && "$anchor_hash" == "$head_hash" ]]; then
+      pass "31 ledger_chain: the published head hash is the chain's own newest entry hash"
+    else
+      fail "31 ledger_chain: anchor hash ($anchor_hash) does not match the chain head ($head_hash)"
+    fi
+    # Without the anchor log switched on, nothing is published.
+    local noanc; noanc=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
+      "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+      "SELECT fractal_audit_log('test.anchor.off','{\"n\":4}');")
+    if grep -q 'ledger_head' <<< "$noanc"; then
+      fail "31 ledger_chain: the anchor log published a line while it was switched off"
+    else
+      pass "31 ledger_chain: the anchor log stays quiet until it is switched on"
+    fi
   else
     skip "31 ledger_chain: real write/read storage path (mock core did not build)"
   fi
@@ -6586,8 +6926,8 @@ gate_32_enterprise_signature_real() {
   # case here).
   #
   # Message-text note: this port's ENT_SIG_MISSING refusal (mandatory
-  # mode, or require=on under FSQL_ENTERPRISE_ALLOW_UNVERIFIED) names
-  # FSQL_ENTERPRISE_ALLOW_UNVERIFIED rather than the SQL key -- the SQL
+  # mode, or require=on under FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE) names
+  # FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE rather than the SQL key -- the SQL
   # key can only strengthen the check, so the message points at the
   # environment opt-out that actually governs. Case B below asserts on
   # this port's actual wording.
@@ -6603,10 +6943,10 @@ gate_32_enterprise_signature_real() {
   sig_path="${abs}.sig"
   rm -f "$sig_path"
 
-  # ---- Case A: no .sig, FSQL_ENTERPRISE_ALLOW_UNVERIFIED opt-out +
+  # ---- Case A: no .sig, FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE opt-out +
   # require=off -- soft: still loads and works.
   local ra rca
-  ra=$(FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+  ra=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
     "SELECT fractalsql_set('enterprise_lib', '$absw');" \
     "SELECT fractalsql_set('enterprise_require_signature','off');" \
     "SELECT fractal_ledger_reset_hard();")
@@ -6626,7 +6966,7 @@ gate_32_enterprise_signature_real() {
     "SELECT fractal_ledger_reset_hard();")
   rcb=$?
   if [[ $rcb -ne 0 ]] && grep <<< "$rb" -q "no signature found" \
-     && grep <<< "$rb" -q "FSQL_ENTERPRISE_ALLOW_UNVERIFIED"; then
+     && grep <<< "$rb" -q "FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE"; then
     pass "32 enterprise_signature_real Case B: missing .sig, no env opt-out -- refused"
   else
     fail "32 enterprise_signature_real Case B: expected a hard refusal, got rc=$rcb: $rb"
@@ -6715,7 +7055,10 @@ gate_33_tsan_ledger_concurrent() {
   rm -f "$runner_db" "$runner_db-wal" "$runner_db-shm"
 
   local out rc
-  out=$("$HERE/tsan_ledger_runner" \
+  # FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0: a dev drop of the enterprise library
+  # carries no .sig sidecar, and signature verification is mandatory otherwise
+  # (same opt-out gate 25 uses).
+  out=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 "$HERE/tsan_ledger_runner" \
         --db "$runner_db" --ext "$ext_abs" --ent-lib "$ent_abs" \
         --threads 8 2>&1)
   rc=$?
@@ -6805,16 +7148,16 @@ gate_34_oom_inject() {
     || fail "34 oom_inject: expected an out-of-memory error, got: $oom3"
 
   # fractal_periodogram(series, max_peaks=37): malloc(37*sizeof(double))
-  # = 296 bytes, made twice (out_freqs then out_power, same size) --
+  # = 296 bytes (needs >= 74 samples: max_peaks is clamped to n/2), made twice (out_freqs then out_power, same size) --
   # injection fails whichever of the two the allocator reaches first,
   # exercising the same `!out_freqs || !out_power` guard either way.
-  local base4; base4=$(sqlq "SELECT length(fractal_periodogram('1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16', 37));")
+  local base4; base4=$(sqlq "WITH RECURSIVE g(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM g WHERE i<80) SELECT length(fractal_periodogram((SELECT group_concat(i%7,',') FROM g), 37));")
   [[ "$base4" =~ ^[0-9]+$ ]] \
     && pass "34 oom_inject: fractal_periodogram(series, 37) succeeds with no fault injected (baseline)" \
     || fail "34 oom_inject: baseline periodogram failed: $base4"
   local oom4; oom4=$(LD_PRELOAD="$shim" FSQL_OOM_FAIL_SIZE=296 \
     FSQL_OOM_TARGET_SO=fractalsql.so sqlq \
-    "SELECT fractal_periodogram('1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16', 37);")
+    "WITH RECURSIVE g(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM g WHERE i<80) SELECT fractal_periodogram((SELECT group_concat(i%7,',') FROM g), 37);")
   grep <<< "$oom4" -qi "out of memory" \
     && pass "34 oom_inject: fractal_periodogram's out_freqs/out_power malloc failure surfaces as a clean out-of-memory error" \
     || fail "34 oom_inject: expected an out-of-memory error, got: $oom4"
@@ -7000,7 +7343,7 @@ gate_34_oom_inject() {
   lever_ent() {  # lever_ent <label> <sql...>
     local label="$1"; shift
     local r; r=$(LD_PRELOAD="$shim" FSQL_OOM_FAIL_SIZE=256 \
-      FSQL_OOM_TARGET_SO=fractalsql.so FSQL_ENTERPRISE_ALLOW_UNVERIFIED=1 sqlq \
+      FSQL_OOM_TARGET_SO=fractalsql.so FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
       "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
       "SELECT fractalsql_set('reasoning_plugin','$MOCK');" "$@")
     grep <<< "$r" -qi "out of memory" \
@@ -7171,6 +7514,201 @@ gate_35_ed25519() {
   fi
 }
 
+# ----------------------------------------------------------------------
+# MCP server instrumentation (--asan / --ubsan / --tsan / --coverage).
+# The MCP server is its own C++ binary, so the flags are applied to ITS
+# build (mcp/Makefile takes the same ASAN=1 / UBSAN=1 / TSAN=1 switches as
+# the top-level Makefile) and to the standalone MCP probes (gates 40-42),
+# not only to the extension it loads.
+# ----------------------------------------------------------------------
+# The mode the MCP binary must carry for this run. Recorded next to the
+# binary so a binary built for another mode is never reused: plain make
+# tracks mtimes, not flags.
+mcp_mode_tag() { echo "a${ASAN}u${UBSAN}t${TSAN}c${COVERAGE}"; }
+
+# Compiler/linker flags for the standalone MCP probes (space separated,
+# no spaces inside a flag). UBSAN does not recover, as in mcp/Makefile.
+mcp_san_flags() {
+  local f=""
+  [[ "$ASAN"  -eq 1 ]] && f+=" -fsanitize=address"
+  [[ "$UBSAN" -eq 1 ]] && f+=" -fsanitize=undefined -fno-sanitize-recover=undefined"
+  [[ "$TSAN"  -eq 1 ]] && f+=" -fsanitize=thread"
+  [[ -n "$f" ]] && f+=" -fno-omit-frame-pointer"
+  echo "$f"
+}
+
+# mcp_openssl_dev_present: 0 when the OpenSSL development files the MCP
+# server needs are installed, 1 when they are not.
+#
+# mcp/Makefile links -lssl -lcrypto directly (this repo's Makefile has no
+# pkg-config lookup for OpenSSL), so the only reliable way to know the
+# dependency is met is to try a compile. A slim container image often
+# carries the runtime library but not the development headers, and the
+# missing dependency then surfaces as an opaque "fatal error:
+# openssl/evp.h: No such file or directory" buried in a build log, which
+# reads like a source defect rather than an uninstalled package.
+#
+# $1: extra compiler/linker flags (e.g. a Homebrew OpenSSL's -I and -L).
+mcp_openssl_dev_present() {
+  local extra="${1:-}"
+  local cc="${CC:-}"
+  if [[ -z "$cc" ]]; then
+    cc="$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)"
+  fi
+  [[ -n "$cc" ]] || return 1
+  local probe="$TMPROOT/fractalsql_bt_openssl_probe.c"
+  local bin="$TMPROOT/fractalsql_bt_openssl_probe"
+  printf '#include <openssl/evp.h>\nint main(void){return EVP_sha256()?0:1;}\n' >"$probe"
+  local rc=1
+  # shellcheck disable=SC2086
+  if "$cc" $extra "$probe" -o "$bin" -lssl -lcrypto >/dev/null 2>&1; then
+    rc=0
+  fi
+  rm -f "$probe" "$bin"
+  return "$rc"
+}
+
+# mcp_build_posix <label> <force-under-coverage 0|1>
+# Builds (or reuses) $HERE/mcp/fractalsql-sqlite-mcp for the current mode
+# and sets MCP_EXE. Returns 1 after reporting skip/fail itself.
+mcp_build_posix() {
+  local label="$1" force_cov="$2"
+  local exe="$HERE/mcp/fractalsql-sqlite-mcp"
+  local stamp="$HERE/mcp/.mcp-build-mode"
+  local tag; tag="$(mcp_mode_tag)"
+  # No stamp means the objects came from an unknown mode (for example an
+  # earlier --coverage run, whose leftovers fail the final link with
+  # undefined __gcov_*): treat that as a mismatch and clean once.
+  local have; have="$(cat "$stamp" 2>/dev/null || echo unknown)"
+  local needs_build=0
+  if [[ ! -x "$exe" ]]; then
+    needs_build=1
+  elif [[ "$have" != "$tag" ]]; then
+    needs_build=1
+  elif [[ -n "$(find "$HERE/mcp/src" \( -name '*.cpp' -o -name '*.h' \) \
+                -newer "$exe" -print 2>/dev/null | head -n1)" ]]; then
+    needs_build=1
+  fi
+  # --coverage always forces a full rebuild in gate 37, mtime check or
+  # not: a mtime-fresh binary from an earlier PLAIN run would otherwise be
+  # reused as-is (no COVERAGE=1), silently producing an empty report.
+  [[ "$COVERAGE" -eq 1 && "$force_cov" = 1 ]] && needs_build=1
+  if [[ "$needs_build" = 1 ]]; then
+    if ! command -v make >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1; then
+      skip "$label (no make/g++ toolchain to build the MCP server binary)"
+      return 1
+    fi
+    # Objects from another mode (or a coverage rerun) must not link into
+    # this binary uninstrumented -- see mcp_mode_tag.
+    if [[ "$have" != "$tag" || ( "$COVERAGE" -eq 1 && "$force_cov" = 1 ) ]]; then
+      [[ "$COVERAGE" -eq 1 ]] && rm -f "$HERE/mcp"/*.gcda "$HERE/mcp/src"/*.gcda "$HERE/mcp/src/adapters"/*.gcda
+      env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES make -C "$HERE/mcp" clean >&2
+    fi
+    # Darwin: OpenSSL isn't in the macOS SDK at all, and Homebrew's
+    # openssl@3 is keg-only (never symlinked into the default -I/-L
+    # search path) -- mcp/Makefile's bare -lssl/-lcrypto only resolves
+    # when CXXFLAGS points at it explicitly (same fix
+    # scripts/package-darwin.sh carries for the release build).
+    local mcp_cxxflags="" mcp_probe_flags=""
+    if [[ "$(uname -s)" = "Darwin" ]]; then
+      local openssl_prefix
+      openssl_prefix="$(brew --prefix openssl@3 2>/dev/null || true)"
+      if [[ -z "$openssl_prefix" || ! -f "$openssl_prefix/include/openssl/evp.h" ]]; then
+        skip "$label (Homebrew openssl@3 not found -- brew install openssl@3 to build the MCP server)"
+        return 1
+      fi
+      mcp_cxxflags="-std=c++17 -O2 -Wall -Wextra -I${openssl_prefix}/include -L${openssl_prefix}/lib"
+      mcp_probe_flags="-I${openssl_prefix}/include -L${openssl_prefix}/lib"
+    fi
+    # Everywhere else: the server's own build needs OpenSSL's development
+    # files (mcp/Makefile links -lssl/-lcrypto and src/logging.cpp includes
+    # <openssl/evp.h>). A slim image carries the runtime library but not
+    # the headers, and the build then dies with an opaque
+    # "openssl/evp.h: No such file or directory" that reads like a source
+    # defect rather than an uninstalled package -- so probe for the
+    # dependency and name it.
+    if ! mcp_openssl_dev_present "$mcp_probe_flags"; then
+      skip "$label (OpenSSL development headers not found -- install libssl-dev (Debian/Ubuntu) or openssl-devel (Fedora/RHEL) to build the MCP server)"
+      return 1
+    fi
+    local mcp_env=(env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES)
+    [[ -n "$mcp_cxxflags" ]] && mcp_env+=(CXXFLAGS="$mcp_cxxflags")
+    local mcp_make_args=()
+    [[ "$COVERAGE" -eq 1 ]] && mcp_make_args+=(COVERAGE=1)
+    [[ "$ASAN"  -eq 1 ]] && mcp_make_args+=(ASAN=1)
+    [[ "$UBSAN" -eq 1 ]] && mcp_make_args+=(UBSAN=1)
+    [[ "$TSAN"  -eq 1 ]] && mcp_make_args+=(TSAN=1)
+    if ! "${mcp_env[@]}" make -C "$HERE/mcp" ${mcp_make_args[@]+"${mcp_make_args[@]}"} >&2; then
+      fail "$label: MCP server build failed"
+      return 1
+    fi
+    echo "$tag" >"$stamp"
+  fi
+  MCP_EXE="$exe"
+  return 0
+}
+
+# mcp_san_wrap <exe> <dir>: when the server is sanitized, prints a wrapper
+# that execs it with each sanitizer's log_path pointing into <dir>, so a
+# report is attributed to the server alone (not to the python driver that
+# shares the preloaded runtime) and survives however the server exits.
+# Prints <exe> unchanged for a plain run.
+mcp_san_wrap() {
+  local exe="$1" dir="$2"
+  if [[ "$ASAN$UBSAN$TSAN" = "000" ]]; then echo "$exe"; return; fi
+  rm -rf "$dir"; mkdir -p "$dir"
+  # A compiled wrapper, not a shell script: when libtsan is preloaded for
+  # the extension gates, /bin/sh itself segfaults at start-up, and the
+  # server would die before it ran.
+  local w="$dir/mcp-san-wrapper" src="$dir/mcp-san-wrapper.c"
+  cat >"$src" <<'WRAP_EOF'
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+static void add(const char *name, const char *extra, const char *log) {
+  const char *old = getenv(name);
+  char *v = malloc(strlen(old ? old : "") + strlen(extra) + strlen(log) + 4);
+  sprintf(v, "%s%s%s%s", old ? old : "", old && *old ? ":" : "", extra, log);
+  setenv(name, v, 1);
+}
+int main(int argc, char **argv) {
+  (void)argc;
+  add("ASAN_OPTIONS", "", "log_path=" WRAP_DIR "/mcp_asan");
+  add("UBSAN_OPTIONS", "print_stacktrace=1:", "log_path=" WRAP_DIR "/mcp_ubsan");
+  add("TSAN_OPTIONS", "", "log_path=" WRAP_DIR "/mcp_tsan");
+#ifdef WRAP_UNSET_PRELOAD
+  /* a TSan server links its own runtime; a second preloaded copy aborts it */
+  unsetenv("LD_PRELOAD");
+#endif
+  argv[0] = WRAP_EXE;
+  execv(WRAP_EXE, argv);
+  perror("mcp-san-wrapper: exec");
+  return 127;
+}
+WRAP_EOF
+  local defs=(-DWRAP_DIR="\"$dir\"" -DWRAP_EXE="\"$exe\"")
+  [[ "$TSAN" -eq 1 ]] && defs+=(-DWRAP_UNSET_PRELOAD)
+  if ! env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES cc -O1 "${defs[@]}" "$src" -o "$w" >"$dir/wrapper-build.log" 2>&1; then
+    echo "$exe"; return
+  fi
+  echo "$w"
+}
+
+# mcp_san_check <dir> <label>: fails the gate when the sanitized server
+# wrote a report. No-op for a plain run.
+mcp_san_check() {
+  local dir="$1" label="$2" f
+  [[ "$ASAN$UBSAN$TSAN" = "000" ]] && return 0
+  for f in "$dir"/mcp_asan* "$dir"/mcp_ubsan* "$dir"/mcp_tsan*; do
+    [[ -f "$f" ]] || continue
+    fail "$label: the sanitized MCP server reported errors ($f):"
+    head -n 40 "$f" >&2
+    return 1
+  done
+  return 0
+}
+
 gate_37_mcp_smoke() {
   # 8.3's MCP gate: builds on the already-built extension (bt_setup
   # resolved $EXT / compiled the mock reasoning fixtures), starts the
@@ -7197,10 +7735,6 @@ gate_37_mcp_smoke() {
     skip "37 mcp_smoke (no python3 on PATH -- the smoke client driver needs it)"
     return
   fi
-  if [[ "$(uname -s)" = "Darwin" && "$ASAN$UBSAN$TSAN" != "000" ]]; then
-    skip "37 mcp_smoke (Darwin + --asan/--ubsan/--tsan: skipping like the other runtime gates)"
-    return
-  fi
 
   # The server binary: POSIX builds it from mcp/Makefile (incremental;
   # only when missing or stale against mcp/src). On Windows the .sh
@@ -7217,57 +7751,8 @@ gate_37_mcp_smoke() {
       fi
       ;;
     *)
-      mcp_exe="$HERE/mcp/fractalsql-sqlite-mcp"
-      local needs_build=0
-      if [[ ! -x "$mcp_exe" ]]; then
-        needs_build=1
-      elif [[ -n "$(find "$HERE/mcp/src" \( -name '*.cpp' -o -name '*.h' \) \
-                    -newer "$mcp_exe" -print 2>/dev/null | head -n1)" ]]; then
-        needs_build=1
-      fi
-      # --coverage always forces a full rebuild, mtime check or not: a
-      # mtime-fresh binary from an earlier PLAIN run would otherwise be
-      # reused as-is (no COVERAGE=1, no instrumentation), silently
-      # producing a zero/empty report instead of an error. `make clean`
-      # first for the same reason gate 01 does it for the core .so --
-      # plain `make` has no flag-change tracking, only mtimes, so
-      # stale non-instrumented .o files from a prior plain build would
-      # otherwise NOT get recompiled under COVERAGE=1 and would link
-      # straight into the "coverage" binary uninstrumented.
-      if [[ "$COVERAGE" -eq 1 ]]; then
-        needs_build=1
-        rm -f "$HERE/mcp"/*.gcda "$HERE/mcp/src"/*.gcda "$HERE/mcp/src/adapters"/*.gcda
-        env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES make -C "$HERE/mcp" clean >&2
-      fi
-      if [[ "$needs_build" = 1 ]]; then
-        if ! command -v make >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1; then
-          skip "37 mcp_smoke (no make/g++ toolchain to build the MCP server binary)"
-          return
-        fi
-        # Darwin: OpenSSL isn't in the macOS SDK at all, and Homebrew's
-        # openssl@3 is keg-only (never symlinked into the default -I/-L
-        # search path) -- mcp/Makefile's bare -lssl/-lcrypto only
-        # resolves when CXXFLAGS points at it explicitly (same fix
-        # scripts/package-darwin.sh carries for the release build).
-        local mcp_cxxflags=""
-        if [[ "$(uname -s)" = "Darwin" ]]; then
-          local openssl_prefix
-          openssl_prefix="$(brew --prefix openssl@3 2>/dev/null || true)"
-          if [[ -z "$openssl_prefix" || ! -f "$openssl_prefix/include/openssl/evp.h" ]]; then
-            skip "37 mcp_smoke (Homebrew openssl@3 not found -- brew install openssl@3 to build the MCP server)"
-            return
-          fi
-          mcp_cxxflags="-std=c++17 -O2 -Wall -Wextra -I${openssl_prefix}/include -L${openssl_prefix}/lib"
-        fi
-        local mcp_env=(env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES)
-        [[ -n "$mcp_cxxflags" ]] && mcp_env+=(CXXFLAGS="$mcp_cxxflags")
-        local mcp_make_args=()
-        [[ "$COVERAGE" -eq 1 ]] && mcp_make_args+=(COVERAGE=1)
-        if ! "${mcp_env[@]}" make -C "$HERE/mcp" ${mcp_make_args[@]+"${mcp_make_args[@]}"} >&2; then
-          fail "37 mcp_smoke: MCP server build failed"
-          return
-        fi
-      fi
+      mcp_build_posix "37 mcp_smoke" 1 || return
+      mcp_exe="$MCP_EXE"
       ;;
   esac
 
@@ -7304,6 +7789,8 @@ gate_37_mcp_smoke() {
   # does, to keep the compiler itself unsanitized) would instead reproduce
   # gate 34/35's "ASan runtime does not come first" abort the moment the
   # extension loads.
+  local san_dir="$TMPROOT/fractalsql_bt_mcp_san_37_$$"
+  mcp_exe="$(mcp_san_wrap "$mcp_exe" "$san_dir")"
   MCP_HERE="$(wpath "$HERE/mcp")" \
   MCP_SERVER_EXE="$(wpath "$mcp_exe")" \
   MCP_CANARY_FILE="$SQLTXT" \
@@ -7315,6 +7802,7 @@ gate_37_mcp_smoke() {
   FRACTALSQL_BOOTSTRAP_SQL="$bootsql" \
     "$mcp_py" -u "$HERE/mcp/tests/mcp_smoke_client.py"
   local rc=$?
+  mcp_san_check "$san_dir" "37 mcp_smoke" || rc=1
   if [[ $rc -ne 0 ]]; then
     fail "37 mcp_smoke: client driver exited $rc"
   else
@@ -7345,10 +7833,6 @@ gate_38_mcp_https() {
     skip "38 mcp_https (no openssl CLI on PATH to generate the throwaway TLS cert/key)"
     return
   fi
-  if [[ "$(uname -s)" = "Darwin" && "$ASAN$UBSAN$TSAN" != "000" ]]; then
-    skip "38 mcp_https (Darwin + --asan/--ubsan/--tsan: skipping like the other runtime gates)"
-    return
-  fi
 
   # Same binary gate 37 builds/reuses ($HERE/mcp/fractalsql-sqlite-mcp or
   # the checked-in Windows build); duplicated here rather than factored
@@ -7364,41 +7848,8 @@ gate_38_mcp_https() {
       fi
       ;;
     *)
-      mcp_exe="$HERE/mcp/fractalsql-sqlite-mcp"
-      local needs_build=0
-      if [[ ! -x "$mcp_exe" ]]; then
-        needs_build=1
-      elif [[ -n "$(find "$HERE/mcp/src" \( -name '*.cpp' -o -name '*.h' \) \
-                    -newer "$mcp_exe" -print 2>/dev/null | head -n1)" ]]; then
-        needs_build=1
-      fi
-      # Unlike gate 37, this gate never forces a --coverage rebuild: the
-      # TLS handshake path it tests doesn't depend on instrumentation,
-      # and a second full mcp/ rebuild here would just double the
-      # runtime under --coverage for no new signal (the coverage numbers
-      # themselves come from gate 37's own rebuild).
-      if [[ "$needs_build" = 1 ]]; then
-        if ! command -v make >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1; then
-          skip "38 mcp_https (no make/g++ toolchain to build the MCP server binary)"
-          return
-        fi
-        local mcp_cxxflags=""
-        if [[ "$(uname -s)" = "Darwin" ]]; then
-          local openssl_prefix
-          openssl_prefix="$(brew --prefix openssl@3 2>/dev/null || true)"
-          if [[ -z "$openssl_prefix" || ! -f "$openssl_prefix/include/openssl/evp.h" ]]; then
-            skip "38 mcp_https (Homebrew openssl@3 not found -- brew install openssl@3 to build the MCP server)"
-            return
-          fi
-          mcp_cxxflags="-std=c++17 -O2 -Wall -Wextra -I${openssl_prefix}/include -L${openssl_prefix}/lib"
-        fi
-        local mcp_env=(env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES)
-        [[ -n "$mcp_cxxflags" ]] && mcp_env+=(CXXFLAGS="$mcp_cxxflags")
-        if ! "${mcp_env[@]}" make -C "$HERE/mcp" >&2; then
-          fail "38 mcp_https: MCP server build failed"
-          return
-        fi
-      fi
+      mcp_build_posix "38 mcp_https" 0 || return
+      mcp_exe="$MCP_EXE"
       ;;
   esac
 
@@ -7451,6 +7902,8 @@ gate_38_mcp_https() {
   # sanitizer-built, so the sanitizer runtime must already be first in
   # this process's own library list -- gate 37's own comment on its
   # matching invocation explains the same requirement.
+  local san_dir="$TMPROOT/fractalsql_bt_mcp_san_38_$$"
+  mcp_exe="$(mcp_san_wrap "$mcp_exe" "$san_dir")"
   MCP_SERVER_EXE="$(wpath "$mcp_exe")" \
   MCP_SERVER_CWD="$(wpath "$BTROOT")" \
   MCP_HTTPS_PORT=18990 \
@@ -7460,6 +7913,7 @@ gate_38_mcp_https() {
   FRACTALSQL_EXTENSION_PATH="$ext_abs" \
     "$mcp_py" -u "$HERE/mcp/tests/mcp_https_smoke_client.py"
   local rc=$?
+  mcp_san_check "$san_dir" "38 mcp_https" || rc=1
   if [[ $rc -ne 0 ]]; then
     fail "38 mcp_https: client driver exited $rc"
   else
@@ -7609,6 +8063,8 @@ gate_40_vectors_probe() {
   local errobj="$HERE/mcp/src/_vectors_probe_errors.o"
   local covflags=()
   [[ "$COVERAGE" -eq 1 ]] && covflags+=(--coverage -fprofile-update=atomic)
+  # --asan/--ubsan/--tsan instrument the probe too (it is its own binary)
+  covflags+=($(mcp_san_flags))
   # std::to_chars(double) in src/vectors.cpp needs macOS >= 13.3 (see mcp/Makefile)
   local minver=()
   [[ "$(uname -s)" = "Darwin" ]] && minver+=(-mmacosx-version-min=13.3)
@@ -7701,19 +8157,32 @@ gate_41_db_probe() {
     ossl_cflags=(-I"${openssl_prefix}/include")
     ossl_ldflags=(-L"${openssl_prefix}/lib")
   fi
+  # src/logging.cpp includes <openssl/evp.h> and the probe links
+  # -lssl/-lcrypto, so the OpenSSL development files have to be there.
+  # Without them the compile dies with an opaque "openssl/evp.h: No such
+  # file or directory" -- name the missing package instead.
+  local ossl_probe_flags=""
+  [[ ${#ossl_cflags[@]} -gt 0 ]] && ossl_probe_flags+="${ossl_cflags[*]} "
+  [[ ${#ossl_ldflags[@]} -gt 0 ]] && ossl_probe_flags+="${ossl_ldflags[*]} "
+  if ! mcp_openssl_dev_present "$ossl_probe_flags"; then
+    skip "41 db_probe (OpenSSL development headers not found -- install libssl-dev (Debian/Ubuntu) or openssl-devel (Fedora/RHEL))"
+    return
+  fi
   [[ "$COVERAGE" -eq 1 ]] && covflags+=(--coverage -fprofile-update=atomic)
+  # --asan/--ubsan/--tsan instrument the probe too (it is its own binary)
+  covflags+=($(mcp_san_flags))
   rm -f "$mainobj" "$errobj" "$logobj" "$sqliteobj"
   ( cd "$HERE/mcp" && \
     env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g \
-        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.11\"" \
+        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.12\"" \
         -I../deps/sqlite -Ivendor -Isrc ${ossl_cflags[@]+"${ossl_cflags[@]}"} \
         -c tests/db_probe.cpp -o "$mainobj" \
      && env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g \
-        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.11\"" \
+        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.12\"" \
         -I../deps/sqlite -Ivendor -Isrc ${ossl_cflags[@]+"${ossl_cflags[@]}"} \
         -c src/errors.cpp -o "$errobj" \
      && env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g \
-        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.11\"" \
+        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.12\"" \
         -I../deps/sqlite -Ivendor -Isrc ${ossl_cflags[@]+"${ossl_cflags[@]}"} \
         -c src/logging.cpp -o "$logobj" \
      && env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$CC" -std=c99 -O1 -g -fPIC \
@@ -7750,7 +8219,13 @@ gate_41_db_probe() {
   # (unlike the build step above, which must strip it to keep g++/cc
   # itself unsanitized) or the dlopen aborts with "ASan runtime does not
   # come first in initial library list".
-  local out; out=$("$bin" "$ext_for_abs" 2>&1)
+  # macOS: the probe connects repeatedly, and each connection's close unloads the extension, which the next
+  # connection loads again. The macOS sanitizer runtime keeps the unloaded image's globals registered, so the
+  # re-load reports the extension's `sqlite3_api` as an ODR violation against itself (a false positive; the runtime
+  # suggests this switch). Only this probe's run is affected.
+  local probe_asan="${ASAN_OPTIONS:-}"
+  [[ "$(uname -s)" = "Darwin" ]] && probe_asan="${probe_asan:+$probe_asan:}detect_odr_violation=0"
+  local out; out=$(ASAN_OPTIONS="$probe_asan" "$bin" "$ext_for_abs" 2>&1)
   local rc=$?
   rm -f "$mainobj" "$errobj" "$logobj" "$sqliteobj"
   if [[ "$COVERAGE" -ne 1 ]]; then
@@ -7791,6 +8266,8 @@ gate_42_concurrency_probe() {
   local obj="$HERE/mcp/src/_concurrency_probe.o"
   local covflags=()
   [[ "$COVERAGE" -eq 1 ]] && covflags+=(--coverage -fprofile-update=atomic)
+  # --asan/--ubsan/--tsan instrument the probe too (it is its own binary)
+  covflags+=($(mcp_san_flags))
   rm -f "$obj"
   ( cd "$HERE/mcp" && \
     env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g -pthread \
@@ -7930,8 +8407,175 @@ gate_43_kits() {
 }
 
 # ======================================================================
+# The MCP conformance gate
+# ======================================================================
+
+gate_45_mcp_conformance() {
+  # One driver that starts the server the way each kind of client starts
+  # it and checks the protocol, the authentication, the framing, the
+  # operator switches and the catalog against the published rules. The
+  # driver (mcp/tests/mcp_conformance.py) starts and stops the servers it
+  # needs and writes its own credential files; it needs no third-party
+  # SDK, only python3.
+  if [[ ! -f "$HERE/mcp/tests/mcp_conformance.py" \
+        || ! -f "$HERE/mcp/src/main.cpp" ]]; then
+    skip "45 mcp_conformance (mcp/ server code not present)"
+    return
+  fi
+  local mcp_py
+  mcp_py="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
+  [[ -n "$PY" ]] && mcp_py="$PY"
+  if [[ -z "$mcp_py" ]]; then
+    skip "45 mcp_conformance (no python3 on PATH -- the conformance driver needs it)"
+    return
+  fi
+
+  # The server binary: POSIX builds it from mcp/Makefile (incremental,
+  # only when missing or stale against mcp/src); on Windows the .sh
+  # harness uses the checked-in mcp/dist/windows-mcp build, as gate 37
+  # and gate 38 do.
+  local mcp_exe
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      mcp_exe="$HERE/mcp/dist/windows-mcp/fractalsql-sqlite-mcp.exe"
+      if [[ ! -f "$mcp_exe" ]]; then
+        skip "45 mcp_conformance (no mcp/dist/windows-mcp build -- run mcp\\scripts\\windows\\build.bat)"
+        return
+      fi
+      ;;
+    *)
+      mcp_build_posix "45 mcp_conformance" 0 || return
+      mcp_exe="$MCP_EXE"
+      ;;
+  esac
+
+  # The server looks for its two lock files beside the executable when no
+  # path is configured, so putting them there is what makes the installed
+  # layout start from any working directory.
+  local exe_dir; exe_dir="$(dirname "$mcp_exe")"
+  for lock_name in .mcp-schema-lock .mcp-safety-annotations-lock; do
+    if [[ -f "$HERE/mcp/$lock_name" ]]; then
+      cp -f "$HERE/mcp/$lock_name" "$exe_dir/$lock_name" 2>/dev/null || true
+    fi
+  done
+
+  # The extension path, absolute: the server runs with its working
+  # directory elsewhere, exactly as gate 37 and gate 38 do.
+  local ext_for_abs="$EXT"
+  [[ "$ext_for_abs" = /* ]] || ext_for_abs="$HERE/$ext_for_abs"
+  local ext_abs="$EXTW"
+  if command -v cygpath >/dev/null 2>&1; then
+    ext_abs="$(cygpath -m "$ext_for_abs" 2>/dev/null)" || ext_abs="$EXTW"
+  else
+    ext_abs="$ext_for_abs"
+  fi
+
+  local out="$PDIRW/mcp_conformance.log"
+  MCP_SERVER_EXE="$(wpath "$mcp_exe")" \
+  MCP_SERVER_CWD="$(wpath "$BTROOT")" \
+  MCPC_TOKEN="conformance-token" \
+  MCPC_GATE=45 \
+  MCPC_LOCK_DIR="$(wpath "$HERE/mcp")" \
+  MCPC_PASSTHROUGH_ENV="SQLITE_DB_PATH,FRACTALSQL_EXTENSION_PATH" \
+  MCPC_READ_TOOL="fractalsql_get_version" \
+  MCPC_READ_ARGS='{}' \
+  MCPC_STATE_TOOL="fractal_diversify_enable" \
+  MCPC_STATE_ARGS='{}' \
+  MCPC_DESTRUCTIVE_TOOL="fractal_diversify_enable" \
+  MCPC_DESTRUCTIVE_ARGS='{}' \
+  SQLITE_DB_PATH="$DBW" \
+  FRACTALSQL_EXTENSION_PATH="$ext_abs" \
+    "$mcp_py" -u "$HERE/mcp/tests/mcp_conformance.py" >"$out" 2>&1
+  local rc=$?
+  if [[ $rc -eq 0 ]] && grep -q "ALL GREEN" "$out"; then
+    pass "45 mcp_conformance: protocol eras, authentication, framing, operator switches and catalog conformance"
+  else
+    # The driver's own failure lines, not the server's log: they say which
+    # rule was broken and what was seen instead.
+    grep -E '^(FAIL|SKIP) ' "$out" || true
+    # A driver that stopped without reporting a failed check (a crash, a timeout, a server that did not start) has
+    # no FAIL line to show, and its log lives on the machine that ran it: print the end of its output here.
+    if ! grep -qE '^FAIL ' "$out"; then
+      printf '      the driver exited %s without a FAIL line; the last lines of its output:\n' "$rc" >&2
+      tail -n 40 "$out" | sed 's/^/        /' >&2
+    fi
+    fail "45 mcp_conformance: the conformance driver reported failures (see $out)"
+  fi
+}
+
+# ======================================================================
 # Runner
 # ======================================================================
+
+# ----------------------------------------------------------------------
+# Gate 46: vendored reasoning plugins carry a valid detached signature.
+# Every include/<platform>/fractalsql-reasoning-http.{so,dll} must have a
+# <plugin>.sig of exactly 64 bytes beside it (the package scripts refuse to
+# ship a plugin without one). Where the host platform's real vendored plugin
+# is loadable here, it is also run through the product default (no
+# FSQL_REASONING_REQUIRE_SIGNATURE override): the genuine plugin+sig must pass
+# the signature check, a one-byte-changed copy must be refused, and a copy with
+# no .sig must be refused.
+gate_46_plugin_sig_vendored() {
+  local n=0 bad=0 f
+  for f in include/*/fractalsql-reasoning-http.so include/*/fractalsql-reasoning-http.dll; do
+    [[ -f "$f" ]] || continue
+    n=$((n + 1))
+    if [[ ! -f "${f}.sig" ]] || [[ "$(wc -c < "${f}.sig" | tr -d ' ')" -ne 64 ]]; then
+      printf '      %s: missing or not 64 bytes: %s.sig\n' "46" "$f"; bad=$((bad + 1))
+    fi
+  done
+  if [[ "$n" -eq 0 ]]; then skip "46 plugin_sig_vendored (no vendored plugins under include/)"; return; fi
+  if [[ "$bad" -ne 0 ]]; then fail "46 plugin_sig_vendored: $bad of $n vendored plugin(s) lack a valid .sig"; return; fi
+  pass "46 plugin_sig_vendored: all $n vendored plugins have a 64-byte .sig beside them"
+
+  # Runtime check: only for the host platform's real glibc/darwin plugin that can load here.
+  local plat plug
+  case "$(uname -s)-$(uname -m)" in
+    Linux-x86_64)  plat=linux-x86_64 ;;
+    Linux-aarch64) plat=linux-aarch64 ;;
+    Darwin-arm64)  plat=darwin-arm64 ;;
+    Darwin-x86_64) plat=darwin-x86_64 ;;
+    *) skip "46 plugin_sig_vendored runtime (no vendored plugin for $(uname -s)-$(uname -m))"; return ;;
+  esac
+  plug="include/${plat}/fractalsql-reasoning-http.so"
+  [[ -f "$plug" ]] || { skip "46 plugin_sig_vendored runtime ($plug not present)"; return; }
+  if [[ "${FSQL_PROFILE:-}" == "musl" ]]; then
+    skip "46 plugin_sig_vendored runtime (the vendored glibc plugin cannot load under musl)"; return
+  fi
+  local d="$PDIRW/plugsig"; rm -rf "$d"; mkdir -p "$d"
+  cp "$plug" "$d/good.so"; cp "${plug}.sig" "$d/good.so.sig"
+  cp "$plug" "$d/tampered.so"; cp "${plug}.sig" "$d/tampered.so.sig"; printf 'x' >> "$d/tampered.so"
+  cp "$plug" "$d/nosig.so"
+  local call out rc
+  for call in good tampered nosig; do
+    # Unset the overrides in a subshell and call the CLI directly. Going through env(1) would strip
+    # DYLD_INSERT_LIBRARIES on macOS (env is a system binary), and a sanitized extension loaded without its
+    # runtime preloaded aborts: every other gate calls $SQLITE3 directly for the same reason.
+    out=$( unset FSQL_REASONING_REQUIRE_SIGNATURE FRACTALSQL_REASONING_PLUGIN
+           "$SQLITE3" -batch -bail \
+            -cmd ".load $EXTW" "$DBW" \
+            "SELECT fractalsql_set('reasoning_plugin','$d/${call}.so');" \
+            "SELECT fractal_reason('say ok');" 2>&1 ); rc=$?
+    case "$call" in
+      good)
+        # Past the signature check the plugin's own init runs and stops at "no URL set" (-2).
+        if grep -qiE "signature" <<< "$out" || ! grep -qF "fsql_reasoning_init returned" <<< "$out"; then
+          fail "46 plugin_sig_vendored: the genuine signed plugin did not get past the signature check: ${out:0:300}"; return
+        fi ;;
+      tampered)
+        if ! grep -qF "failed signature verification" <<< "$out"; then
+          fail "46 plugin_sig_vendored: a tampered plugin was not refused as expected: rc=$rc ${out:0:300}"; return
+        fi ;;
+      nosig)
+        if ! grep -qF "no signature found" <<< "$out"; then
+          fail "46 plugin_sig_vendored: a plugin without a .sig was not refused as expected: rc=$rc ${out:0:300}"; return
+        fi ;;
+    esac
+  done
+  rm -rf "$d"
+  pass "46 plugin_sig_vendored runtime: genuine plugin+sig accepted by default; tampered and unsigned copies refused"
+}
 
 gate_title() {
   case "$1" in
@@ -7962,7 +8606,10 @@ gate_title() {
     40) echo "vectors_probe" ;;
     41) echo "db_probe" ;;
     42) echo "concurrency_probe" ;;
+    44) echo "mcp_fuzz" ;;
     43) echo "kits" ;;
+    45) echo "mcp_conformance" ;;
+    46) echo "plugin_sig_vendored" ;;
   esac
 }
 
@@ -7995,7 +8642,10 @@ run_gate() {
     40) gate_40_vectors_probe ;;
     41) gate_41_db_probe ;;
     42) gate_42_concurrency_probe ;;
+    44) gate_44_mcp_fuzz ;;
     43) gate_43_kits ;;
+    45) gate_45_mcp_conformance ;;
+    46) gate_46_plugin_sig_vendored ;;
   esac
 }
 
@@ -8129,7 +8779,12 @@ main() {
   DB="$PDIR/bt.db"
 
   local gates
-  if [[ -n "$ONE_GATE" ]]; then
+  if [[ "$ONE_GATE" == "mcp" ]]; then
+    # The MCP server gates only. Under a sanitizer or coverage the
+    # extension they load must be built for it too, so gate 01 goes first.
+    gates=(37 38 40 41 42)
+    if [[ "$ASAN$UBSAN$TSAN$COVERAGE" != "0000" ]]; then gates=(01 "${gates[@]}"); fi
+  elif [[ -n "$ONE_GATE" ]]; then
     gates=("$ONE_GATE")
   elif [[ "$MODE" == "quick" ]]; then
     gates=("${QUICK_GATES[@]}")
@@ -8154,7 +8809,10 @@ main() {
   mkdir -p "$PDIR"
   for g in "${gates[@]}"; do
     printf "\n== gate %s: %s ==\n" "$g" "$(gate_title "$g")"
-    if [[ "$DARWIN_SAN_SKIP" -eq 1 && "$g" != "01" && "$g" != "33" ]]; then
+    # The MCP gates run a server built with the sanitizer itself, so they do
+    # not depend on preloading a runtime into a system host binary.
+    if [[ "$DARWIN_SAN_SKIP" -eq 1 && "$g" != "01" && "$g" != "33" \
+          && "$g" != "37" && "$g" != "38" && "$g" != "40" && "$g" != "41" && "$g" != "42" ]]; then
       skip "$g $(gate_title "$g") (Darwin + --asan/--ubsan/--tsan: $DARWIN_SAN_SKIP_WHY)"
       continue
     fi

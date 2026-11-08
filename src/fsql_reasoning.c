@@ -106,6 +106,7 @@ SQLITE_EXTENSION_INIT3
 #endif
 
 #include "fsql_sqlite_internal.h"
+#include "fsql_plugin_verify.h"
 
 /* ------------------------------------------------------------------ */
 /* Error helpers                                                       */
@@ -449,7 +450,28 @@ int fsql_reasoning_ensure_attached(FsqlState *st, int tier,
         return -1;
     }
 
-    int rc = fsql_load_reasoning(tier_ctx, path);
+    /* The plugin is native code run in this process; verify it first
+     * (its detached signature), and again after the load so a swap between
+     * the check and the dlopen is caught. */
+    char gate_err[512] = { 0 };
+    int rc = fsql_plugin_gate(path, gate_err, sizeof gate_err);
+    if (rc == 0) {
+        rc = fsql_load_reasoning(tier_ctx, path);
+        /* The plugin reads its environment once, at init. Scrub the bearer
+         * token from the process environment the moment the load is over, so it is not
+         * left readable by other code in the process, /proc/<pid>/environ or a core dump. */
+        fsql_unsetenv(ENV_TOKEN);
+        if (rc == 0 && fsql_plugin_gate(path, gate_err, sizeof gate_err) != 0) {
+            reasoning_env_unlock();
+            set_err(err, err_cap, "fractalsql: reasoning plugin changed during load: %s", gate_err);
+            return -1;
+        }
+    } else {
+        fsql_unsetenv(ENV_TOKEN);
+        reasoning_env_unlock();
+        set_err(err, err_cap, "fractalsql: %s", gate_err);
+        return -1;
+    }
 
     if (tier == FSQL_REASONING_TIER_T2S) {
         /* RESPONSE_MODE is unset right after the t2s load so the
@@ -505,6 +527,12 @@ int fsql_reasoning_generate(FsqlState *st, int tier, const char *query,
 
     if (!st || !st->ctx) {
         set_err(err, err_cap, "fractalsql: not initialized");
+        return -1;
+    }
+    if (st->generated_sql_depth > 0) {
+        set_err(err, err_cap,
+                "fractalsql: the reasoning endpoint is not permitted from "
+                "model-generated SQL");
         return -1;
     }
     if (!query) {
