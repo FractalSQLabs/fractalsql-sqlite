@@ -11,7 +11,7 @@
 --
 -- Prerequisites: extension loaded (sections 0-6 need nothing else).
 -- Section 3's rationale call needs the reasoning plugin -- see
--- ../docs/reasoning-setup.md (per-connection fractalsql_set state, so
+-- ../docs/reasoning-setup.md (per-connection fractal_config_set state, so
 -- re-apply your load_fractalsql.sql snippet with -init).
 --
 -- Run (one invocation):
@@ -46,7 +46,7 @@
 .timer on
 
 .print === 0. Sanity check: extension loaded? ===
-SELECT fractalsql_edition(), fractalsql_version();
+SELECT fractal_edition(), fractal_version();
 
 -- ------------------------------------------------------------------
 -- 1. 40 synthetic patients with a demographic/condition cohort and a

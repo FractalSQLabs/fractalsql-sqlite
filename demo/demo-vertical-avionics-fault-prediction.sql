@@ -33,7 +33,7 @@
 .timer on
 
 .print === 0. Sanity check: extension loaded? ===
-SELECT fractalsql_edition(), fractalsql_version();
+SELECT fractal_edition(), fractal_version();
 
 -- ------------------------------------------------------------------
 -- 1. A 12-aircraft fleet: planned path vs current state in 3D.  Eleven

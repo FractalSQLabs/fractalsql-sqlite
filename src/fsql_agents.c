@@ -491,7 +491,7 @@ static int agents_embed_query(FsqlState *st, const char *text,
     if (!st->cfg.reasoning_plugin || !*st->cfg.reasoning_plugin) {
         agents_set_err(err, err_cap,
                        "fractalsql: reasoning plugin not configured "
-                       "(set fractalsql_set('reasoning_plugin', "
+                       "(set fractal_config_set('reasoning_plugin', "
                        "'/absolute/path.so'))");
         return -1;
     }
@@ -500,7 +500,7 @@ static int agents_embed_query(FsqlState *st, const char *text,
          * substitute for a purpose-trained embedding model. */
         agents_set_err(err, err_cap,
                        "fractalsql: http_embed_url is not configured (set "
-                       "fractalsql_set('http_embed_url', ...))");
+                       "fractal_config_set('http_embed_url', ...))");
         return -1;
     }
 
@@ -548,7 +548,7 @@ static int agents_require_reasoning(const FsqlState *st, const char *who,
     if (!st->cfg.reasoning_plugin || !*st->cfg.reasoning_plugin) {
         agents_set_err(err, err_cap,
                        "%s: reasoning plugin not configured "
-                       "(set fractalsql_set('reasoning_plugin', "
+                       "(set fractal_config_set('reasoning_plugin', "
                        "'/absolute/path.so'))", who);
         return -1;
     }
@@ -1676,7 +1676,7 @@ static char *agents_check_allowlist(const FsqlState *st, const char *sql) {
             if (result)
                 snprintf(result, 256,
                          "statement is not permitted -- "
-                         "fractalsql_set('text_to_sql_allowed_statements') "
+                         "fractal_config_set('text_to_sql_allowed_statements') "
                          "is set to \"%s\"",
                          (mode && *mode) ? mode : "select");
         }

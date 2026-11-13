@@ -11,7 +11,7 @@
 --
 -- Prerequisites: extension loaded (sections 0-3 need nothing else).
 -- Section 4's rationale call needs the reasoning plugin -- see
--- ../docs/reasoning-setup.md (per-connection fractalsql_set state, so
+-- ../docs/reasoning-setup.md (per-connection fractal_config_set state, so
 -- re-apply your load_fractalsql.sql snippet with -init).
 --
 -- Run (one invocation):
@@ -42,7 +42,7 @@
 .timer on
 
 .print === 0. Sanity check: extension loaded? ===
-SELECT fractalsql_edition(), fractalsql_version();
+SELECT fractal_edition(), fractal_version();
 
 -- ------------------------------------------------------------------
 -- 1. 30 vessels, each with a BASELINE track vector (their filed/typical

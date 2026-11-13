@@ -59,7 +59,7 @@ if [ -z "${FRACTALSQL_EXTENSION_PATH:-}" ]; then
     export FRACTALSQL_EXTENSION_PATH
 fi
 if [ -z "${FRACTALSQL_BOOTSTRAP_SQL:-}" ] && [ -f "${FSQL_DEMO_INIT:-/work/demo_init.sql}" ]; then
-    # The entrypoint-generated bootstrap snippet (fractalsql_set() lines
+    # The entrypoint-generated bootstrap snippet (fractal_config_set() lines
     # pointing reasoning at the compose ollama service; the .load line is
     # honored-but-skipped). Pass the text itself, not the file path.
     FRACTALSQL_BOOTSTRAP_SQL="$(cat "${FSQL_DEMO_INIT:-/work/demo_init.sql}")"

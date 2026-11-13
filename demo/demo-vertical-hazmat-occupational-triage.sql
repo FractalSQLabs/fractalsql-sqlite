@@ -35,7 +35,7 @@
 .timer on
 
 .print === 0. Sanity check: extension loaded? ===
-SELECT fractalsql_edition(), fractalsql_version();
+SELECT fractal_edition(), fractal_version();
 
 -- ------------------------------------------------------------------
 -- 1. 36 synthetic workers across three work zones and two shifts.

@@ -36,7 +36,7 @@ set -euo pipefail
 
 # Same single-source-of-truth pattern as package.sh: derive from
 # FSQL_SQLITE_VERSION_STR rather than hardcoding a copy that can drift
-# out of sync with what fractalsql_version() actually returns.
+# out of sync with what fractal_version() actually returns.
 VERSION="${FSQL_PKG_VERSION:-$(sed -n 's/^#define FSQL_SQLITE_VERSION_STR   "\(.*\)"$/\1/p' src/fsql_sqlite_internal.h)}"
 [[ -n "${VERSION}" ]] || { echo "could not determine VERSION (FSQL_SQLITE_VERSION_STR not found in src/fsql_sqlite_internal.h)" >&2; exit 1; }
 
@@ -170,9 +170,9 @@ Install:
 Load in sqlite3:
   sqlite3 mydb.sqlite
   sqlite> .load /usr/local/lib/sqlite3/fractalsql
-  sqlite> SELECT fractalsql_edition(), fractalsql_version();
+  sqlite> SELECT fractal_edition(), fractal_version();
 
-Reasoning is opt-in. Point fractalsql_set('reasoning_plugin', ...) at
+Reasoning is opt-in. Point fractal_config_set('reasoning_plugin', ...) at
 fractalsql-reasoning-http.so and configure an endpoint — see
 docs/reasoning-setup.md. See fractalsql--1.0.sql for the full
 function-surface reference.

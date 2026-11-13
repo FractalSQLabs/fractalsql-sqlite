@@ -11,7 +11,7 @@
     THROWAWAY fixture database (a plain file under the temp root, opened
     in WAL mode and torn down on exit) -- no server install, no admin.
 
-    Every sqlite3 invocation is a FRESH connection (fractalsql_set()
+    Every sqlite3 invocation is a FRESH connection (fractal_config_set()
     config is per-connection state), so every call carries its own
     config preamble exactly as build_test.sh does.
 
@@ -45,7 +45,7 @@
                              fractal_schema_context's introspection
                              (python driver)
       09  guc_superuser      relative/traversal reasoning_plugin paths
-                             rejected at fractalsql_set time
+                             rejected at fractal_config_set time
       10  dos_and_injection  512-table cap fires at 513; an SQL-
                              injection-shaped table name is skipped by
                              introspection (never smuggled into SQL text)
@@ -424,7 +424,7 @@ function Resolve-Ext {
 # Run SQL through a FRESH connection with the extension loaded.
 # Each argument is one statement; a script can also be piped on stdin.
 # Config is per-connection, so every gate invocation carries its own
-# fractalsql_set() preamble -- the connection's own config surface.
+# fractal_config_set() preamble -- the connection's own config surface.
 function Sqlq {
     [CmdletBinding()]
     param(
@@ -604,7 +604,7 @@ function Compile-Plugins {
     $script:MockEmb = Join-Path $script:PlugDir 'mock_embed_plugin.dll'
     $script:EvilEmb = Join-Path $script:PlugDir 'evil_embed_plugin.dll'
     # The enterprise mock core: the fixture the ledger/audit gate loads
-    # through fractalsql_set('enterprise_lib', ...) for a real write and
+    # through fractal_config_set('enterprise_lib', ...) for a real write and
     # read-back path. FSQL_STATIC keeps the public header's import
     # decoration out of a fixture that is loaded at runtime, not linked.
     $name = 'mock_enterprise_core'
@@ -667,8 +667,8 @@ function T2sExpect {
     param([string]$Canned, [string]$Want, [string]$Label)
     [IO.File]::WriteAllText($script:SqlTxt, $Canned)
     $r = Sqlq `
-        "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
-        "SELECT fractalsql_set('text_to_sql_allowed_statements','select');" `
+        "SELECT fractal_config_set('reasoning_plugin','$($script:Mock)');" `
+        "SELECT fractal_config_set('text_to_sql_allowed_statements','select');" `
         "SELECT fractal_text_to_sql('q');"
     $rc = $script:SqlqRc
     if (-not $Want) {
@@ -894,9 +894,9 @@ function Gate-01-Build {
 }
 
 function Gate-02-Smoke {
-    $ver = Sqlq 'SELECT fractalsql_version();'
-    if ($ver -eq '2.0.12') { Pass "02 smoke: version=$ver" }
-    else { Fail "02 smoke: version='$ver' (want 2.0.12)" }
+    $ver = Sqlq 'SELECT fractal_version();'
+    if ($ver -eq '2.0.13') { Pass "02 smoke: version=$ver" }
+    else { Fail "02 smoke: version='$ver' (want 2.0.13)" }
     # fractal_search convergence: self-distance ~0
     $d = Sqlq "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');"
     if ($d -eq '0.0' -or (PyAbsLt1e6 $d)) { Pass "02 smoke: fractal_search self-distance=$d" }
@@ -905,7 +905,7 @@ function Gate-02-Smoke {
     $d2 = Sqlq "SELECT fractal_search('0.1,0.2,-0.3,0.4','0.1,0.2,-0.3,0.4');"
     if (PyAbsLt1e6 $d2) { Pass "02 smoke: fractal_search convergence=$d2" }
     else { Fail "02 smoke: convergence=$d2" }
-    $ed = Sqlq 'SELECT fractalsql_edition();'
+    $ed = Sqlq 'SELECT fractal_edition();'
     if ($ed -eq 'Community') { Pass "02 smoke: edition=$ed" }
     else { Fail "02 smoke: edition='$ed'" }
     # fractal_search_debug returns the FULL fsql_search_ptr result JSON
@@ -962,8 +962,8 @@ function Gate-04-TextToSql {
     # candidate.
     [IO.File]::WriteAllText($script:SqlTxt, '')
     if (ExpectErr 'the model response contained no SQL' `
-            "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
-            "SELECT fractalsql_set('text_to_sql_max_attempts','1');" `
+            "SELECT fractal_config_set('reasoning_plugin','$($script:Mock)');" `
+            "SELECT fractal_config_set('text_to_sql_max_attempts','1');" `
             "SELECT fractal_text_to_sql('q');") {
         Pass '04 empty candidate -> rejected (no fenced block, no bare statement)'
     }
@@ -971,29 +971,29 @@ function Gate-04-TextToSql {
     # auto-discovery: the full GENERATE -> ALLOWLIST -> prepare pipeline
     # works off the auto-built schema context (0-arg registration).
     [IO.File]::WriteAllText($script:SqlTxt, 'SELECT count(*) FROM bt_orders')
-    $auto = Sqlq "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" "SELECT fractal_text_to_sql('q');"
+    $auto = Sqlq "SELECT fractal_config_set('reasoning_plugin','$($script:Mock)');" "SELECT fractal_text_to_sql('q');"
     if ($script:SqlqRc -eq 0) {
         Pass '04 auto-discovery: text_to_sql off the auto-built context'
     }
     else { Fail "04 auto-discovery: got '$auto'" }
     # Model-generated SQL run by fractal_sql_agent(auto_execute) must not reach
     # the functions that change configuration. The model's reply is a SELECT:
-    # read-only, so it passes validation, but it calls fractalsql_set.
-    [IO.File]::WriteAllText($script:SqlTxt, "SELECT fractalsql_set('text_to_sql_max_attempts','9')")
-    $gen = (Sqlq "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
-                 "SELECT fractalsql_set('text_to_sql_max_attempts','1');" `
+    # read-only, so it passes validation, but it calls fractal_config_set.
+    [IO.File]::WriteAllText($script:SqlTxt, "SELECT fractal_config_set('text_to_sql_max_attempts','9')")
+    $gen = (Sqlq "SELECT fractal_config_set('reasoning_plugin','$($script:Mock)');" `
+                 "SELECT fractal_config_set('text_to_sql_max_attempts','1');" `
                  "SELECT fractal_sql_agent('q', NULL, 1, 1);" `
-                 "SELECT fractalsql_get('text_to_sql_max_attempts');" |
+                 "SELECT fractal_config_get('text_to_sql_max_attempts');" |
             ForEach-Object { "$_" }) -join "`n"
     if ($gen -match '"execution_status":"execution_failed"' -and (($gen -split "`n")[-1]).Trim() -eq '1') {
         Pass '04 model-generated SQL cannot change configuration (auto_execute)'
     }
-    else { Fail "04 model-generated SQL reached fractalsql_set: $gen" }
+    else { Fail "04 model-generated SQL reached fractal_config_set: $gen" }
     # Control: the same path does run a harmless generated SELECT, so the
     # refusal above is the guard and not a broken auto_execute.
     [IO.File]::WriteAllText($script:SqlTxt, 'SELECT count(*) FROM bt_orders')
-    $gen = (Sqlq "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
-                 "SELECT fractalsql_set('text_to_sql_max_attempts','1');" `
+    $gen = (Sqlq "SELECT fractal_config_set('reasoning_plugin','$($script:Mock)');" `
+                 "SELECT fractal_config_set('text_to_sql_max_attempts','1');" `
                  "SELECT fractal_sql_agent('q', NULL, 1, 1);" |
             ForEach-Object { "$_" }) -join "`n"
     if ($gen -match '"execution_status":"executed"') {
@@ -1030,17 +1030,17 @@ function Gate-05-EvilOverread {
     # variant ignores it.
     $env:FSQL_EVIL_SQL_FILE = $script:SqlTxt
     Set-EvilTrigger '1'
-    if (Survived "SELECT fractalsql_set('reasoning_plugin','$($script:EvilNt)');" "SELECT fractal_text_to_sql('q');") {
+    if (Survived "SELECT fractal_config_set('reasoning_plugin','$($script:EvilNt)');" "SELECT fractal_text_to_sql('q');") {
         Pass '05 evil_overread: GENERATE path (non-terminated guard-page response) survived'
     }
     else { Fail '05 evil_overread: GENERATE path crashed the process' }
-    if (Survived "SELECT fractalsql_set('reasoning_plugin','$($script:EvilNt)');" "SELECT fractal_reason('q','ctx');") {
+    if (Survived "SELECT fractal_config_set('reasoning_plugin','$($script:EvilNt)');" "SELECT fractal_reason('q','ctx');") {
         Pass '05 evil_overread: bare fractal_reason() survived'
     }
     else { Fail '05 evil_overread: bare fractal_reason() crashed the process' }
     Set-EvilTrigger '2'
-    if (Survived "SELECT fractalsql_set('reasoning_plugin','$($script:EvilNt)');" `
-            "SELECT fractalsql_set('text_to_sql_use_review','on');" `
+    if (Survived "SELECT fractal_config_set('reasoning_plugin','$($script:EvilNt)');" `
+            "SELECT fractal_config_set('text_to_sql_use_review','on');" `
             "SELECT fractal_text_to_sql('q');") {
         Pass '05 evil_overread: REVIEW path survived'
     }
@@ -1061,7 +1061,7 @@ function Gate-06-CrashRecovery {
     $null = Sqlq "INSERT INTO bt_crash_canary VALUES (42, 'pre-crash');"
 
     Set-EvilTrigger '1'
-    $r = Sqlq "SELECT fractalsql_set('reasoning_plugin','$($script:Crash)');" `
+    $r = Sqlq "SELECT fractal_config_set('reasoning_plugin','$($script:Crash)');" `
         "SELECT fractal_reason('q','ctx');"
     $rc = $script:SqlqRc
     if (-not (Test-Crashed $r $rc)) {
@@ -1111,13 +1111,13 @@ function Gate-07-EvilLyingLength {
         }
     }
     Set-EvilTrigger '1'
-    ExpectRej 'GENERATE path' "SELECT fractalsql_set('reasoning_plugin','$($script:Lying)');" `
+    ExpectRej 'GENERATE path' "SELECT fractal_config_set('reasoning_plugin','$($script:Lying)');" `
         "SELECT fractal_text_to_sql('q');"
-    ExpectRej 'bare fractal_reason()' "SELECT fractalsql_set('reasoning_plugin','$($script:Lying)');" `
+    ExpectRej 'bare fractal_reason()' "SELECT fractal_config_set('reasoning_plugin','$($script:Lying)');" `
         "SELECT fractal_reason('q');"
     Set-EvilTrigger '2'
-    ExpectRej 'REVIEW path' "SELECT fractalsql_set('reasoning_plugin','$($script:Lying)');" `
-        "SELECT fractalsql_set('text_to_sql_use_review','on');" `
+    ExpectRej 'REVIEW path' "SELECT fractal_config_set('reasoning_plugin','$($script:Lying)');" `
+        "SELECT fractal_config_set('text_to_sql_use_review','on');" `
         "SELECT fractal_text_to_sql('q');"
     Set-EvilTrigger '1'
 }
@@ -1188,21 +1188,21 @@ function Gate-08-Authz {
 }
 
 function Gate-09-GucSuperuser {
-    # Enforced at fractalsql_set time: a path key must be absolute with
+    # Enforced at fractal_config_set time: a path key must be absolute with
     # no traversal segments, whatever the caller's privileges.
     if (ExpectErr 'must be an absolute path with no ''..'' segments' `
-            "SELECT fractalsql_set('reasoning_plugin','plugins/mock.so');") {
+            "SELECT fractal_config_set('reasoning_plugin','plugins/mock.so');") {
         Pass '09 guc_superuser: relative reasoning_plugin rejected'
     }
     else { Fail '09 guc_superuser: relative path accepted' }
     if (ExpectErr 'must be an absolute path with no ''..'' segments' `
-            "SELECT fractalsql_set('reasoning_plugin','$($script:BTROOT)\..\evil.dll');") {
+            "SELECT fractal_config_set('reasoning_plugin','$($script:BTROOT)\..\evil.dll');") {
         Pass '09 guc_superuser: traversal reasoning_plugin rejected'
     }
     else { Fail '09 guc_superuser: traversal path accepted' }
     # Control: the canonical absolute form is accepted (no load happens
     # at set time -- set-time validation only).
-    $r = Sqlq "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');"
+    $r = Sqlq "SELECT fractal_config_set('reasoning_plugin','$($script:Mock)');"
     if ($r -eq 'ok') { Pass '09 guc_superuser: canonical absolute path accepted' }
     else { Fail "09 guc_superuser: canonical path rejected: $r" }
 }
@@ -1371,8 +1371,8 @@ function Gate-13-SiuMode {
         param([string]$Canned, [string]$Want, [string]$Label)
         [IO.File]::WriteAllText($script:SqlTxt, $Canned)
         $r = Sqlq `
-            "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
-            "SELECT fractalsql_set('text_to_sql_allowed_statements',
+            "SELECT fractal_config_set('reasoning_plugin','$($script:Mock)');" `
+            "SELECT fractal_config_set('text_to_sql_allowed_statements',
             'select_insert_update');" `
             "SELECT fractal_text_to_sql('q');"
         $rc = $script:SqlqRc
@@ -1403,8 +1403,8 @@ function Gate-14-Retry {
     }
     if (Test-Path -LiteralPath $script:RetryPrompt) { [IO.File]::Delete($script:RetryPrompt) }
     $r = Sqlq `
-        "SELECT fractalsql_set('reasoning_plugin','$($script:Retry)');" `
-        "SELECT fractalsql_set('text_to_sql_max_attempts','2');" `
+        "SELECT fractal_config_set('reasoning_plugin','$($script:Retry)');" `
+        "SELECT fractal_config_set('text_to_sql_max_attempts','2');" `
         "SELECT fractal_text_to_sql('q');"
     if ($script:SqlqRc -eq 0 -and $r.Contains('SELECT 1')) {
         Pass '14 retry: attempt 1 rejected, attempt 2 succeeded'
@@ -1426,8 +1426,8 @@ function Gate-14-Retry {
 function Gate-15-Embed {
     # fractal_embed() itself: real dispatch through the EMBED tier.
     $d = Sqlq `
-        "SELECT fractalsql_set('reasoning_plugin','$($script:MockEmb)');" `
-        "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" `
+        "SELECT fractal_config_set('reasoning_plugin','$($script:MockEmb)');" `
+        "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" `
         "SELECT fractal_vector_dims(fractal_embed('hello'));"
     $lastLine = (($d -split "`r?`n") | Select-Object -Last 1)
     if ($lastLine -eq '3') {
@@ -1443,22 +1443,22 @@ function Gate-15-Embed {
     }
     else { Fail '15 embed: unconfigured embed did not error' }
     if (ExpectErr 'http_embed_url is not configured' `
-            "SELECT fractalsql_set('reasoning_plugin','$($script:MockEmb)');" `
+            "SELECT fractal_config_set('reasoning_plugin','$($script:MockEmb)');" `
             "SELECT fractal_embed('x');") {
         Pass '15 embed: chat-only config rejected (no http_url fallback)'
     }
     else { Fail '15 embed: missing http_embed_url did not error' }
     if (ExpectErr 'failed to load reasoning plugin' `
-            "SELECT fractalsql_set('reasoning_plugin','C:\nonexistent\nope.dll');" `
-            "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" `
+            "SELECT fractal_config_set('reasoning_plugin','C:\nonexistent\nope.dll');" `
+            "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" `
             "SELECT fractal_embed('x');") {
         Pass '15 embed: unloadable plugin errors clearly'
     }
     else { Fail '15 embed: bad plugin path did not error' }
     if (HavePlugin $script:EvilEmb) {
         if (ExpectErr 'could not parse embedding response' `
-                "SELECT fractalsql_set('reasoning_plugin','$($script:EvilEmb)');" `
-                "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" `
+                "SELECT fractal_config_set('reasoning_plugin','$($script:EvilEmb)');" `
+                "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" `
                 "SELECT fractal_embed('x');") {
             Pass '15 embed: over-limit (16385-elem) response rejected'
         }
@@ -1474,8 +1474,8 @@ function Gate-15-Embed {
         'CREATE TABLE bt_vembed(
         id INTEGER PRIMARY KEY, body TEXT, emb TEXT);' `
         "INSERT INTO bt_vembed(body) VALUES ('a'),('b'),('c');" `
-        "SELECT fractalsql_set('reasoning_plugin','$($script:MockEmb)');" `
-        "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" `
+        "SELECT fractal_config_set('reasoning_plugin','$($script:MockEmb)');" `
+        "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" `
         "SELECT fractal_vectorizer_create('bt_vembed','body','emb');" `
         "SELECT 'PROCESSED=' || fractal_vectorizer_process_queue(10);" `
         "SELECT 'DONE=' || n FROM fractal_vectorizer_status
@@ -1522,8 +1522,8 @@ function Gate-15-Embed {
         'CREATE TABLE bt_vsoak_stub(
         id INTEGER PRIMARY KEY, body TEXT, emb TEXT);' `
         "INSERT INTO bt_vsoak_stub(body) VALUES ('p');" `
-        "SELECT fractalsql_set('reasoning_plugin','$($script:MockEmb)');" `
-        "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" `
+        "SELECT fractal_config_set('reasoning_plugin','$($script:MockEmb)');" `
+        "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" `
         "SELECT fractal_vectorizer_create('bt_vsoak_stub','body','emb');" `
         'SELECT fractal_vectorizer_pause(1);' `
         "SELECT 'P=' || fractal_vectorizer_process_queue(10);" `
@@ -1636,8 +1636,8 @@ function Gate-17-EmbedSoak {
         return
     }
     $r = Sqlq `
-        "SELECT fractalsql_set('reasoning_plugin','$($script:MockEmb)');" `
-        "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" `
+        "SELECT fractal_config_set('reasoning_plugin','$($script:MockEmb)');" `
+        "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" `
         "SELECT fractal_vectorizer_create('bt_vsoak','body','emb');" `
         "SELECT 'P=' || fractal_vectorizer_process_queue(20);" `
         "SELECT 'P=' || fractal_vectorizer_process_queue(20);" `
@@ -1666,8 +1666,8 @@ function Gate-18-EmbedCrash {
     INSERT INTO bt_vcrash(body) VALUES ('a'),('b');
 '@ *> $null
     $r = Sqlq `
-        "SELECT fractalsql_set('reasoning_plugin','$($script:Crash)');" `
-        "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" `
+        "SELECT fractal_config_set('reasoning_plugin','$($script:Crash)');" `
+        "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" `
         "SELECT fractal_vectorizer_create('bt_vcrash','body','emb');" `
         'SELECT fractal_vectorizer_process_queue(10);'
     $rc = $script:SqlqRc
@@ -1788,7 +1788,7 @@ function Gate-20-ApiFunc {
     # fractal_reason happy-path correctness through the chat tier (the
     # bare call gets the fenced form; RESPONSE_MODE is t2s-internal).
     [IO.File]::WriteAllText($script:SqlTxt, 'canary-reason-response')
-    $r = Sqlq "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
+    $r = Sqlq "SELECT fractal_config_set('reasoning_plugin','$($script:Mock)');" `
         "SELECT fractal_reason('q');"
     if ($r.Contains('canary-reason-response')) {
         Pass '20 api_func: fractal_reason returns the canned response'
@@ -1832,8 +1832,8 @@ function Gate-20-ApiFunc {
         id INTEGER PRIMARY KEY, body TEXT, emb TEXT);' `
         "INSERT INTO bt_vstale(id, body)
       VALUES (995,'a'),(996,'b'),(997,'c'),(998,'d'),(999,'e');" `
-        "SELECT fractalsql_set('reasoning_plugin','$($script:MockEmb)');" `
-        "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" `
+        "SELECT fractal_config_set('reasoning_plugin','$($script:MockEmb)');" `
+        "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" `
         "SELECT fractal_vectorizer_create('bt_vstale','body','emb');" `
         "UPDATE fractal_vectorizer_queue
       SET status='processing',
@@ -2452,10 +2452,10 @@ function Gate-23-Agents {
     # Preamble shared by every agent invocation (chat + embed tiers both
     # served by the embed-capable mock; endpoint keys are dummies).
     $pre = @(
-        "SELECT fractalsql_set('reasoning_plugin','$($script:MockEmb)');"
-        "SELECT fractalsql_set('http_url','https://llm.invalid/v1');"
-        "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');"
-        "SELECT fractalsql_set('http_model','mock-model');"
+        "SELECT fractal_config_set('reasoning_plugin','$($script:MockEmb)');"
+        "SELECT fractal_config_set('http_url','https://llm.invalid/v1');"
+        "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');"
+        "SELECT fractal_config_set('http_model','mock-model');"
     )
     function Agent {
         param([string]$Label, [Parameter(ValueFromRemainingArguments = $true)][string[]]$Stmts)
@@ -2617,7 +2617,7 @@ function Gate-24-Enterprise {
     # either way it is a distinct message from the unconfigured
     # dormant-tier one.
     if (ExpectErr 'no signature found for enterprise library' `
-            "SELECT fractalsql_set('enterprise_lib',
+            "SELECT fractal_config_set('enterprise_lib',
         'C:\nonexistent\fractalsql-enterprise.dll');" `
             'SELECT fractal_ledger_flush();') {
         Pass '24 enterprise: bogus enterprise_lib surfaces the load failure'
@@ -2664,7 +2664,7 @@ def connect():
     con.enable_load_extension(True)
     con.load_extension(ext)
     con.execute("PRAGMA busy_timeout=5000")
-    con.execute("SELECT fractalsql_set('enterprise_lib', ?)", (absw,))
+    con.execute("SELECT fractal_config_set('enterprise_lib', ?)", (absw,))
     return con
 
 # ---- Phase A: fill-to-cap (64 truth + 64 shadow = 128) + 10 churn
@@ -2795,7 +2795,7 @@ except sqlite3.Error as e:
 try:
     con = connect()
     con.execute("DROP TABLE IF EXISTS fractalsql_ledger")
-    con.execute("SELECT fractalsql_set('enterprise_ledger_key', 'gate25-mac-key')")
+    con.execute("SELECT fractal_config_set('enterprise_ledger_key', 'gate25-mac-key')")
     con.execute("SELECT fractal_diversify_enable()")
     con.execute("SELECT fractal_ledger_reset_hard()")
     con.execute("SELECT fractal_feedback_report(1, 'positive')")
@@ -2891,7 +2891,7 @@ function Gate-26-EnterpriseSignature {
     # load. With no enterprise lib resolvable, enterprise_require_
     # signature=on must still surface the LOAD error, not a signature
     # error.
-    $r = Sqlq "SELECT fractalsql_set('enterprise_require_signature','on');" `
+    $r = Sqlq "SELECT fractal_config_set('enterprise_require_signature','on');" `
         'SELECT fractal_ledger_flush();'
     $rc = $script:SqlqRc
     if ($rc -ne 0 -and $r.Contains('enterprise tier not loaded') `
@@ -2931,11 +2931,11 @@ function Gate-27-Think {
     # 1) fractal_reason's chat tier forwards all four keys.
     if (Test-Path -LiteralPath $script:ThinkDump) { [IO.File]::Delete($script:ThinkDump) }
     $null = Sqlq `
-        "SELECT fractalsql_set('reasoning_plugin','$($script:Think)');" `
-        "SELECT fractalsql_set('http_think','high');" `
-        "SELECT fractalsql_set('http_think_provider','openai');" `
-        "SELECT fractalsql_set('http_native_url','https://native.invalid/x');" `
-        "SELECT fractalsql_set('http_num_ctx','8192');" `
+        "SELECT fractal_config_set('reasoning_plugin','$($script:Think)');" `
+        "SELECT fractal_config_set('http_think','high');" `
+        "SELECT fractal_config_set('http_think_provider','openai');" `
+        "SELECT fractal_config_set('http_native_url','https://native.invalid/x');" `
+        "SELECT fractal_config_set('http_num_ctx','8192');" `
         "SELECT fractal_reason('q');"
     AssertDump 'fractal_reason forwards the THINK block' `
         @('^THINK=high$', '^THINK_PROVIDER=openai$',
@@ -2943,11 +2943,11 @@ function Gate-27-Think {
     # 2) fractal_text_to_sql's GENERATE step forwards them too.
     if (Test-Path -LiteralPath $script:ThinkDump) { [IO.File]::Delete($script:ThinkDump) }
     $null = Sqlq `
-        "SELECT fractalsql_set('reasoning_plugin','$($script:Think)');" `
-        "SELECT fractalsql_set('http_think','low');" `
-        "SELECT fractalsql_set('http_think_provider','anthropic');" `
-        "SELECT fractalsql_set('http_native_url','https://native.invalid/y');" `
-        "SELECT fractalsql_set('http_num_ctx','4096');" `
+        "SELECT fractal_config_set('reasoning_plugin','$($script:Think)');" `
+        "SELECT fractal_config_set('http_think','low');" `
+        "SELECT fractal_config_set('http_think_provider','anthropic');" `
+        "SELECT fractal_config_set('http_native_url','https://native.invalid/y');" `
+        "SELECT fractal_config_set('http_num_ctx','4096');" `
         "SELECT fractal_text_to_sql('q');"
     AssertDump 'fractal_text_to_sql GENERATE forwards the THINK block' `
         @('^THINK=low$', '^THINK_PROVIDER=anthropic$',
@@ -2956,12 +2956,12 @@ function Gate-27-Think {
     # in its own env block; think keys are chat-effort only).
     if (Test-Path -LiteralPath $script:ThinkDump) { [IO.File]::Delete($script:ThinkDump) }
     $null = Sqlq `
-        "SELECT fractalsql_set('reasoning_plugin','$($script:Think)');" `
-        "SELECT fractalsql_set('http_think','high');" `
-        "SELECT fractalsql_set('http_think_provider','openai');" `
-        "SELECT fractalsql_set('http_native_url','https://native.invalid/x');" `
-        "SELECT fractalsql_set('http_num_ctx','8192');" `
-        "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" `
+        "SELECT fractal_config_set('reasoning_plugin','$($script:Think)');" `
+        "SELECT fractal_config_set('http_think','high');" `
+        "SELECT fractal_config_set('http_think_provider','openai');" `
+        "SELECT fractal_config_set('http_native_url','https://native.invalid/x');" `
+        "SELECT fractal_config_set('http_num_ctx','8192');" `
+        "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" `
         "SELECT fractal_embed('x');"
     AssertDump 'fractal_embed sees NO THINK keys' `
         @('^THINK=(unset)$', '^THINK_PROVIDER=(unset)$')
@@ -2996,7 +2996,7 @@ function Gate-28-ReviewIsolation {
     [IO.File]::WriteAllText($script:SqlTxt, 'SELECT 1')
     if (Test-Path -LiteralPath $script:ReviewDump) { [IO.File]::Delete($script:ReviewDump) }
     $null = Sqlq `
-        "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
+        "SELECT fractal_config_set('reasoning_plugin','$($script:Mock)');" `
         "SELECT fractal_text_to_sql('q');"
     AssertDump 'GENERATE still runs under T2S''s forced RESPONSE_MODE=code' '^RESPONSE_MODE=code$'
     # 2) The actual regression check: with review enabled, REVIEW's own
@@ -3005,8 +3005,8 @@ function Gate-28-ReviewIsolation {
     [IO.File]::WriteAllText($script:SqlTxt, 'SELECT 1')
     if (Test-Path -LiteralPath $script:ReviewDump) { [IO.File]::Delete($script:ReviewDump) }
     $null = Sqlq `
-        "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
-        "SELECT fractalsql_set('text_to_sql_use_review','on');" `
+        "SELECT fractal_config_set('reasoning_plugin','$($script:Mock)');" `
+        "SELECT fractal_config_set('text_to_sql_use_review','on');" `
         "SELECT fractal_text_to_sql('q');"
     AssertDump 'REVIEW never sees T2S''s forced RESPONSE_MODE=code' '^RESPONSE_MODE=(unset)$'
     # 3) Operator boot capture (the pg wrapper's g_response_mode_boot
@@ -3022,7 +3022,7 @@ function Gate-28-ReviewIsolation {
         $env:FSQL_REASONING_HTTP_RESPONSE_MODE = 'json'
         if (Test-Path -LiteralPath $script:ReviewDump) { [IO.File]::Delete($script:ReviewDump) }
         $null = Sqlq `
-            "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
+            "SELECT fractal_config_set('reasoning_plugin','$($script:Mock)');" `
             "SELECT fractal_reason('summarize');"
         AssertDump 'CHAT tier applies the operator''s boot RESPONSE_MODE' '^RESPONSE_MODE=json$'
         # 4) The unset side of the same lever: with nothing in the env,
@@ -3030,7 +3030,7 @@ function Gate-28-ReviewIsolation {
         Remove-Item Env:FSQL_REASONING_HTTP_RESPONSE_MODE -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath $script:ReviewDump) { [IO.File]::Delete($script:ReviewDump) }
         $null = Sqlq `
-            "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
+            "SELECT fractal_config_set('reasoning_plugin','$($script:Mock)');" `
             "SELECT fractal_reason('summarize');"
         AssertDump 'CHAT tier unsets RESPONSE_MODE when the operator did not set one' '^RESPONSE_MODE=(unset)$'
     }
@@ -3070,7 +3070,7 @@ function Gate-29-DomainAgents {
 
     # --- 1: fractal_agent_anomaly_triage (table + drift + reason) ------
     $r1 = Sqlq `
-        "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
+        "SELECT fractal_config_set('reasoning_plugin','$($script:Mock)');" `
         "SELECT json_extract(fractal_agent_anomaly_triage('bt_da_logs','metric','ts','host','host-1',32),'`$.threat_score');"
     if ($r1 -match '(?m)^-?[0-9]+(\.[0-9]+)?$') {
         Pass '29 domain_agents: anomaly_triage threat_score is a real computed drift float'
@@ -3079,7 +3079,7 @@ function Gate-29-DomainAgents {
     }
 
     $r1b = Sqlq `
-        "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
+        "SELECT fractal_config_set('reasoning_plugin','$($script:Mock)');" `
         "SELECT json_extract(fractal_agent_anomaly_triage('bt_da_logs','metric','ts','host','host-1',32),'`$.triage_summary');"
     if ($r1b.Contains('domain-agent-canary')) {
         Pass '29 domain_agents: anomaly_triage composes drift -> reason (reason step ran)'
@@ -3109,7 +3109,7 @@ function Gate-29-DomainAgents {
     $rnd = [System.Random]::new(7)
     $series = (0..99 | ForEach-Object { [Math]::Round(0.1 * $_ + ($rnd.NextDouble() - 0.5) * 0.05, 6) }) -join ','
     $r4 = Sqlq `
-        "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
+        "SELECT fractal_config_set('reasoning_plugin','$($script:Mock)');" `
         "SELECT json_extract(fractal_agent_regime_triage('$series',32),'`$.dfa_exponent');"
     if ($r4 -match '(?m)^-?[0-9]+(\.[0-9]+)?$') {
         Pass '29 domain_agents: regime_triage dfa_exponent is a real computed float'
@@ -3118,7 +3118,7 @@ function Gate-29-DomainAgents {
     }
 
     $r4b = Sqlq `
-        "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
+        "SELECT fractal_config_set('reasoning_plugin','$($script:Mock)');" `
         "SELECT json_extract(fractal_agent_regime_triage('$series',32),'`$.rationale');"
     if ($r4b.Contains('domain-agent-canary')) {
         Pass '29 domain_agents: regime_triage composes dfa+drift -> reason (reason step ran)'
@@ -3139,7 +3139,7 @@ function Gate-29-DomainAgents {
         return
     }
     $r5 = Sqlq `
-        "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
+        "SELECT fractal_config_set('reasoning_plugin','$($script:Mock)');" `
         "SELECT fractal_agent_outlier_intercept('0.95,0.05,0.0',
        'bt_da_badstates', 'state_vec', 0.5);"
     if ($r5.Contains('"intercepted":true') -and $r5.Contains('domain-agent-canary')) {
@@ -3150,7 +3150,7 @@ function Gate-29-DomainAgents {
     # The small-magnitude state is ~0.95 away in Euclidean terms even
     # though cosine would call it near -- the exact-L2 path allows it.
     $r5b = Sqlq `
-        "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
+        "SELECT fractal_config_set('reasoning_plugin','$($script:Mock)');" `
         "SELECT fractal_agent_outlier_intercept('0.05,0.0,0.0',
        'bt_da_badstates', 'state_vec', 0.8, 'l2');"
     if ($r5b.Contains('"intercepted":false') -and $r5b.Contains('domain-agent-canary')) {
@@ -3160,7 +3160,7 @@ function Gate-29-DomainAgents {
     }
     # Any other metric value (including 'euclid' and NULL) is a hard error.
     if (ExpectErr "metric must be 'cosine' or 'l2'" `
-            "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
+            "SELECT fractal_config_set('reasoning_plugin','$($script:Mock)');" `
             "SELECT fractal_agent_outlier_intercept('1.0,0.0,0.0',
         'bt_da_badstates','state_vec', 0.5, 'euclid');") {
         Pass "29 domain_agents: outlier_intercept unknown metric rejected"
@@ -3180,16 +3180,16 @@ function Gate-29-DomainAgents {
     # raising either way.
     $bogusPlugin = Join-Path $script:Here 'no_such_reasoning_plugin.dll'
     if (ExpectErr "failed to load reasoning plugin" `
-            "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" `
-            "SELECT fractalsql_set('reasoning_plugin','$bogusPlugin');" `
+            "SELECT fractal_config_set('agent_partial_reasoning_fail','off');" `
+            "SELECT fractal_config_set('reasoning_plugin','$bogusPlugin');" `
             "SELECT fractal_agent_regime_triage('$series',32);") {
         Pass '29 domain_agents: flag off (default) keeps the reasoning-endpoint raise'
     } else {
         Fail '29 domain_agents: expected the default raise with agent_partial_reasoning_fail off'
     }
     $r18 = Sqlq `
-        "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" `
-        "SELECT fractalsql_set('reasoning_plugin','$bogusPlugin');" `
+        "SELECT fractal_config_set('agent_partial_reasoning_fail','on');" `
+        "SELECT fractal_config_set('reasoning_plugin','$bogusPlugin');" `
         "SELECT fractal_agent_regime_triage('$series',32);"
     if ($r18.Contains('"reasoning_step_failed"')) {
         Pass '29 domain_agents: flag on returns the data half plus reasoning_step_failed'
@@ -3203,7 +3203,7 @@ function Gate-29-DomainAgents {
     }
 
     # Restore the live mock for safety (state is per-connection anyway).
-    $null = Sqlq "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');"
+    $null = Sqlq "SELECT fractal_config_set('reasoning_plugin','$($script:Mock)');"
 
     [IO.File]::WriteAllText($script:SqlTxt, 'SELECT 1')
 }
@@ -3485,7 +3485,7 @@ function Gate-31-LedgerChain {
     # The payload is built with json_object() rather than a JSON literal:
     # a literal needs embedded double quotes, which the shell's argv
     # handling strips on the way to the sqlite3 CLI.
-    $red = Sqlq "SELECT fractalsql_set('enterprise_lib','$($script:MockEnt)');" `
+    $red = Sqlq "SELECT fractal_config_set('enterprise_lib','$($script:MockEnt)');" `
         "SELECT fractal_audit_log('test.redact', json_object('question','$qtext','n',1));" `
         "SELECT fractal_audit_unpack(payload) FROM fractalsql_ledger WHERE kind=2 ORDER BY rowid DESC LIMIT 1;"
     Remove-Item Env:FSQL_AUDIT_REDACT
@@ -3506,7 +3506,7 @@ function Gate-31-LedgerChain {
     }
 
     $env:FSQL_AUDIT_REDACT = 'truncate'
-    $trc = Sqlq "SELECT fractalsql_set('enterprise_lib','$($script:MockEnt)');" `
+    $trc = Sqlq "SELECT fractal_config_set('enterprise_lib','$($script:MockEnt)');" `
         "SELECT fractal_audit_log('test.truncate', json_object('question','$qtext','n',1));" `
         "SELECT fractal_audit_unpack(payload) FROM fractalsql_ledger WHERE kind=2 ORDER BY rowid DESC LIMIT 1;"
     Remove-Item Env:FSQL_AUDIT_REDACT
@@ -3525,7 +3525,7 @@ function Gate-31-LedgerChain {
     # published outside the database, so a chain whose tail was deleted
     # no longer matches what was published.
     $env:FSQL_LEDGER_ANCHOR_LOG = 'stderr'
-    $anc = Sqlq "SELECT fractalsql_set('enterprise_lib','$($script:MockEnt)');" `
+    $anc = Sqlq "SELECT fractal_config_set('enterprise_lib','$($script:MockEnt)');" `
         "SELECT fractal_audit_log('test.anchor', json_object('n',3));"
     Remove-Item Env:FSQL_LEDGER_ANCHOR_LOG
     $anchorLine = ''
@@ -3551,7 +3551,7 @@ function Gate-31-LedgerChain {
         Fail "31 ledger_chain: anchor hash ($anchorHash) does not match the chain head ($headHash)"
     }
     # Without the anchor log switched on, nothing is published.
-    $noanc = Sqlq "SELECT fractalsql_set('enterprise_lib','$($script:MockEnt)');" `
+    $noanc = Sqlq "SELECT fractal_config_set('enterprise_lib','$($script:MockEnt)');" `
         "SELECT fractal_audit_log('test.anchor.off', json_object('n',4));"
     if ($noanc -like '*ledger_head*') {
         Fail '31 ledger_chain: the anchor log published a line while it was switched off'
@@ -3622,8 +3622,8 @@ function Gate-32-EnterpriseSignatureReal {
     # require=off -- soft: still loads and works.
     $env:FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE = '0'
     $ra = Sqlq `
-        "SELECT fractalsql_set('enterprise_lib', '$found');" `
-        "SELECT fractalsql_set('enterprise_require_signature','off');" `
+        "SELECT fractal_config_set('enterprise_lib', '$found');" `
+        "SELECT fractal_config_set('enterprise_require_signature','off');" `
         'SELECT fractal_ledger_reset_hard();'
     $rca = $script:SqlqRc
     Remove-Item Env:\FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE -ErrorAction SilentlyContinue
@@ -3636,8 +3636,8 @@ function Gate-32-EnterpriseSignatureReal {
     # ---- Case B: no .sig, no env opt-out -- hard refusal even with
     # require=off (verification is mandatory without the opt-out).
     $rb = Sqlq `
-        "SELECT fractalsql_set('enterprise_lib', '$found');" `
-        "SELECT fractalsql_set('enterprise_require_signature','off');" `
+        "SELECT fractal_config_set('enterprise_lib', '$found');" `
+        "SELECT fractal_config_set('enterprise_require_signature','off');" `
         'SELECT fractal_ledger_reset_hard();'
     $rcb = $script:SqlqRc
     if ($rcb -ne 0 -and $rb.Contains('no signature found') `
@@ -3652,8 +3652,8 @@ function Gate-32-EnterpriseSignatureReal {
     # verify() path (rejecting a well-formed-but-wrong signature).
     New-RandomSigFile -Path $sigPath -Length 64
     $rc = Sqlq `
-        "SELECT fractalsql_set('enterprise_lib', '$found');" `
-        "SELECT fractalsql_set('enterprise_require_signature','off');" `
+        "SELECT fractal_config_set('enterprise_lib', '$found');" `
+        "SELECT fractal_config_set('enterprise_require_signature','off');" `
         'SELECT fractal_ledger_reset_hard();'
     $rcc = $script:SqlqRc
     if ($rcc -ne 0 -and $rc.Contains('failed signature verification')) {
@@ -3666,8 +3666,8 @@ function Gate-32-EnterpriseSignatureReal {
     # never treated as "missing".
     New-RandomSigFile -Path $sigPath -Length 32
     $rd = Sqlq `
-        "SELECT fractalsql_set('enterprise_lib', '$found');" `
-        "SELECT fractalsql_set('enterprise_require_signature','off');" `
+        "SELECT fractal_config_set('enterprise_lib', '$found');" `
+        "SELECT fractal_config_set('enterprise_require_signature','off');" `
         'SELECT fractal_ledger_reset_hard();'
     $rcd = $script:SqlqRc
     if ($rcd -ne 0 -and $rd.Contains('failed signature verification')) {
@@ -3886,7 +3886,7 @@ function Gate-41-DbProbe {
     $lines = @(
         '@echo off',
         "call `"$vcvars64`" >nul 2>&1",
-        "cl.exe /nologo /std:c++17 /utf-8 /EHsc /MT /O1 /Zi /DFSQL_MCP_VERSION=`"\`"2.0.12\`"`" ^",
+        "cl.exe /nologo /std:c++17 /utf-8 /EHsc /MT /O1 /Zi /DFSQL_MCP_VERSION=`"\`"2.0.13\`"`" ^",
         "  /I `"$mcpDir\vendor`" /I `"$mcpDir\src`" /I `"$sqliteDir`" /I `"$opensslDir\include`" ^",
         "  `"$mcpDir\tests\db_probe.cpp`" `"$mcpDir\src\errors.cpp`" `"$mcpDir\src\logging.cpp`" `"$sqliteDir\sqlite3.c`" ^",
         "  /Fo`"$outDir\\`" /Fe`"$bin`" ^",
@@ -4044,7 +4044,7 @@ function Gate-43-Kits {
         Push-Location $tmp
         try {
             $raw = & $script:Sqlite3 -batch -cmd ".load $kitExt" `
-                       -cmd "SELECT fractalsql_set('reasoning_plugin','$($script:Mock)');" `
+                       -cmd "SELECT fractal_config_set('reasoning_plugin','$($script:Mock)');" `
                        ':memory:' ".read '$kitLoad'" 2>&1
         }
         finally { Pop-Location }
@@ -4247,9 +4247,9 @@ function Gate-37-McpSmoke {
     # file, so the server process runs with its CWD at $script:BTROOT
     # (where the harness keeps the fixed file contracts). The bootstrap
     # snippet follows the MCP bootstrap mechanism: FRACTALSQL_BOOTSTRAP_SQL
-    # carries the per-connection fractalsql_set() call pointing at the
+    # carries the per-connection fractal_config_set() call pointing at the
     # mock plugin, exactly as easy_install's load_fractalsql.sql does.
-    $bootstrap = "SELECT fractalsql_set('reasoning_plugin','" + $script:Mock.Replace("'", "''") + "');"
+    $bootstrap = "SELECT fractal_config_set('reasoning_plugin','" + $script:Mock.Replace("'", "''") + "');"
     $env:MCP_HERE                  = Join-Path $script:Here 'mcp'
     $env:MCP_SERVER_EXE            = $script:McpExe
     $env:MCP_CANARY_FILE           = $script:SqlTxt
@@ -4653,7 +4653,7 @@ function Gate-45-McpConformance {
     $env:MCPC_GATE                 = '45'
     $env:MCPC_LOCK_DIR             = Join-Path $script:Here 'mcp'
     $env:MCPC_PASSTHROUGH_ENV      = 'SQLITE_DB_PATH,FRACTALSQL_EXTENSION_PATH'
-    $env:MCPC_READ_TOOL            = 'fractalsql_get_version'
+    $env:MCPC_READ_TOOL            = 'fractal_version'
     $env:MCPC_READ_ARGS            = '{}'
     $env:MCPC_STATE_TOOL           = 'fractal_diversify_enable'
     $env:MCPC_STATE_ARGS           = '{}'

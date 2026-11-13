@@ -54,7 +54,7 @@ reasoning posture.
   serving layer (vLLM, Together AI, Fireworks AI). This is engine-level
   config, not MCP-specific: set it exactly as documented in
   [reasoning-setup.md](reasoning-setup.md), via
-  `FRACTALSQL_BOOTSTRAP_SQL` or the `fractalsql_configure_reasoning`
+  `FRACTALSQL_BOOTSTRAP_SQL` or the `fractal_configure_reasoning`
   tool.
 - **Distributed / replicated storage.** The server opens whatever file
   `SQLITE_DB_PATH` names, so file-layer replication that doesn't touch
@@ -112,7 +112,7 @@ Sanity check without a database: `fractalsql-sqlite-mcp --version` and
 | --- | --- | --- |
 | `SQLITE_DB_PATH` | yes | The database file (or `:memory:`) the MCP server's connection opens. **This file is your access-control boundary**; see [Security](#security). |
 | `FRACTALSQL_EXTENSION_PATH` | yes | The `fractalsql.so` / `.dylib` / `.dll` to load in-process. |
-| `FRACTALSQL_BOOTSTRAP_SQL` | recommended | The per-connection `fractalsql_set(...)` snippet the server applies at session start: the same `load_fractalsql.sql` text [easy_install](getting-started.md) generates (`.load` lines in it are honored-but-skipped; the extension loads via the driver first). |
+| `FRACTALSQL_BOOTSTRAP_SQL` | recommended | The per-connection `fractal_config_set(...)` snippet the server applies at session start: the same `load_fractalsql.sql` text [easy_install](getting-started.md) generates (`.load` lines in it are honored-but-skipped; the extension loads via the driver first). |
 | `FSQL_MCP_HTTP_HOST` / `FSQL_MCP_HTTP_PORT` / `FSQL_MCP_HTTP_PATH` | no | HTTP transport bind address (default `127.0.0.1:8765`, path `/mcp`); transport is chosen by flag (`--http`/`--https`), not env. Default posture is TLS terminating **in front** (reverse proxy/LB); see [Security](#security). |
 | `FSQL_MCP_AUTH_TOKEN` / `FSQL_MCP_AUTH_TOKEN_FILE` | http(s) only | Opaque Bearer token (or a mtime-hot-reloaded token file for rotation without downtime). Required for the HTTP/HTTPS transport, never used on stdio; TLS is never a substitute for it. |
 | `FSQL_MCP_TOKEN_POLICY_FILE` | no | Per-client credentials: a JSON file naming clients, each with the SHA-256 of its token, an optional expiry and an optional tool allowlist. See [Authentication](#authentication). |
@@ -166,9 +166,9 @@ by default. One setting turns it off:
 Requests whose JSON nests deeper than 128 levels are rejected with a parse error, and an HTTP request with ambiguous framing (a repeated or non-numeric `Content-Length`, or an unsupported `Transfer-Encoding`) is refused with `400`.
 
 Reasoning/embedding provider config (chat URL, models, etc.) stays
-where the engine's own docs put it: per-connection `fractalsql_set`
+where the engine's own docs put it: per-connection `fractal_config_set`
 state, applied through `FRACTALSQL_BOOTSTRAP_SQL` or the
-`fractalsql_configure_reasoning` tool. The MCP server never stores a
+`fractal_configure_reasoning` tool. The MCP server never stores a
 provider token or the enterprise ledger key itself.
 
 ### 2. Run it
@@ -176,7 +176,7 @@ provider token or the enterprise ledger key itself.
 ```bash
 export SQLITE_DB_PATH=/data/app.sqlite
 export FRACTALSQL_EXTENSION_PATH=/usr/local/lib/sqlite3/fractalsql.so
-export FRACTALSQL_BOOTSTRAP_SQL="SELECT fractalsql_set('http_url','http://127.0.0.1:11434/v1/chat/completions'); SELECT fractalsql_set('http_allow_plaintext','on'); SELECT fractalsql_set('http_model','gpt-oss:20b');"
+export FRACTALSQL_BOOTSTRAP_SQL="SELECT fractal_config_set('http_url','http://127.0.0.1:11434/v1/chat/completions'); SELECT fractal_config_set('http_allow_plaintext','on'); SELECT fractal_config_set('http_model','gpt-oss:20b');"
 
 # Linux/macOS: the Makefile build output; Windows: mcp\dist\windows-mcp\
 /path/to/fractalsql-sqlite/mcp/fractalsql-sqlite-mcp
@@ -184,7 +184,7 @@ export FRACTALSQL_BOOTSTRAP_SQL="SELECT fractalsql_set('http_url','http://127.0.
 
 On Docker Desktop, `FRACTALSQL_BOOTSTRAP_SQL` can point at Docker Model
 Runner instead of Ollama with no extra container:
-`SELECT fractalsql_set('http_url','http://127.0.0.1:12434/engines/v1/chat/completions'); SELECT fractalsql_set('http_allow_plaintext','on'); SELECT fractalsql_set('http_model','ai/gpt-oss:20b'); -- or 'ai/gemma4:12b' or 'ai/phi4'`
+`SELECT fractal_config_set('http_url','http://127.0.0.1:12434/engines/v1/chat/completions'); SELECT fractal_config_set('http_allow_plaintext','on'); SELECT fractal_config_set('http_model','ai/gpt-oss:20b'); -- or 'ai/gemma4:12b' or 'ai/phi4'`
 (`docker model pull ai/gpt-oss:20b` first; see
 [reasoning-setup.md](reasoning-setup.md#docker-model-runner-dmr)).
 
@@ -217,7 +217,7 @@ through):
       "env": {
         "SQLITE_DB_PATH": "/data/app.sqlite",
         "FRACTALSQL_EXTENSION_PATH": "/usr/local/lib/sqlite3/fractalsql.so",
-        "FRACTALSQL_BOOTSTRAP_SQL": "SELECT fractalsql_set('http_url','http://127.0.0.1:11434/v1/chat/completions'); SELECT fractalsql_set('http_allow_plaintext','on'); SELECT fractalsql_set('http_model','gpt-oss:20b');"
+        "FRACTALSQL_BOOTSTRAP_SQL": "SELECT fractal_config_set('http_url','http://127.0.0.1:11434/v1/chat/completions'); SELECT fractal_config_set('http_allow_plaintext','on'); SELECT fractal_config_set('http_model','gpt-oss:20b');"
       }
     }
   }
@@ -238,9 +238,9 @@ particular framework's wrapper around it.
 
 ### 4. The one-line sanity check
 
-Call `fractalsql_get_version` from your client and expect a real
+Call `fractal_version` from your client and expect a real
 edition/version back (e.g. `Community|2.0.5`). On startup the server
-also compares `fractalsql_version()` against the release its tool
+also compares `fractal_version()` against the release its tool
 surface was built against and **warns (never hard-fails)** on a
 mismatch; the documented SQL surface is stable across the compat
 matrix even when the patch version moves.
@@ -378,9 +378,9 @@ global](#per-connection-not-global)).
 
 | Tool | Purpose |
 | --- | --- |
-| `fractalsql_get_version` | `fractalsql_version()` + `fractalsql_edition()`: the one-line "is it alive" check. |
-| `fractalsql_set_config` / `fractalsql_get_config` | Thin wrappers over the engine's own `fractalsql_set` / `fractalsql_get` per-connection surface. `destructiveHint`-flagged (a repointed `http_url` silently redirects every later reasoning call; old/new values of whatever changed are logged). Secrets are **never read back**. |
-| `fractalsql_configure_reasoning` | One unified config tool shaped identically across the engine plugins (`provider_url`, `embed_url`, `model`, `embed_model`, `allow_plaintext`, `think_mode`), adapter-translated here into `fractalsql_set` calls: in effect immediately, nothing to reload. **Never touches the provider token or any enterprise key.** |
+| `fractal_version` | `fractal_version()` + `fractal_edition()`: the one-line "is it alive" check. |
+| `fractal_config_set` / `fractal_config_get` | Thin wrappers over the engine's own `fractal_config_set` / `fractal_config_get` per-connection surface. `destructiveHint`-flagged (a repointed `http_url` silently redirects every later reasoning call; old/new values of whatever changed are logged). Secrets are **never read back**. |
+| `fractal_configure_reasoning` | One unified config tool shaped identically across the engine plugins (`provider_url`, `embed_url`, `model`, `embed_model`, `allow_plaintext`, `think_mode`), adapter-translated here into `fractal_config_set` calls: in effect immediately, nothing to reload. **Never touches the provider token or any enterprise key.** |
 
 ## Resources
 
@@ -407,7 +407,7 @@ surface the least-privilege/accountability warnings inline.
 
 ### Per-connection, not global
 
-Every config knob is per-connection `fractalsql_set` state on the
+Every config knob is per-connection `fractal_config_set` state on the
 server's ONE dedicated session connection, which is mostly transparent
 because the server holds that connection for its lifetime. But a second
 MCP client instance pointed at the same database file gets its own
@@ -642,7 +642,7 @@ Four behaviors are worth knowing about without reading the source:
   layer is the injection boundary.
 - **Least privilege:** the server inherits whatever its connection can
   touch. On SQLite that's architectural: scope the DB file, and prefer
-  running admin tools (`fractalsql_set_config` et al.) against a
+  running admin tools (`fractal_config_set` et al.) against a
   separately-scoped server instance in production; the server soft-warns
   once when it detects the shared case.
 

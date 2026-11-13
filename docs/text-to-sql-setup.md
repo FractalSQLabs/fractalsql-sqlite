@@ -81,7 +81,7 @@ SELECT fractal_schema_context();
 ## Configuration & Security
 
 ### Config Keys
-These are per-connection values set with `fractalsql_set(key, value)` (the easy_install wizard's `load_fractalsql.sql` snippet, applied per session via `sqlite3 -init load_fractalsql.sql mydb.sqlite` or `.read load_fractalsql.sql`, is the standard way to apply them):
+These are per-connection values set with `fractal_config_set(key, value)` (the easy_install wizard's `load_fractalsql.sql` snippet, applied per session via `sqlite3 -init load_fractalsql.sql mydb.sqlite` or `.read load_fractalsql.sql`, is the standard way to apply them):
 
 | Config key | Default | Notes |
 | --- | --- | --- |
@@ -90,7 +90,7 @@ These are per-connection values set with `fractalsql_set(key, value)` (the easy_
 | `text_to_sql_use_review` | `off` | Enable for higher accuracy at the cost of latency. |
 
 ```sql
-SELECT fractalsql_set('text_to_sql_use_review', 'on');
+SELECT fractal_config_set('text_to_sql_use_review', 'on');
 ```
 
 ### Secure it: Authorization vs. Correctness

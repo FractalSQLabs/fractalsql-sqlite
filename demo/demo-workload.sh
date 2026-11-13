@@ -30,7 +30,7 @@
 #   ./demo/demo-workload.sh --http-url http://127.0.0.1:11434/v1 --model gpt-oss:20b
 #
 # --reasoning-plugin / --http-url / --model: configure the reasoning
-# plugin and/or endpoint for this run (per-connection fractalsql_set
+# plugin and/or endpoint for this run (per-connection fractal_config_set
 # state, so the script applies the same SELECTs to every worker and
 # scheduler invocation). Nothing on disk is edited -- these settings
 # live only in each connection, so there is nothing to revert on exit
@@ -99,20 +99,20 @@ log() { printf "%b\n" "$*"; return 0; }
 # concurrent writers, then turn .timer on so each statement prints a
 # "Run Time: real ..." line the worker parses into its latency sample.
 # Per-connection config (reasoning plugin / http endpoint) goes in
-# front of the timer -- fractalsql_set state never crosses a
+# front of the timer -- fractal_config_set state never crosses a
 # connection, which is exactly why it's applied per invocation here.
 # --------------------------------------------------------------------
 CMD_BASE=(-cmd ".load $EXT" -cmd ".timeout 10000" -cmd ".timer on")
 CMD_CONFIG=()
-[[ -n "${REASONING_PLUGIN:-}" ]] && CMD_CONFIG+=(-cmd "SELECT fractalsql_set('reasoning_plugin','$REASONING_PLUGIN');")
-[[ -n "${HTTP_URL:-}" ]]         && CMD_CONFIG+=(-cmd "SELECT fractalsql_set('http_url','$HTTP_URL');")
-[[ -n "${MODEL:-}" ]]            && CMD_CONFIG+=(-cmd "SELECT fractalsql_set('http_model','$MODEL');")
+[[ -n "${REASONING_PLUGIN:-}" ]] && CMD_CONFIG+=(-cmd "SELECT fractal_config_set('reasoning_plugin','$REASONING_PLUGIN');")
+[[ -n "${HTTP_URL:-}" ]]         && CMD_CONFIG+=(-cmd "SELECT fractal_config_set('http_url','$HTTP_URL');")
+[[ -n "${MODEL:-}" ]]            && CMD_CONFIG+=(-cmd "SELECT fractal_config_set('http_model','$MODEL');")
 
 # Fail fast if the extension isn't actually loadable, rather than let
 # schema setup fail confusingly (or, worse, silently run the whole
 # workload against a bare sqlite3 and report a wall of misleading
 # "no such function" failures).
-if ! sqlite3 -batch ":memory:" -cmd ".load $EXT" "SELECT fractalsql_edition();" >/dev/null 2>&1; then
+if ! sqlite3 -batch ":memory:" -cmd ".load $EXT" "SELECT fractal_edition();" >/dev/null 2>&1; then
     log "${Y}cannot load $EXT (sqlite3 with extension loading required) -- is it built/installed?${Z}"
     exit 1
 fi

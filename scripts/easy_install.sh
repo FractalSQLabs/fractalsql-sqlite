@@ -35,7 +35,7 @@
 #     reasoning plugin) into /usr/local/lib/sqlite3 and make sure the
 #     sqlite3 CLI can find it. No clusters, no ports, no restarts.
 #   - Configuration is per-connection via
-#     fractalsql_set(), so the wizard writes a load_fractalsql.sql
+#     fractal_config_set(), so the wizard writes a load_fractalsql.sql
 #     snippet you can either pass to sqlite3 -init / .read on every
 #     session, or inline into your own dot-sql bootstrap.
 #   - Uninstall = file removal. Nothing is registered anywhere.
@@ -320,14 +320,14 @@ phase_b_install() {
 # Doubles any single quote in a value before it goes inside a SQL string
 # literal. Values here come from user input (a URL, a model name, a
 # token), and a literal quote in one of them would otherwise break the
-# fractalsql_set() call's syntax in the snippet.
+# fractal_config_set() call's syntax in the snippet.
 sqlq() { printf '%s' "${1//\'/\'\'}"; }
 
-# Emit one fractalsql_set line into the snippet DRAFT. Called with the
+# Emit one fractal_config_set line into the snippet DRAFT. Called with the
 # key and the (already quoted) value. The draft is installed into place
 # by install_snippet() at the end of the wizard.
 cfg_line() {
-    echo "SELECT fractalsql_set('$1', $2);" >> "${SNIPPET_DRAFT}"
+    echo "SELECT fractal_config_set('$1', $2);" >> "${SNIPPET_DRAFT}"
 }
 
 write_snippet_header() {
@@ -443,9 +443,9 @@ phase_c_wizard() {
 
     if [[ "${DRY_RUN}" -ne 1 ]]; then
         local ed ver
-        ed="$("${SQLITE3_BIN}" ":memory:" "SELECT load_extension('${INSTALL_DIR}/fractalsql'); SELECT fractalsql_edition();" 2>/dev/null | tail -1)"
-        ver="$("${SQLITE3_BIN}" ":memory:" "SELECT load_extension('${INSTALL_DIR}/fractalsql'); SELECT fractalsql_version();" 2>/dev/null | tail -1)"
-        ok "fractalsql_edition() = ${ed}, fractalsql_version() = ${ver}"
+        ed="$("${SQLITE3_BIN}" ":memory:" "SELECT load_extension('${INSTALL_DIR}/fractalsql'); SELECT fractal_edition();" 2>/dev/null | tail -1)"
+        ver="$("${SQLITE3_BIN}" ":memory:" "SELECT load_extension('${INSTALL_DIR}/fractalsql'); SELECT fractal_version();" 2>/dev/null | tail -1)"
+        ok "fractal_edition() = ${ed}, fractal_version() = ${ver}"
         if [[ "${ver}" != "${INSTALL_VERSION}" ]]; then
             warn "That's not ${INSTALL_VERSION}, the version this script expected. The installed files themselves are out of date. Reinstall the current package from https://github.com/${REPO}/releases, then re-run this script."
         fi
@@ -455,7 +455,7 @@ phase_c_wizard() {
                 ".read ${SNIPPET}" \
                 "SELECT fractal_reason('say ok');" 2>&1 || true)"
             # The reply's HEAD is the snippet's own chatter — every
-            # fractalsql_set in the bootstrap prints one "ok" line, and
+            # fractal_config_set in the bootstrap prints one "ok" line, and
             # that already eats any head -N. What the user (and anyone
             # tailing a wizard log) cares about is the model's actual
             # answer, which is always at the tail.

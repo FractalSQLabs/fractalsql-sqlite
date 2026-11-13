@@ -10,7 +10,7 @@
 --
 -- The model reviews its OWN candidate, matching how the real feature
 -- would run (same configured endpoint for both steps).
--- fractalsql_get('http_model') must still return the model spike-1
+-- fractal_config_get('http_model') must still return the model spike-1
 -- generated with -- re-apply the same load_fractalsql.sql snippet
 -- (-init) as part 1 used; this doesn't re-check that for you.
 --
@@ -28,7 +28,7 @@ Candidate SQL:
 ' || sql_text || '
 
 Does this candidate correctly implement the stated rule -- specifically, does it correctly EXCLUDE services with no critical-severity alerts, not just show all services grouped by severity? Answer PASS or FAIL on the first line, then explain briefly.'
-) WHERE model = COALESCE(fractalsql_get('http_model'), '(model-unset)');
+) WHERE model = COALESCE(fractal_config_get('http_model'), '(model-unset)');
 
 .print === Review ===
 SELECT model, review FROM spike_candidates;

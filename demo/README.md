@@ -32,7 +32,7 @@ it's a separate file from `demo.sql`.
    [../docs/reasoning-setup.md](../docs/reasoning-setup.md) first —
    Ollama, AWS Bedrock, Azure OpenAI, GCP Vertex, and any OpenAI-compatible
    endpoint are all documented there. Configuration is per-connection
-   `fractalsql_set()` state (SQLite has no GUCs or config file to
+   `fractal_config_set()` state (SQLite has no GUCs or config file to
    reload) — the standard way to apply it every run is the
    `load_fractalsql.sql` snippet the `easy_install` wizard writes,
    passed with `-init`. Confirm it works before running this demo:
@@ -66,7 +66,7 @@ runs.
 
 ## What each section shows
 
-- **0 — Sanity check.** `fractalsql_edition()` / `fractalsql_version()`
+- **0 — Sanity check.** `fractal_edition()` / `fractal_version()`
   confirm the extension is actually loaded before anything else runs.
 - **1 — Setup.** A small `demo_alerts` table with a deliberate story in
   it: a login-attempt count that escalates (3 → 3 → 17) and a latency
@@ -162,11 +162,11 @@ runs in **two** states:
 
 ```sh
 sqlite3 mydb.sqlite -cmd ".load ./dist/amd64/fractalsql" \
-  -cmd "SELECT fractalsql_set('enterprise_lib', '/path/to/libfractalsql-enterprise-sovereign-c.so');" \
+  -cmd "SELECT fractal_config_set('enterprise_lib', '/path/to/libfractalsql-enterprise-sovereign-c.so');" \
   ".read demo/enterprise-qtl-audit.sql"
 ```
 
-Omit the `fractalsql_set` line to see the dormant path. See
+Omit the `fractal_config_set` line to see the dormant path. See
 [docs/enterprise.md](../docs/enterprise.md) for the full mechanism,
 the function table, and the append-only chain / signature-verification
 details.
@@ -194,7 +194,7 @@ build, active with a licensed enterprise core.
 > **structural only** (truncation / count-length mismatch). A targeted
 > payload byte-flip (e.g. changing a stored `doc_id`) is **not** detected
 > by the structural check. **Phase D** sets `enterprise_ledger_key` (a
-> plain `fractalsql_set()` string key, settable per connection) to add an
+> plain `fractal_config_set()` string key, settable per connection) to add an
 > **HMAC-SHA256 envelope**: every flush tags the persisted payload and
 > every load verifies the tag before the core decodes, so that same
 > byte-flip **is** detected. The MAC lives in the open extension at the
@@ -213,7 +213,7 @@ build, active with a licensed enterprise core.
 
 ```sh
 sqlite3 mydb.sqlite -cmd ".load ./dist/amd64/fractalsql" \
-  -cmd "SELECT fractalsql_set('enterprise_lib', '/path/to/libfractalsql-enterprise-sovereign-c.so');" \
+  -cmd "SELECT fractal_config_set('enterprise_lib', '/path/to/libfractalsql-enterprise-sovereign-c.so');" \
   ".read demo/enterprise-stress.sql"
 ```
 

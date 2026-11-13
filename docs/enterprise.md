@@ -32,14 +32,14 @@ implementation — no external crypto dependency, matching how the HMAC
 envelope below vendors its own SHA-256). **Signature verification is
 mandatory by default**: the library must carry a verifying `.sig` sidecar
 or the load is refused. `enterprise_require_signature` is a SQL-settable
-key, and every principal that can run SQL directly can call `fractalsql_set()` (it is `SQLITE_DIRECTONLY`, so SQL stored in the database file cannot) — so
+key, and every principal that can run SQL directly can call `fractal_config_set()` (it is `SQLITE_DIRECTONLY`, so SQL stored in the database file cannot) — so
 that key can only ever *strengthen* the check, never weaken it below the
 default. Weakening it back to the original "loading unverified is the
 operator's choice" behavior (missing `.sig` loads, present-but-wrong
 signature always refused) requires setting `FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0`
 in the process environment — something no SQL statement can do. The path is
 locked once a library has loaded; re-point it by reopening the connection.
-The gate is `fractalsql_set('enterprise_lib', ...)` plus a fresh
+The gate is `fractal_config_set('enterprise_lib', ...)` plus a fresh
 connection — no config-file edit or reload step.
 
 The nine functions operate on the same in-memory context the search engine
@@ -93,7 +93,7 @@ generated, cannot undo it; closing the connection does. It is per connection, no
 per database file. The MCP server calls it on every connection it opens when
 `FSQL_MCP_READ_ONLY=true`, on top of its own refusal of the `destructiveHint`
 tools. The other destructive MCP tools (`fractal_vectorizer_drop`,
-`fractalsql_set_config`, `fractalsql_configure_reasoning`) are covered by the
+`fractal_config_set`, `fractal_configure_reasoning`) are covered by the
 server's refusal only.
 
 **`fractal_audit_log(entry_type, payload)`**: the general decision-audit
@@ -153,7 +153,7 @@ detectable, not just cryptographically. Set the `enterprise_ledger_key`
 config key per connection —
 
 ```sql
-SELECT fractalsql_set('enterprise_ledger_key', '<high-entropy secret>');
+SELECT fractal_config_set('enterprise_ledger_key', '<high-entropy secret>');
 ```
 
 — to additionally **HMAC-SHA256-tag** each payload (stored in the `mac`

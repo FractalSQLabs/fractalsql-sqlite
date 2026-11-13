@@ -16,10 +16,13 @@ fractal_agent_regime_triage destructive=0 readOnly=0 idempotent=0 openWorld=1 se
 fractal_agent_route_task destructive=0 readOnly=0 idempotent=0 openWorld=1 secret=1
 fractal_agent_schedule_workload destructive=0 readOnly=0 idempotent=0 openWorld=1 secret=1
 fractal_agent_track_anomaly destructive=0 readOnly=0 idempotent=0 openWorld=1 secret=1
-fractal_agent_trajectory_predict destructive=0 readOnly=0 idempotent=0 openWorld=0 secret=0
+fractal_agent_trajectory_predict destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
 fractal_audit_log destructive=1 readOnly=0 idempotent=0 openWorld=0 secret=0
 fractal_audit_unpack destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
 fractal_change_point_detect destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
+fractal_config_get destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
+fractal_config_set destructive=1 readOnly=0 idempotent=0 openWorld=0 secret=1
+fractal_configure_reasoning destructive=1 readOnly=0 idempotent=0 openWorld=0 secret=1
 fractal_cortical_folding destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
 fractal_cross_modal_search destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
 fractal_cycle_detect destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
@@ -76,7 +79,4 @@ fractal_vectorizer_drop destructive=1 readOnly=0 idempotent=0 openWorld=0 secret
 fractal_vectorizer_pause destructive=1 readOnly=0 idempotent=0 openWorld=0 secret=0
 fractal_vectorizer_process_queue destructive=1 readOnly=0 idempotent=0 openWorld=0 secret=0
 fractal_vectorizer_resume destructive=1 readOnly=0 idempotent=0 openWorld=0 secret=0
-fractalsql_configure_reasoning destructive=1 readOnly=0 idempotent=0 openWorld=0 secret=1
-fractalsql_get_config destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
-fractalsql_get_version destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
-fractalsql_set_config destructive=1 readOnly=0 idempotent=0 openWorld=0 secret=1
+fractal_version destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0

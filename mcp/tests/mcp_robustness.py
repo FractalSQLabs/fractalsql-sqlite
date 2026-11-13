@@ -83,12 +83,12 @@ class _Session:
     thread so requests and answers interleave and a wedged server times out
     instead of hanging the gate."""
 
-    def __init__(self, exe, cwd, env_extra=None, args=()):
+    def __init__(self, exe, cwd, env_extra=None, args=(), stderr=None):
         env = dict(os.environ)
         env.update(env_extra or {})
         self.p = subprocess.Popen(
             [exe, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, cwd=cwd, env=env, text=True,
+            stderr=subprocess.DEVNULL if stderr is None else stderr, cwd=cwd, env=env, text=True,
             encoding="utf-8", bufsize=1)
         self.q = queue.Queue()
         self._n = 0

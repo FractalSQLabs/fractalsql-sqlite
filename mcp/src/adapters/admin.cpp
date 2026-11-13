@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 AND BSD-2-Clause
 // SPDX-FileCopyrightText: 2026 Daniel Gardiner d/b/a FractalSQLabs
 // Admin/config tier (SQLite column): 4 tools, thin wrappers over
-// the engine's per-connection fractalsql_set/fractalsql_get config surface.
+// the engine's per-connection fractal_config_set/fractal_config_get config surface.
 // Per-connection, not global. Secrets (http_token, enterprise_ledger_key)
 // are NEVER read back through any tool or resource; every successful
 // config change is logged with redacted old + new values.
@@ -22,7 +22,7 @@ namespace fsqlmcp
 {
     // The documented per-connection config surface (reasoning-setup.md,
     // text-to-sql-setup.md, vectorizer-setup.md, enterprise.md), minus the
-    // derived internals fractalsql_get doesn't resolve.
+    // derived internals fractal_config_get doesn't resolve.
     static const std::array<const char*, 17> kKnownKeys{
         "reasoning_plugin", "http_url", "http_model", "http_allow_plaintext",
         "http_embed_url", "http_embed_model", "http_think", "http_think_provider",
@@ -46,7 +46,7 @@ namespace fsqlmcp
 
     static std::string getConfigValue( Db& db, const std::string& key )
     {
-        const auto t = asText( db.callScalar( "SELECT fractalsql_get(?)", { key } ) );
+        const auto t = asText( db.callScalar( "SELECT fractal_config_get(?)", { key } ) );
         return t.value_or( "null" );
     }
 
@@ -108,25 +108,25 @@ namespace fsqlmcp
 
     static const char* const kScope =
         "per-connection (THIS MCP session's dedicated SQLite connection only: "
-        "fractalsql_set state does not survive connections, and another MCP "
+        "fractal_config_set state does not survive connections, and another MCP "
         "client on the same database file inherits nothing)";
 
     std::vector<ToolSpec> buildAdminTools( Db& db )
     {
         std::vector<ToolSpec> t;
 
-        t.push_back( ToolSpec{ "fractalsql_get_version", "Admin", ToolClass::Cheap, {}, std::nullopt, false, true,
+        t.push_back( ToolSpec{ "fractal_version", "Admin", ToolClass::Cheap, {}, std::nullopt, false, true,
             [&db]( const Json&, CallCtx& ) {
-                return Json{ { "version", asScalarJson( db.callScalar( "SELECT fractalsql_version()", {} ) ) },
-                             { "edition", asScalarJson( db.callScalar( "SELECT fractalsql_edition()", {} ) ) } };
+                return Json{ { "version", asScalarJson( db.callScalar( "SELECT fractal_version()", {} ) ) },
+                             { "edition", asScalarJson( db.callScalar( "SELECT fractal_edition()", {} ) ) } };
             } } );
         t.back().description = "Confirms the FractalSQL install is alive and which edition (Community/Enterprise) "
-            "is active: calls fractalsql_version() and fractalsql_edition(). The one-line sanity check after "
-            "installing; expect a real edition/version back (e.g. Community|2.0.12), plus a startup warning if "
+            "is active: calls fractal_version() and fractal_edition(). The one-line sanity check after "
+            "installing; expect a real edition/version back (e.g. Community|2.0.13), plus a startup warning if "
             "the engine version differs from what this plugin was built against (the version-skew guard warns, "
             "never hard-fails).";
 
-        t.push_back( ToolSpec{ "fractalsql_set_config", "Admin", ToolClass::Cheap,
+        t.push_back( ToolSpec{ "fractal_config_set", "Admin", ToolClass::Cheap,
             { StrEnum( "key", true, "One of the documented per-connection config keys (enforced: reasoning_plugin, "
                                     "http_url, http_model, http_allow_plaintext, http_embed_url, "
                                     "http_embed_model, http_think, http_think_provider, http_native_url, "
@@ -151,7 +151,7 @@ namespace fsqlmcp
                 if( std::find_if( kKnownKeys.begin(), kKnownKeys.end(),
                                   [&]( const char* k ) { return key == k; } ) == kKnownKeys.end() )
                     throw ToolError( ErrorClass::Schema,
-                        "unknown config key '" + key + "': fractalsql_set accepts the "
+                        "unknown config key '" + key + "': fractal_config_set accepts the "
                         "documented per-connection keys (reasoning_plugin, http_url, "
                         "http_model, http_allow_plaintext, http_embed_url, "
                         "http_embed_model, http_think, http_think_provider, "
@@ -167,7 +167,7 @@ namespace fsqlmcp
                     refuseConfigWrite( db, key, ctx );
                 const std::string oldVal = getConfigValue( db, key );
                 const std::string newVal = a.at( "value" ).get<std::string>();
-                const SqlValue setResult = db.callScalar( "SELECT fractalsql_set(?, ?)", { key, newVal } );
+                const SqlValue setResult = db.callScalar( "SELECT fractal_config_set(?, ?)", { key, newVal } );
                 // Every successful admin-config call is logged with old and
                 // new value, so a silent endpoint swap (http_url repointed at an
                 // attacker endpoint, where every subsequent reasoning call sends
@@ -181,14 +181,14 @@ namespace fsqlmcp
                              { "result", parseJsonLenient( setResult ) } };
             } } );
         t.back().description = "Sets a per-connection config key to a value: the SQLite column's wrapper over "
-            "fractalsql_set(key, value) for the documented keys (reasoning plugin path, http_url/http_embed_url, "
+            "fractal_config_set(key, value) for the documented keys (reasoning plugin path, http_url/http_embed_url, "
             "models, think knobs, text-to-sql keys, enterprise keys). Operates on THIS MCP session's dedicated "
             "connection only. destructiveHint-flagged: repointing http_url/http_embed_url silently redirects every "
             "subsequent reasoning/embedding call, and the enterprise keys change the tier/signature "
             "posture; a client UI that honors annotations will prompt a human first.";
         t.back().secretHint = true;   // touches credential-shaped values
 
-        t.push_back( ToolSpec{ "fractalsql_get_config", "Admin", ToolClass::Cheap,
+        t.push_back( ToolSpec{ "fractal_config_get", "Admin", ToolClass::Cheap,
             { Str("key", true, "Config key to read back.") }, std::nullopt, false, true,
             [&db]( const Json& a, CallCtx& ) {
                 const std::string key = a.at( "key" ).get<std::string>();
@@ -198,21 +198,21 @@ namespace fsqlmcp
                         "MCP tool or resource; "
                         "check the bootstrap snippet that set it instead" );
                 return Json{ { "key", key },
-                             { "value", asScalarJson( db.callScalar( "SELECT fractalsql_get(?)", { key } ) ) },
+                             { "value", asScalarJson( db.callScalar( "SELECT fractal_config_get(?)", { key } ) ) },
                              { "scope", "per-connection (THIS MCP session's dedicated connection)" } };
             } } );
         t.back().description = "Reads back a config key's resolved value on THIS session's connection (the SQLite "
-            "column's wrapper over fractalsql_get). Secrets (http_token, enterprise_ledger_key) are refused; "
+            "column's wrapper over fractal_config_get). Secrets (http_token, enterprise_ledger_key) are refused; "
             "they are never read back through any tool or resource.";
 
-        t.push_back( ToolSpec{ "fractalsql_configure_reasoning", "Admin", ToolClass::Cheap,
-            { NullableStr("provider_url", "Chat endpoint URL (e.g. http://127.0.0.1:11434/v1/chat/completions for ollama, or an OpenAI-compatible /v1/chat/completions)."),
-              NullableStr("embed_url", "Embeddings endpoint URL (e.g. .../v1/embeddings); a distinct path from chat."),
-              NullableStr("model", "Chat model name (e.g. gpt-oss:20b, gpt-4o-mini)."),
-              NullableStr("embed_model", "Embedding model name (e.g. nomic-embed-text); never reuse a chat model here."),
+        t.push_back( ToolSpec{ "fractal_configure_reasoning", "Admin", ToolClass::Cheap,
+            { Str("provider_url", false, "Chat endpoint URL (e.g. http://127.0.0.1:11434/v1/chat/completions for ollama, or an OpenAI-compatible /v1/chat/completions)."),
+              Str("embed_url", false, "Embeddings endpoint URL (e.g. .../v1/embeddings); a distinct path from chat."),
+              Str("model", false, "Chat model name (e.g. gpt-oss:20b, gpt-4o-mini)."),
+              Str("embed_model", false, "Embedding model name (e.g. nomic-embed-text); never reuse a chat model here."),
               ToolParam{ "allow_plaintext", JsonType::Boolean, false, nullptr,
-                         "Allow plaintext http:// endpoints (needed for local Ollama).", true },
-              NullableStr("think_mode", "Reasoning effort for hybrid-thinker models: unset/none (model default), 'off', or any provider-verbatim value (low/medium/high/...).") },
+                         "Allow plaintext http:// endpoints (needed for local Ollama).", false },
+              Str("think_mode", false, "Reasoning effort for hybrid-thinker models: unset/none (model default), 'off', or any provider-verbatim value (low/medium/high/...).") },
             std::nullopt, true, false,
             [&db]( const Json& a, CallCtx& ctx ) {
                 adminSoftWarning();
@@ -243,7 +243,7 @@ namespace fsqlmcp
                 for( const auto& p : pending )
                 {
                     const std::string oldVal = getConfigValue( db, p.first );
-                    db.callScalar( "SELECT fractalsql_set(?, ?)", { p.first, p.second } );
+                    db.callScalar( "SELECT fractal_config_set(?, ?)", { p.first, p.second } );
                     logging::configChange( p.first, redactedValue( p.first, oldVal ),
                                            redactedValue( p.first, p.second ) );
                     applied[ p.first ] = Json{ { "old", oldVal }, { "new", p.second } };
@@ -256,7 +256,7 @@ namespace fsqlmcp
             } } );
         t.back().description = "Configure the reasoning/embedding provider: one unified tool shaped identically "
             "across the engine plugins, adapter-translated underneath (there: GUCs or fsqlctl; on SQLite: the "
-            "equivalent fractalsql_set(key, value) calls on this session's connection, in effect immediately; "
+            "equivalent fractal_config_set(key, value) calls on this session's connection, in effect immediately; "
             "no reload exists). NEVER touches http_token or any enterprise key on any engine; the token belongs "
             "in your bootstrap snippet, encrypted at rest like a credential. destructiveHint-flagged: repointing "
             "the provider URL silently redirects every subsequent reasoning call; old/new values of "

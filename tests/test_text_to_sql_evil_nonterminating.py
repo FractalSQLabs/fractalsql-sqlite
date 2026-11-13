@@ -18,7 +18,7 @@ connection stays alive). With the length-bounded handling in place, the
 pipeline runs; without it, the process dies here.
 
 SQLite port: the hostile plugin is configured per-connection with
-fractal_text_to_sql via fractalsql_set('reasoning_plugin', ...) instead
+fractal_text_to_sql via fractal_config_set('reasoning_plugin', ...) instead
 of a GUC; the deployed-feature probe asks the SQL surface directly (no
 pg_proc catalog on SQLite).
 

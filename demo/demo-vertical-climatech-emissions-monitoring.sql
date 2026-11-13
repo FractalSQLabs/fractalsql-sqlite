@@ -31,7 +31,7 @@
 .timer on
 
 .print === 0. Sanity check: extension loaded? ===
-SELECT fractalsql_edition(), fractalsql_version();
+SELECT fractal_edition(), fractal_version();
 
 -- ------------------------------------------------------------------
 -- 1. Four sensors x 96 readings.  CH4-02 (methane, downstream of a

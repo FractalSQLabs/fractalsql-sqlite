@@ -10,10 +10,10 @@
 --
 -- Prerequisites: extension installed (sections 0-4 need nothing else).
 -- Section 5's closing rationale call needs the reasoning plugin -- see
--- ../docs/reasoning-setup.md (per-connection fractalsql_set state, so
+-- ../docs/reasoning-setup.md (per-connection fractal_config_set state, so
 -- re-apply your load_fractalsql.sql snippet with -init).
 --
--- Run (one invocation -- fractalsql_set state is per-connection):
+-- Run (one invocation -- fractal_config_set state is per-connection):
 --   sqlite3 -cmd ".load /usr/local/lib/sqlite3/fractalsql" ":memory:" \
 --     ".read demo/demo-vertical-smart-cities-iot.sql"
 --
@@ -40,7 +40,7 @@
 .timer on
 
 .print === 0. Sanity check: extension loaded? ===
-SELECT fractalsql_edition(), fractalsql_version();
+SELECT fractal_edition(), fractal_version();
 
 -- ------------------------------------------------------------------
 -- 1. 400 sensors: a jittered 20x20 grid placement (lat/lon-style x,y

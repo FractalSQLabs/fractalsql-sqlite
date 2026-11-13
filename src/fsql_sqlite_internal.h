@@ -11,7 +11,7 @@
  *   fractalsql_sqlite.c   entry point, state lifecycle, registration
  *                         table, smoke + search/scout surface
  *   fsql_vector.c/.h      fractal_vector BLOB convention + vector math
- *   fsql_config.c         fractalsql_set / fractalsql_get (session config)
+ *   fsql_config.c         fractal_config_set / fractal_config_get (session config)
  *   fsql_reasoning.c      reasoning VFS attach + fractal_reason family
  *   fsql_t2s.c            fractal_schema_context + fractal_text_to_sql
  *   fsql_vectorizer.c     fractal_vectorizer_* + fractal_embed
@@ -82,8 +82,8 @@ static inline int fsql_clamp_to_int(sqlite3_int64 n)
 
 /* Widest SimHash fingerprint fractal_state_fingerprint / fractal_cycle_detect
  * accept: 4 MiB of fingerprint. Past it a single call only burns CPU and
- * memory (2^31 bits took 37 s and 520 MB). The same ceiling as the MariaDB
- * edition, where it follows from the 16 MiB result limit. */
+ * memory (2^31 bits took 37 s and 520 MB). The ceiling follows from the
+ * 16 MiB result limit. */
 #define FSQL_FINGERPRINT_MAX_BITS 33554424
 
 /* Work bounds, the same as the core's. A single call cannot be interrupted,
@@ -102,9 +102,9 @@ static inline int fsql_clamp_to_int(sqlite3_int64 n)
  * as the core's. */
 #define FSQL_FINGERPRINT_MAX_WORK 268435456
 
-/* Extension version. Single source of truth for fractalsql_version()
+/* Extension version. Single source of truth for fractal_version()
  * and the smoke gate; bumped in lockstep with packaging scripts. */
-#define FSQL_SQLITE_VERSION_STR   "2.0.12"
+#define FSQL_SQLITE_VERSION_STR   "2.0.13"
 #define FSQL_SQLITE_EDITION_STR   "Community"
 
 /* SFS tuning: same values the pre-2.x path used. */
@@ -227,7 +227,7 @@ typedef struct FsqlEnterpriseApi {
 /* ------------------------------------------------------------------ */
 
 /* Config keys. Stock SQLite cannot register PRAGMAs, so configuration
- * is per-connection SQL state via fractalsql_set()/fractalsql_get().
+ * is per-connection SQL state via fractal_config_set()/fractal_config_get().
  *
  * Path keys are validated strictly at set time: they must be
  * absolute with no traversal segments (mirroring fsql_load_reasoning's
@@ -286,7 +286,7 @@ typedef struct FsqlState {
      * Each tier records whether the plugin was loaded with THAT tier's
      * env block applied, the path it was loaded from, and a
      * fingerprint of the config fields that tier forwards: a
-     * fractalsql_set() of any of them makes the next call in the tier
+     * fractal_config_set() of any of them makes the next call in the tier
      * re-apply the env and re-run the plugin's init (fsql_load_reasoning
      * replaces an attached plugin, re-running fsql_reasoning_init, so
      * the fresh environment is actually read). */
@@ -309,7 +309,7 @@ typedef struct FsqlState {
      * loading tier B's ctx cannot touch tier A's already-loaded one. */
     fsql_ctx *reasoning_ctx[FSQL_REASONING_TIER_COUNT];
 
-    /* Vestigial: fsql_config.c's fractalsql_set clears this on every
+    /* Vestigial: fsql_config.c's fractal_config_set clears this on every
      * config change (the 1.x detach signal). Re-attach is now driven
      * by the per-tier records above; the reasoning layer no longer
      * reads or writes this field, which is kept only so fsql_config.c
@@ -423,7 +423,7 @@ const char *fsql_config_get(const FsqlState *st, const char *name);
 
 /* Apply the documented default of every key that has one. Called once
  * per connection, when the state is created, so a session that never
- * calls fractalsql_set() still starts from the documented values. */
+ * calls fractal_config_set() still starts from the documented values. */
 void fsql_config_apply_defaults(FsqlState *st);
 
 /* Path validation shared by config and the configuration tests: accepts

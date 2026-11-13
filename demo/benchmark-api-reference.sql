@@ -26,7 +26,7 @@
 --     ".read demo/benchmark-api-reference.sql"
 --
 -- API surface notes:
---   * Edition/version: fractalsql_edition() / fractalsql_version().
+--   * Edition/version: fractal_edition() / fractal_version().
 --   * fractal_schema_context() takes no arguments and walks
 --     sqlite_master.
 --   * fractal_text_to_sql(question) takes only the question; scoping
@@ -59,8 +59,8 @@
 -- 0. Meta (2 functions)
 -- ------------------------------------------------------------------
 .print
-.print === Meta: fractalsql_edition, fractalsql_version ===
-SELECT fractalsql_edition(), fractalsql_version();
+.print === Meta: fractal_edition, fractal_version ===
+SELECT fractal_edition(), fractal_version();
 
 -- ------------------------------------------------------------------
 -- 1. Search (3 functions)

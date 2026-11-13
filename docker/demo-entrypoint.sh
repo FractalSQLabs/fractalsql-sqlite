@@ -40,17 +40,17 @@ cat > "${INIT}" <<EOF
 -- the .load line below.
 
 .load ${EXT_DIR}/fractalsql
--- Silence the fractalsql_set() 'ok' echo rows; this snippet is -init
+-- Silence the fractal_config_set() 'ok' echo rows; this snippet is -init
 -- boilerplate, not part of a demo's output.
 .output /dev/null
-SELECT fractalsql_set('reasoning_plugin', '${PLUGIN}');
-SELECT fractalsql_set('http_url', '${FRACTALSQL_HTTP_URL:-http://ollama:11434/v1/chat/completions}');
-SELECT fractalsql_set('http_allow_plaintext', '${FRACTALSQL_HTTP_ALLOW_PLAINTEXT:-on}');
-SELECT fractalsql_set('http_model', '${FRACTALSQL_HTTP_MODEL:-gpt-oss:20b}');
-SELECT fractalsql_set('http_embed_url', '${FRACTALSQL_HTTP_EMBED_URL:-http://ollama:11434/v1/embeddings}');
-SELECT fractalsql_set('http_embed_model', '${FRACTALSQL_HTTP_EMBED_MODEL:-nomic-embed-text}');
-SELECT fractalsql_set('http_think', 'off');
-SELECT fractalsql_set('http_think_provider', 'ollama');
+SELECT fractal_config_set('reasoning_plugin', '${PLUGIN}');
+SELECT fractal_config_set('http_url', '${FRACTALSQL_HTTP_URL:-http://ollama:11434/v1/chat/completions}');
+SELECT fractal_config_set('http_allow_plaintext', '${FRACTALSQL_HTTP_ALLOW_PLAINTEXT:-on}');
+SELECT fractal_config_set('http_model', '${FRACTALSQL_HTTP_MODEL:-gpt-oss:20b}');
+SELECT fractal_config_set('http_embed_url', '${FRACTALSQL_HTTP_EMBED_URL:-http://ollama:11434/v1/embeddings}');
+SELECT fractal_config_set('http_embed_model', '${FRACTALSQL_HTTP_EMBED_MODEL:-nomic-embed-text}');
+SELECT fractal_config_set('http_think', 'off');
+SELECT fractal_config_set('http_think_provider', 'ollama');
 .output stdout
 EOF
 
@@ -77,7 +77,7 @@ cat <<'BANNER'
 
   Confirm the edition/version:
     docker compose exec demo sqlite3 fractalsql_demo.sqlite \
-      -init demo_init.sql "SELECT fractalsql_edition(), fractalsql_version();"
+      -init demo_init.sql "SELECT fractal_edition(), fractal_version();"
 
   Pull the reasoning model (opt-in, ~13.8GB; nothing pulls it for you):
     docker compose --profile pull-model run --rm pull-model

@@ -1094,7 +1094,7 @@ call them directly or compose them into your own agents (see
 [Composing your own](#composing-your-own)). They
 require a reasoning plugin plus an OpenAI-compatible chat endpoint (and, for the
 agents that embed a query, an embeddings endpoint) configured via
-`fractalsql_set(...)` per connection. See [`reasoning-setup.md`](reasoning-setup.md). Signatures
+`fractal_config_set(...)` per connection. See [`reasoning-setup.md`](reasoning-setup.md). Signatures
 mirror the C in `src/fsql_agents.c` exactly (argument order, types, defaults, and
 `STRICT`ness; SQLite wrappers carry the same NULL-propagating behavior as the
 server edition's own strict-argument declarations).
@@ -1163,7 +1163,7 @@ fractal_sql_agent(
 - `retry_count`: Number of correction loops performed.
 - `result_json`: JSON representation of the query results (if `auto_execute` was set).
 
-With `auto_execute`, the statement runs read-only, and while it runs the functions that change configuration, write to a table or call the reasoning endpoint refuse to run: `fractalsql_set`, the ledger write functions, `fractal_embed`, `fractal_reason`, the vectorizer functions and the agents themselves. A generated statement that calls one is reported as `"execution_failed"`.
+With `auto_execute`, the statement runs read-only, and while it runs the functions that change configuration, write to a table or call the reasoning endpoint refuse to run: `fractal_config_set`, the ledger write functions, `fractal_embed`, `fractal_reason`, the vectorizer functions and the agents themselves. A generated statement that calls one is reported as `"execution_failed"`.
 
 The agents that call the reasoning endpoint, and the functions that write, are not marked `SQLITE_INNOCUOUS`. On a connection with `trusted_schema` off, SQLite therefore refuses to run them inside a view, trigger or `CHECK` constraint; call them from a top-level statement instead.
 
@@ -1288,7 +1288,7 @@ of returning a NULL/garbage answer.
 
 > **Partial-result honesty (opt-in).** By default the clean-error
 > raise above applies. Setting
-> `fractalsql_set('agent_partial_reasoning_fail','on')` changes the
+> `fractal_config_set('agent_partial_reasoning_fail','on')` changes the
 > failure mode for the agent functions that compose a *data step plus* the
 > final reasoning call (the `fractal_agent_*` domain agents,
 > `fractal_search_agent`, and `fractal_rag_agent`): if the reasoning

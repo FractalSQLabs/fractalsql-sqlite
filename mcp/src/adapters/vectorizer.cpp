@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 AND BSD-2-Clause
 // SPDX-FileCopyrightText: 2026 Daniel Gardiner d/b/a FractalSQLabs
-// Vectorizer tier (SQLite column): 5 tools. SQLite has no
-// fractal_vectorizer_enqueue (MariaDB-only); status is exposed as the
+// Vectorizer tier (SQLite column): 5 tools. There is no
+// fractal_vectorizer_enqueue; status is exposed as the
 // fractalsql://vectorizer/status resource, not a tool.
 #include "vectorizer.h"
 #include "../db.h"

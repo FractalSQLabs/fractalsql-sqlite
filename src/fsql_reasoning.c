@@ -34,7 +34,7 @@
  *   between chat, text-to-sql and embedding use re-applies the right
  *   env and re-runs the plugin's init (fsql_load_reasoning replaces an
  *   already-attached plugin). A fingerprint of the config fields each
- *   tier forwards is recorded at load time, so a fractalsql_set() of
+ *   tier forwards is recorded at load time, so a fractal_config_set() of
  *   any of them triggers a re-apply + re-load on the next use in that
  *   tier instead of silently keeping the stale configuration.
  *
@@ -396,13 +396,13 @@ int fsql_reasoning_ensure_attached(FsqlState *st, int tier,
         (!st->cfg.http_embed_url || !*st->cfg.http_embed_url)) {
         set_err(err, err_cap,
                 "fractal_embed: http_embed_url is not configured (set "
-                "fractalsql_set('http_embed_url', "
+                "fractal_config_set('http_embed_url', "
                 "'https://.../v1/embeddings'))");
         return -1;
     }
 
     /* Already attached for this tier, from this path, with this
-     * configuration? A fractalsql_set() of any forwarded field (or of
+     * configuration? A fractal_config_set() of any forwarded field (or of
      * the plugin path itself) changes the fingerprint and forces a
      * re-apply + re-load on the next use: fsql_load_reasoning
      * replaces the attached plugin and re-runs its init, so the fresh
@@ -554,7 +554,7 @@ int fsql_reasoning_generate(FsqlState *st, int tier, const char *query,
     if (!st->cfg.reasoning_plugin || !*st->cfg.reasoning_plugin) {
         set_err(err, err_cap,
                 "fractalsql: no reasoning plugin configured (set "
-                "fractalsql_set('reasoning_plugin', '/absolute/path.so'))");
+                "fractal_config_set('reasoning_plugin', '/absolute/path.so'))");
         return -1;
     }
 

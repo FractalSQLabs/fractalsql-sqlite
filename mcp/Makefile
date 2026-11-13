@@ -29,7 +29,7 @@ CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra
 # one plain-C translation unit (sqlite3.o) matches the C++ objects'
 # -arch instead of silently compiling for the host architecture.
 CFLAGS   ?=
-DEFS     := -DFSQL_MCP_VERSION="\"2.0.12\""
+DEFS     := -DFSQL_MCP_VERSION="\"2.0.13\""
 
 # src/vectors.cpp uses std::to_chars on a double (shortest round-trip form), which
 # Apple's libc++ marks unavailable before macOS 13.3. CI exports

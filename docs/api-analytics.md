@@ -110,7 +110,7 @@ Topological analysis over a point cloud's Vietoris-Rips filtration, capped at 51
 **SimHash State Fingerprint**
 Random-hyperplane SimHash (Charikar 2002): projects a state vector onto `n_bits` random hyperplanes (deterministic from `seed`) and packs the sign of each projection MSB-first into bytes.
 
-**Signature**: `fractal_state_fingerprint(vec, n_bits [, seed]) RETURNS BLOB` — `vec` is a CSV/JSON TEXT array or packed float32 BLOB; `seed` defaults to 0.0 (arity 2 or 3). Returns `(n_bits + 7) / 8` bytes.
+**Signature**: `fractal_state_fingerprint(vec, n_bits [, seed]) RETURNS BLOB` — `vec` is a CSV/JSON TEXT array or packed float32 BLOB; `seed` defaults to 0.0 (arity 2 or 3). Returns `(n_bits + 7) / 8` bytes. The `n_bits` default is 128 bits.
 
 `n_bits` must be between 1 and 33,554,424 (a 4 MiB fingerprint), and `n_bits` times the vector length must not exceed 268,435,456 (about a second of work); a larger value is an error.
 

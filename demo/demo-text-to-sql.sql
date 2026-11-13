@@ -124,7 +124,7 @@ SELECT fractal_text_to_sql(
 .print
 .print ================================================================
 .print Next: docs/text-to-sql-setup.md for the config-key reference
-.print (text_to_sql_allowed_statements etc. via fractalsql_set), the
+.print (text_to_sql_allowed_statements etc. via fractal_config_set), the
 .print host-boundary execution guard (do not run generated SQL on a
 .print connection that can see tables the answer should not touch --
 .print SQLite has no superuser/role split; bound the connection's file

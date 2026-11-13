@@ -25,8 +25,8 @@
 -- ---------------------------------------------------------------------
 --
 -- Smoke + search:
---   fractalsql_edition() -> TEXT                        -- 'Community'
---   fractalsql_version() -> TEXT                        -- '2.0.5'
+--   fractal_edition() -> TEXT                        -- 'Community'
+--   fractal_version() -> TEXT                        -- '2.0.5'
 --   fractal_search(vector, query) -> REAL               -- Sniper, memoized
 --   fractal_search_explore(emb, query[, params]) -> TEXT       -- Scout aggregate
 --
@@ -46,8 +46,8 @@
 --   fractal_vector_normalize(v)                          -> BLOB
 --
 -- Configuration (per-connection state; SQLite analog of PG GUCs):
---   fractalsql_set(name, value) -> 'ok'
---   fractalsql_get(name)        -> TEXT|INT
+--   fractal_config_set(name, value) -> 'ok'
+--   fractal_config_get(name)        -> TEXT|INT
 --   Keys: reasoning_plugin, http_url, http_token, http_model,
 --         http_allow_plaintext, http_embed_url, http_embed_model,
 --         http_think, http_think_provider, http_native_url,
@@ -181,7 +181,7 @@ FROM vec_store;
 -- SELECT fractal_search_explore(embedding, '0.6,0.8,0.0,0.0') FROM vectors;
 
 -- Reasoning tier (requires a configured plugin + LLM endpoint):
--- SELECT fractalsql_set('reasoning_plugin',
+-- SELECT fractal_config_set('reasoning_plugin',
 --                       '/usr/local/lib/sqlite3/fractalsql-reasoning-http.so');
--- SELECT fractalsql_set('http_url', 'http://localhost:11434/v1');
+-- SELECT fractal_config_set('http_url', 'http://localhost:11434/v1');
 -- SELECT fractal_reason('Explain the cosine distance metric.');

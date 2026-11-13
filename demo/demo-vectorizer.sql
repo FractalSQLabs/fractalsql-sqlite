@@ -5,7 +5,7 @@
 -- reference, the BYO-scheduler options, and the queue architecture.
 --
 -- Prerequisites: extension loaded, reasoning AND embedding configured.
--- Configuration is per-connection fractalsql_set() state -- the
+-- Configuration is per-connection fractal_config_set() state -- the
 -- standard way to apply it is the load_fractalsql.sql
 -- snippet from the easy_install wizard, passed with -init. Local
 -- Ollama example pairing a chat model with a real embedding model from
@@ -15,12 +15,12 @@
 --   ollama pull gpt-oss:20b
 --   ollama pull nomic-embed-text
 --
---   SELECT fractalsql_set('reasoning_plugin',  'C:\Program Files\FractalSQL\fractalsql-reasoning-http.dll');
---   SELECT fractalsql_set('http_url',          'http://127.0.0.1:11434/v1/chat/completions');
---   SELECT fractalsql_set('http_model',        'gpt-oss:20b');
---   SELECT fractalsql_set('http_embed_url',    'http://127.0.0.1:11434/v1/embeddings');
---   SELECT fractalsql_set('http_embed_model',  'nomic-embed-text');
---   SELECT fractalsql_set('http_allow_plaintext', 'on');
+--   SELECT fractal_config_set('reasoning_plugin',  'C:\Program Files\FractalSQL\fractalsql-reasoning-http.dll');
+--   SELECT fractal_config_set('http_url',          'http://127.0.0.1:11434/v1/chat/completions');
+--   SELECT fractal_config_set('http_model',        'gpt-oss:20b');
+--   SELECT fractal_config_set('http_embed_url',    'http://127.0.0.1:11434/v1/embeddings');
+--   SELECT fractal_config_set('http_embed_model',  'nomic-embed-text');
+--   SELECT fractal_config_set('http_allow_plaintext', 'on');
 --
 -- Confirm before running this script:
 --   SELECT fractal_vector_to_json(fractal_embed('reply with a short confirmation that this connection works'));
@@ -125,7 +125,7 @@ ORDER BY id ASC;
 .print created the vectorizer). A row here marked failed with a
 .print last_error mentioning the missing plugin means no embedding
 .print endpoint was configured for this connection -- re-run with the
-.print fractalsql_set block from the header applied.
+.print fractal_config_set block from the header applied.
 SELECT vectorizer_id, source_table, status, n, last_error
 FROM fractal_vectorizer_status
 ORDER BY status ASC;

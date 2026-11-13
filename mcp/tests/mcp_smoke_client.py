@@ -92,7 +92,7 @@ EXPECTED_SAFETY = {
     "fractal_agent_route_task": ("write", True),
     "fractal_agent_schedule_workload": ("write", True),
     "fractal_agent_track_anomaly": ("write", True),
-    "fractal_agent_trajectory_predict": ("write", False),
+    "fractal_agent_trajectory_predict": ("read", False),
     "fractal_audit_log": ("destructive", False),
     "fractal_audit_unpack": ("read", False),
     "fractal_change_point_detect": ("read", False),
@@ -152,10 +152,10 @@ EXPECTED_SAFETY = {
     "fractal_vectorizer_pause": ("destructive", False),
     "fractal_vectorizer_process_queue": ("destructive", False),
     "fractal_vectorizer_resume": ("destructive", False),
-    "fractalsql_configure_reasoning": ("destructive", False),
-    "fractalsql_get_config": ("read", False),
-    "fractalsql_get_version": ("read", False),
-    "fractalsql_set_config": ("destructive", False),
+    "fractal_configure_reasoning": ("destructive", False),
+    "fractal_config_get": ("read", False),
+    "fractal_version": ("read", False),
+    "fractal_config_set": ("destructive", False),
 }
 
 
@@ -377,7 +377,7 @@ def main() -> int:  # noqa: ANN201
         annotated = {t["name"] for t in listed
                      if (t.get("annotations") or {}).get("destructiveHint") is True}
         heavy = [n for n in ["fractal_ledger_reset_hard", "fractal_ledger_flush",
-                             "fractal_vectorizer_drop","fractalsql_set_config"]
+                             "fractal_vectorizer_drop","fractal_config_set"]
                  if n in annotated]
         check("15.2/6: destructiveHint present on the heavy/destructive tools",
               len(heavy) >= 3)
@@ -413,8 +413,8 @@ def main() -> int:  # noqa: ANN201
                       for n in reasoning_tools))
 
         # sanity check (plugin docs' one-liner)
-        r = call("fractalsql_get_version", {})
-        check("sanity check: fractalsql_get_version returns a real "
+        r = call("fractal_version", {})
+        check("sanity check: fractal_version returns a real "
               "edition/version",
               r is not None and not r["result"].get("isError")
               and r["result"]["structuredContent"]["edition"] == "Community")
@@ -947,24 +947,24 @@ def main() -> int:  # noqa: ANN201
         # are exercised by the generic coverage sweep (it supplies only
         # REQUIRED args, and set_config/get_config/configure_reasoning's
         # interesting behavior is all gated behind OPTIONAL ones).
-        r = call("fractalsql_set_config",
+        r = call("fractal_config_set",
                  {"key": "enterprise_lib", "value": "/tmp/whatever.so"})
         check("Admin: set_config on an enterprise key without "
               "allow_secrets=true is refused",
               r is not None and (r.get("result") or {}).get("isError") is True
               and "allow_secrets=true" in json.dumps(r["result"]))
-        r = call("fractalsql_get_config", {"key": "http_token"})
+        r = call("fractal_config_get", {"key": "http_token"})
         check("Admin: get_config on a secret key is refused (never read "
               "back through any tool)",
               r is not None and (r.get("result") or {}).get("isError") is True
               and "never read back" in json.dumps(r["result"]))
-        r = call("fractalsql_configure_reasoning", {"model": "mcp-smoke-model"})
+        r = call("fractal_configure_reasoning", {"model": "mcp-smoke-model"})
         sc = (r.get("result") or {}).get("structuredContent") if r else None
         check("Admin: configure_reasoning applies a single field (model)",
               r is not None and (r.get("result") or {}).get("isError") is not True
               and isinstance(sc, dict)
               and "http_model" in (sc.get("applied") or {}))
-        r = call("fractalsql_configure_reasoning", {"allow_plaintext": True})
+        r = call("fractal_configure_reasoning", {"allow_plaintext": True})
         sc = (r.get("result") or {}).get("structuredContent") if r else None
         check("Admin: configure_reasoning applies allow_plaintext (the "
               "bool->on/off engine-spelling ternary)",
@@ -1000,7 +1000,7 @@ def main() -> int:  # noqa: ANN201
 
         broken = os.path.join(os.environ["MCP_SERVER_CWD"],
                               "no_such_reasoning_plugin_for_mcp_smoke")
-        r = call("fractalsql_set_config",
+        r = call("fractal_config_set",
                  {"key": "reasoning_plugin", "value": broken})
         check("partial-result setup: the admin tool accepts a (non-loadable) "
               "reasoning_plugin path",
@@ -1023,10 +1023,10 @@ def main() -> int:  # noqa: ANN201
         # Restore the live mock plugin (the gate's bootstrap set it; the
         # repointed path above was per-connection but this session keeps
         # serving with it).
-        m = re.search(r"fractalsql_set\(\s*'reasoning_plugin'\s*,\s*'([^']+)'",
+        m = re.search(r"fractal_config_set\(\s*'reasoning_plugin'\s*,\s*'([^']+)'",
                       os.environ.get("FRACTALSQL_BOOTSTRAP_SQL", ""))
         if m:
-            call("fractalsql_set_config",
+            call("fractal_config_set",
                  {"key": "reasoning_plugin", "value": m.group(1)})
 
         # full-catalog coverage sweep: every registered tool answers through
@@ -1201,7 +1201,7 @@ def run_config_writes_phase() -> None:
         lines = [
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": INIT_PARAMS},
             {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
-             "params": {"name": "fractalsql_set_config",
+             "params": {"name": "fractal_config_set",
                         "arguments": {"key": key, "value": value}}},
         ]
         env = {}
@@ -1217,7 +1217,7 @@ def run_config_writes_phase() -> None:
         lines = [
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": INIT_PARAMS},
             {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
-             "params": {"name": "fractalsql_configure_reasoning",
+             "params": {"name": "fractal_configure_reasoning",
                         "arguments": args}},
         ]
         env = {}
@@ -1296,14 +1296,14 @@ def run_http_and_cli_phase() -> None:
           code == 0 and cat_tools and cat_tiers <= {"Discovery", "Admin"})
     ro_lines = lines + [
         {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
-         "params": {"name": "fractalsql_set_config",
+         "params": {"name": "fractal_config_set",
                     "arguments": {"key": "max_rows_ceiling", "value": "5"}}},
     ]
     # A harmless read first, so the server really opens its DB connection (and
     # applies the engine-side destructive latch) before the refused call.
     ro_lines.insert(len(ro_lines) - 1,
         {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
-         "params": {"name": "fractalsql_get_version", "arguments": {}}})
+         "params": {"name": "fractal_version", "arguments": {}}})
     ro_stderr = os.path.join(os.environ["MCP_SERVER_CWD"], "mcp_readonly_stderr.log")
     resps, code = quick_stdio(ro_lines, {"FSQL_MCP_READ_ONLY": "true"},
                               stderr_file=ro_stderr)
@@ -1333,7 +1333,7 @@ def run_http_and_cli_phase() -> None:
                               input="")
     r = cli_run(["--version"])
     check("CLI: --version prints the release banner",
-          r.returncode == 0 and "2.0.12" in r.stdout)
+          r.returncode == 0 and "2.0.13" in r.stdout)
     r = cli_run(["--help"])
     check("CLI: --help prints the flag table",
           r.returncode == 0 and "--tool" in r.stdout)
@@ -1541,7 +1541,7 @@ def run_http_and_cli_phase() -> None:
         check("HTTP: tools/list over the session matches the stdio "
               "catalog (82)", s == 200 and len(http_tools) == 82)
         s, _, b = rpc({"jsonrpc": "2.0", "id": 6, "method": "tools/call",
-                       "params": {"name": "fractalsql_get_version",
+                       "params": {"name": "fractal_version",
                                   "arguments": {}}}, sess=minted)
         check("HTTP: a tools/call round-trips the same engine",
               s == 200 and json.loads(b)["result"]["structuredContent"]
@@ -1716,7 +1716,7 @@ def run_shutdown_drain_phase(mcp_exe, server_cwd, base_env) -> None:
         "FSQL_MCP_SHUTDOWN_DRAIN_MS": "300",
         "FSQL_MOCK_SLOW_MS": "2000",
         "FRACTALSQL_BOOTSTRAP_SQL":
-            "SELECT fractalsql_set('reasoning_plugin','" + slow_plugin + "');",
+            "SELECT fractal_config_set('reasoning_plugin','" + slow_plugin + "');",
     })
     log_path = os.path.join(server_cwd, "mcp_http_shutdown_drain.log")
     log = open(log_path, "w", encoding="utf-8")

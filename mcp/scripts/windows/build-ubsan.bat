@@ -59,7 +59,7 @@ if not exist "%OUTDIR%" mkdir "%OUTDIR%"
 rem /DNOMINMAX suppresses windows.h's function-like min()/max() macros so they
 rem do not rewrite std::min/std::max -- see build.bat for the full rationale.
 "%CLANGCL%" /std:c++17 /utf-8 /EHsc /Od /W3 /DNOMINMAX -fsanitize=undefined -fno-sanitize-recover=undefined ^
-  /DFSQL_MCP_VERSION="\"2.0.12\"" ^
+  /DFSQL_MCP_VERSION="\"2.0.13\"" ^
   /I "%MCP_DIR%\vendor" /I "%MCP_DIR%\src" /I "%SQLITE_DIR%" ^
   /I "%OPENSSL_DIR%\include" ^
   "%SQLITE_DIR%\sqlite3.c" ^

@@ -23,7 +23,7 @@
 #   MCP_SERVER_CWD        a scratch working directory
 #   MCPC_TOKEN            the bearer token the HTTP transport is started with
 #   MCPC_GATE             the gate number, used in the closing line
-#   MCPC_READ_TOOL        a read-only tool to call           (default: fractalsql_get_version)
+#   MCPC_READ_TOOL        a read-only tool to call           (default: fractal_version)
 #   MCPC_READ_ARGS        its arguments, as JSON             (default: {})
 #   MCPC_STATE_TOOL       a session-scoped tool to call      (default: fractal_diversify_enable)
 #   MCPC_STATE_ARGS       its arguments, as JSON             (default: {})
@@ -56,7 +56,7 @@ EXE = os.environ.get("MCP_SERVER_EXE", "")
 SERVER_CWD = os.environ.get("MCP_SERVER_CWD", "") or tempfile.gettempdir()
 GATE = os.environ.get("MCPC_GATE", "00")
 TOKEN = os.environ.get("MCPC_TOKEN", "conformance-token")
-READ_TOOL = os.environ.get("MCPC_READ_TOOL", "fractalsql_get_version")
+READ_TOOL = os.environ.get("MCPC_READ_TOOL", "fractal_version")
 STATE_TOOL = os.environ.get("MCPC_STATE_TOOL", "fractal_diversify_enable")
 STATE_READER = os.environ.get("MCPC_STATE_READER", "fractal_explain_result")
 SAFE_KEY = os.environ.get("MCPC_SAFE_KEY", "http_model")
@@ -1450,7 +1450,7 @@ def catalog_problems(catalog):
 # configuration-writing tool. An engine that publishes none has no
 # configuration for the write switch to govern, so the check has nothing to
 # enforce there and is skipped rather than failed.
-CONFIG_WRITE_TOOL = "fractalsql_set_config"
+CONFIG_WRITE_TOOL = "fractal_config_set"
 
 
 def publishes_config_tool(port):
@@ -1541,43 +1541,43 @@ def k_probe(dual, readonly, autoexec, cfg_off, cfg_all, pname, with_config):
         return out
 
     resp = flow_call(default_client, "tools/call",
-                     {"name": "fractalsql_set_config",
+                     {"name": "fractal_config_set",
                       "arguments": {"key": UNSAFE_KEY,
                                     "value": "http://127.0.0.1:9/v1"}})
     unsafe_refused = tool_error_text(resp)
     resp = flow_call(default_client, "tools/call",
-                     {"name": "fractalsql_set_config",
+                     {"name": "fractal_config_set",
                       "arguments": {"key": SAFE_KEY,
                                     "value": "probe-model"}})
     safe_allowed = not tool_error_text(resp)
     resp = flow_call(default_client, "tools/call",
-                     {"name": "fractalsql_configure_reasoning",
+                     {"name": "fractal_configure_reasoning",
                       "arguments": {"provider_url": "http://127.0.0.1:9/v1"}})
     configure_refused = tool_error_text(resp)
 
     off_client = flow_client(cfg_off.port, prof)
     resp = flow_call(off_client, "tools/call",
-                     {"name": "fractalsql_set_config",
+                     {"name": "fractal_config_set",
                       "arguments": {"key": SAFE_KEY, "value": "probe-model"}})
     off_refused = tool_error_text(resp)
     resp = flow_call(off_client, "tools/call",
-                     {"name": "fractalsql_get_config",
+                     {"name": "fractal_config_get",
                       "arguments": {"key": SAFE_KEY}})
     get_answers = not tool_error_text(resp)
     resp = flow_call(off_client, "tools/call",
-                     {"name": "fractalsql_get_config",
+                     {"name": "fractal_config_get",
                       "arguments": {"key": "http_token"}})
     secret_text = tool_error_text(resp)
     secret_hidden = ("***" in secret_text or "secret" in secret_text.lower())
 
     all_client = flow_client(cfg_all.port, prof)
     resp = flow_call(all_client, "tools/call",
-                     {"name": "fractalsql_set_config",
+                     {"name": "fractal_config_set",
                       "arguments": {"key": UNSAFE_KEY,
                                     "value": "http://127.0.0.1:9/v1"}})
     all_unsafe = not tool_error_text(resp)
     resp = flow_call(all_client, "tools/call",
-                     {"name": "fractalsql_configure_reasoning",
+                     {"name": "fractal_configure_reasoning",
                       "arguments": {"model": "probe-model"}})
     all_model = not tool_error_text(resp)
     out["K06"] = (bool(unsafe_refused) and safe_allowed and bool(configure_refused)

@@ -12,7 +12,7 @@
     Offers to download+install the matching .msi if the extension
     isn't installed. Runs the same reasoning-provider wizard as
     easy_install.sh: writes a load_fractalsql.sql bootstrap snippet
-    (SQLite configuration is per-connection fractalsql_set() state —
+    (SQLite configuration is per-connection fractal_config_set() state —
     there are no GUCs to persist) and runs a smoke test.
 
     No telemetry. This script never reports usage, provider choice, or
@@ -98,7 +98,7 @@ $UserSnippet = Join-Path $env:USERPROFILE 'load_fractalsql.sql'
 # default install dir, which always contains a space) fails to load with
 # "The specified module could not be found." Windows' LoadLibrary accepts
 # forward slashes, so hand the CLI this form everywhere. Anything going
-# straight to LoadLibrary (fractalsql_set('reasoning_plugin', ...) below,
+# straight to LoadLibrary (fractal_config_set('reasoning_plugin', ...) below,
 # python-side load_extension) can keep the backslash form.
 $ExtLoad = "$InstallDir\fractalsql.dll".Replace('\', '/')
 
@@ -111,7 +111,7 @@ function Write-Die   { param([string]$Msg) Write-Host "  [X] $Msg" -ForegroundCo
 # Doubles any single quote in a value before it goes inside a SQL string
 # literal. Values here come from user input (a URL, a model name, a
 # token), and a literal quote in one of them would otherwise break the
-# fractalsql_set() call's syntax in the snippet.
+# fractal_config_set() call's syntax in the snippet.
 function SqlQuote { param([string]$Value) $Value -replace "'", "''" }
 
 # True when this (probably non-elevated) process can create files in
@@ -330,8 +330,8 @@ function Write-ReasoningSnippet {
     $snippetPath = $Snippet
     Write-Step "About to write configuration to ${Snippet}:"
     foreach ($k in $Cfg.Keys) {
-        if ($k -eq 'http_token') { Write-Host "  fractalsql_set('http_token', '***')" }
-        else { Write-Host "  fractalsql_set('$k', $($Cfg[$k]))" }
+        if ($k -eq 'http_token') { Write-Host "  fractal_config_set('http_token', '***')" }
+        else { Write-Host "  fractal_config_set('$k', $($Cfg[$k]))" }
     }
     if (-not (Confirm-Step "Write this configuration?")) { Write-Die "Aborted. Nothing was changed." }
     # Destination decided up front (the header below names the path
@@ -346,7 +346,7 @@ function Write-ReasoningSnippet {
     if ($DryRun) {
         Write-Step "(-DryRun: snippet not written)"
     } else {
-        # The bootstrap snippet: .load + one fractalsql_set per key.
+        # The bootstrap snippet: .load + one fractal_config_set per key.
         # SQLite configuration is per-connection state (no GUCs, no
         # reload), so every session that wants the reasoning tier
         # reads this snippet via -init or .read.
@@ -365,7 +365,7 @@ function Write-ReasoningSnippet {
 .load "$ExtLoad"
 "@
         $lines = @($header)
-        foreach ($k in $Cfg.Keys) { $lines += "SELECT fractalsql_set('$k', $($Cfg[$k]));" }
+        foreach ($k in $Cfg.Keys) { $lines += "SELECT fractal_config_set('$k', $($Cfg[$k]));" }
         New-Item -ItemType Directory -Force -Path (Split-Path $snippetPath -Parent) | Out-Null
         # ASCII file; default encoding fine. Protect the token.
         [IO.File]::WriteAllLines($snippetPath, $lines)
@@ -391,16 +391,16 @@ function Write-ReasoningSnippet {
 # (pure side effects; nothing downstream reads any state this sets).
 function Test-InstalledVersionAndSmoke {
     param([string]$SqliteBin, [string]$Version, [string]$Provider, [string]$SnippetPath, [string]$Repo)
-    $ed = Invoke-Sqlite $SqliteBin "SELECT fractalsql_edition();"
-    $ver = Invoke-Sqlite $SqliteBin "SELECT fractalsql_version();"
-    Write-Ok "fractalsql_edition() = $ed, fractalsql_version() = $ver"
+    $ed = Invoke-Sqlite $SqliteBin "SELECT fractal_edition();"
+    $ver = Invoke-Sqlite $SqliteBin "SELECT fractal_version();"
+    Write-Ok "fractal_edition() = $ed, fractal_version() = $ver"
     if ($ver -ne $Version) {
         Write-Warn2 "That's not $Version, the version this script expected. The installed files themselves are out of date. Reinstall the current .msi from https://github.com/$Repo/releases to actually update fractalsql.dll, then re-run this script."
     }
     if ($Provider -ne 'skip' -and (Confirm-Step "Run a live reasoning smoke test (SELECT fractal_reason('say ok'))? A cloud endpoint may incur cost, and a cold local model can take several minutes the first time.")) {
         try {
             # .read inside a -cmd, NOT -init: the CLI runs the -init
-            # file on its own open, and the fractalsql_set() state
+            # file on its own open, and the fractal_config_set() state
             # written there does not reach the connection that
             # executes the command-line SQL afterwards (fractal_reason
             # then reports "reasoning plugin not configured"). .read

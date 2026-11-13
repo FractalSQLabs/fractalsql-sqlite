@@ -25,7 +25,7 @@ At its core, the Cognition tier provides the `fractal_reason(query, context)` pr
 To activate the Cognition tier, you need a reasoning plugin and a configured endpoint.
 
 ### 1. The Reasoning Plugin
-The reasoning plugin (`fractalsql-reasoning-http.so` on Linux and macOS — note the `.so` suffix even on macOS — or `.dll` on Windows) is installed alongside the extension. Installing the file does not activate the feature; you must point the connection at the plugin path with `fractalsql_set('reasoning_plugin', ...)`.
+The reasoning plugin (`fractalsql-reasoning-http.so` on Linux and macOS — note the `.so` suffix even on macOS — or `.dll` on Windows) is installed alongside the extension. Installing the file does not activate the feature; you must point the connection at the plugin path with `fractal_config_set('reasoning_plugin', ...)`.
 
 **Find the install directory**:
 Common paths include:
@@ -34,7 +34,7 @@ Common paths include:
 - **Windows**: `C:\Program Files\FractalSQL\fractalsql-reasoning-http.dll`
 
 ### 2. Technical Requirements
-- **Extension Version**: `fractalsql-sqlite` 2.0.5+ (`SELECT fractalsql_version();`).
+- **Extension Version**: `fractalsql-sqlite` 2.0.5+ (`SELECT fractal_version();`).
 - **Plugin Version**: `fractalsql-reasoning-http` v1.2.1+ (required for Response Modes and System Tags).
 - **Host Dependencies**: `libcurl` 7.75.0+ (required for AWS SigV4 auth).
 - **Endpoint**: An LLM provider (Ollama, AWS Bedrock, Azure OpenAI, GCP Vertex, or any OpenAI-compatible API).
@@ -42,7 +42,7 @@ Common paths include:
 > **Shortcut**: for a local Ollama or a plain OpenAI-compatible endpoint,
 > `scripts/easy_install.sh` (Linux/macOS) and
 > `scripts/windows/easy_install.ps1` (Windows) do Steps 1–2 below for you
-> interactively, loading the extension and writing the `fractalsql_set` lines
+> interactively, loading the extension and writing the `fractal_config_set` lines
 > into a `load_fractalsql.sql` snippet in one pass.
 > See **[docs/getting-started.md §5](getting-started.md#5-install-without-docker)**.
 > The manual walkthrough below still applies for Bedrock/Azure/Vertex
@@ -53,16 +53,16 @@ Common paths include:
 
 ## 🚀 Setup Sequence
 
-**A note on configuration first.** SQLite has no GUCs and no server config file: every setting below is **per-connection** state applied with `SELECT fractalsql_set('<key>', '<value>');` and read back with `fractalsql_get('<key>')`. The standard way to apply it is the `load_fractalsql.sql` snippet the easy_install wizard generates — pass it to every session with `sqlite3 -init load_fractalsql.sql mydb.sqlite`, or `.read load_fractalsql.sql` from inside a session. Configuration takes effect immediately on the connection that runs it; there is nothing to reload.
+**A note on configuration first.** SQLite has no GUCs and no server config file: every setting below is **per-connection** state applied with `SELECT fractal_config_set('<key>', '<value>');` and read back with `fractal_config_get('<key>')`. The standard way to apply it is the `load_fractalsql.sql` snippet the easy_install wizard generates — pass it to every session with `sqlite3 -init load_fractalsql.sql mydb.sqlite`, or `.read load_fractalsql.sql` from inside a session. Configuration takes effect immediately on the connection that runs it; there is nothing to reload.
 
-`fractalsql_set` is `SQLITE_DIRECTONLY`: run it as a top-level statement, as the snippet does. A trigger, view or `CHECK` constraint stored in a database file cannot call it, so a database you open cannot change these settings on your behalf.
+`fractal_config_set` is `SQLITE_DIRECTONLY`: run it as a top-level statement, as the snippet does. A trigger, view or `CHECK` constraint stored in a database file cannot call it, so a database you open cannot change these settings on your behalf.
 
 ## Step 1: Activate the Plugin
 Add the following to your per-session bootstrap (`load_fractalsql.sql`, or right after your `.load` line):
 
 ```sql
 -- Plugin path must be absolute (traversal-hygiene validated at set time)
-SELECT fractalsql_set('reasoning_plugin',
+SELECT fractal_config_set('reasoning_plugin',
                       '/usr/local/lib/sqlite3/fractalsql-reasoning-http.so');
 ```
 The plugin attaches lazily upon the first reasoning call on the connection; changing `reasoning_plugin` detaches the previously-attached plugin and the next call re-attaches from the new path. On Windows the path is `C:\Program Files\FractalSQL\fractalsql-reasoning-http.dll`.
@@ -77,9 +77,9 @@ The gold standard for fully air-gapped, sovereign deployments. Traffic stays ins
 
 ```sql
 -- Local Ollama
-SELECT fractalsql_set('http_url',             'http://127.0.0.1:11434/v1/chat/completions');
-SELECT fractalsql_set('http_allow_plaintext', 'on');
-SELECT fractalsql_set('http_model',           'gpt-oss:20b');
+SELECT fractal_config_set('http_url',             'http://127.0.0.1:11434/v1/chat/completions');
+SELECT fractal_config_set('http_allow_plaintext', 'on');
+SELECT fractal_config_set('http_model',           'gpt-oss:20b');
 ```
 *Note: Run `ollama pull gpt-oss:20b` or `ollama pull gemma4:12b` or `ollama pull phi4:14b` before connecting.*
 
@@ -91,28 +91,28 @@ or Settings → Beta features in the Docker Desktop GUI):
 
 ```sql
 -- Docker Model Runner (host-side access)
-SELECT fractalsql_set('http_url',             'http://127.0.0.1:12434/engines/v1/chat/completions');
-SELECT fractalsql_set('http_allow_plaintext', 'on');
-SELECT fractalsql_set('http_model',           'ai/gpt-oss:20b');   -- or 'ai/gemma4:12b' or 'ai/phi4'
+SELECT fractal_config_set('http_url',             'http://127.0.0.1:12434/engines/v1/chat/completions');
+SELECT fractal_config_set('http_allow_plaintext', 'on');
+SELECT fractal_config_set('http_model',           'ai/gpt-oss:20b');   -- or 'ai/gemma4:12b' or 'ai/phi4'
 ```
 *Note: Run `docker model pull ai/gpt-oss:20b` before connecting (or `ai/gemma4:12b` / `ai/phi4` for the alternatives); `docker model list` shows what's already pulled. From inside another container on Docker Desktop, use `http://model-runner.docker.internal/engines/v1/chat/completions` instead (no port, no host-TCP step needed).*
 
 ## OpenAI-Compatible (OpenAI, Together AI, Fireworks, vLLM)
 ```sql
-SELECT fractalsql_set('http_url',   'https://api.openai.com/v1/chat/completions');
-SELECT fractalsql_set('http_token', 'sk-...');
-SELECT fractalsql_set('http_model', 'gpt-4o-mini');
+SELECT fractal_config_set('http_url',   'https://api.openai.com/v1/chat/completions');
+SELECT fractal_config_set('http_token', 'sk-...');
+SELECT fractal_config_set('http_model', 'gpt-4o-mini');
 ```
 
 ## AWS Bedrock
 Bedrock uses AWS SigV4 signing. The URL must point to the **OpenAI-compatible** surface.
 
 ```sql
-SELECT fractalsql_set('http_url',   'https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions');
-SELECT fractalsql_set('http_model', 'amazon.nova-lite-v1:0');
+SELECT fractal_config_set('http_url',   'https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions');
+SELECT fractal_config_set('http_model', 'amazon.nova-lite-v1:0');
 ```
 **Critical**: Auth type and region are set via the reasoning plugin's own
-lower-level environment variables, not `fractalsql_set` config keys:
+lower-level environment variables, not `fractal_config_set` config keys:
 ```sh
 export FSQL_REASONING_HTTP_AUTH_TYPE=aws-sigv4
 export FSQL_REASONING_HTTP_AWS_REGION=us-east-1
@@ -122,9 +122,9 @@ export FSQL_REASONING_HTTP_AWS_REGION=us-east-1
 Azure requires a separate deployment for the chat model.
 
 ```sql
-SELECT fractalsql_set('http_url',   'https://<resource>.openai.azure.com/openai/deployments/<deployment>/chat/completions?api-version=2024-02-01');
-SELECT fractalsql_set('http_token', '<azure-api-key>');
-SELECT fractalsql_set('http_model', 'gpt-4o');
+SELECT fractal_config_set('http_url',   'https://<resource>.openai.azure.com/openai/deployments/<deployment>/chat/completions?api-version=2024-02-01');
+SELECT fractal_config_set('http_token', '<azure-api-key>');
+SELECT fractal_config_set('http_model', 'gpt-4o');
 ```
 
 ## Google Vertex AI
@@ -134,9 +134,9 @@ token** (a short-lived bearer), supplied via `http_token` exactly like an API
 key. No SigV4-style signing is needed.
 
 ```sql
-SELECT fractalsql_set('http_url',   'https://{LOCATION}-aiplatform.googleapis.com/v1/projects/{PROJECT}/locations/{LOCATION}/endpoints/openapi/chat/completions');
-SELECT fractalsql_set('http_token', '<gcp-oauth-access-token>');
-SELECT fractalsql_set('http_model', 'google/gemini-2.5-flash');
+SELECT fractal_config_set('http_url',   'https://{LOCATION}-aiplatform.googleapis.com/v1/projects/{PROJECT}/locations/{LOCATION}/endpoints/openapi/chat/completions');
+SELECT fractal_config_set('http_token', '<gcp-oauth-access-token>');
+SELECT fractal_config_set('http_model', 'google/gemini-2.5-flash');
 ```
 
 **Generating the token**: the `http_token` must be a valid Google OAuth access
@@ -150,10 +150,10 @@ gcloud auth print-access-token    # paste the output into http_token
 
 The token is short-lived (~1 hour). For a long-running install, refresh it on a
 schedule (e.g. a sidecar that re-runs `print-access-token` and rewrites the
-`fractalsql_set('http_token', '...')` line in your `load_fractalsql.sql`
+`fractal_config_set('http_token', '...')` line in your `load_fractalsql.sql`
 snippet, so fresh sessions pick it up). The `http_token` value is read on
 every reasoning call on the connection, so rotating it is a plain
-`fractalsql_set` away — it takes effect immediately, no reload, no reconnect.
+`fractal_config_set` away — it takes effect immediately, no reload, no reconnect.
 
 ---
 
@@ -196,7 +196,7 @@ Every advanced knob at a glance -- details for each are in the sections below:
 | `FSQL_REASONING_HTTP_SYSTEM_PROMPT` | Replaces the baseline anti-injection system prompt -- see [Security & Governance](#-security--governance) |
 
 `http_think` / `http_think_provider` / `http_native_url` / `http_num_ctx` are
-`fractalsql_set` config keys (per-connection, no restart needed); everything
+`fractal_config_set` config keys (per-connection, no restart needed); everything
 else in the table is a process environment variable read once at plugin init.
 
 ### Response Modes
@@ -214,7 +214,7 @@ your application) -- reloading anything else is not sufficient.
 ### Reasoning Effort
 Hybrid-thinker models (Granite 4.2, OpenAI o-series, Claude extended thinking, DeepSeek-R1, QwQ) emit an internal reasoning trace before their final answer -- left uncontrolled, that trace dominates latency and, on memory-constrained GPUs, VRAM. Two config keys throttle it:
 
-| Config key (`fractalsql_set`) | Values | Notes |
+| Config key (`fractal_config_set`) | Values | Notes |
 | --- | --- | --- |
 | `http_think` | unset (default) / `none` / `off` / any other string (`low`, `medium`, `high`, `minimal`, `xhigh`, `max`, ...) | Unset (or `none`) sends no thinking-control field, so the model's own default applies. `off` explicitly disables thinking on the wire -- not the same thing, since a hybrid-thinker model's own default is often ON. Any other value is forwarded to the provider verbatim, not checked against a fixed list -- provider effort scales keep adding tiers, so this plugin doesn't hardcode any one vendor's current names. Applies to `fractal_reason()` and `fractal_text_to_sql()`'s GENERATE step only -- never `fractal_embed()`. |
 | `http_think_provider` | unset (defaults to `openai`) / `openai` / `ollama` / `anthropic` / `vllm` / `grok` | Selects the request SHAPE, not a vendor -- `openai` also covers Azure OpenAI, AWS Bedrock, and Google Vertex AI's OpenAI-compatible surfaces, since this is independent of how `http_url` is authenticated. `grok` is for xAI's Grok models on Bedrock's OpenAI-compatible surface, which take a nested `reasoning.effort` field instead of `openai`'s top-level one. Ollama and Anthropic speak a native request shape instead, since their OpenAI-compatible endpoints don't honor thinking control. Ignored entirely when `http_think` is unset. |
@@ -223,9 +223,9 @@ Hybrid-thinker models (Granite 4.2, OpenAI o-series, Claude extended thinking, D
 
 ```sql
 -- Local Ollama, medium reasoning effort, capped context window
-SELECT fractalsql_set('http_think', 'medium');
-SELECT fractalsql_set('http_think_provider', 'ollama');
-SELECT fractalsql_set('http_num_ctx', '16384');
+SELECT fractal_config_set('http_think', 'medium');
+SELECT fractal_config_set('http_think_provider', 'ollama');
+SELECT fractal_config_set('http_num_ctx', '16384');
 ```
 
 The plugin never surfaces the reasoning trace itself -- `fractal_reason()`/`fractal_text_to_sql()` still return the final answer only, regardless of `http_think_provider`'s shape.
@@ -258,7 +258,7 @@ The plugin prepends a baseline anti-injection instruction to every system messag
 ## 📋 Production Checklist
 
 - [ ] **Plugin Path**: the `reasoning_plugin` config value is absolute, has no `..` segments, and is readable by the host process.
-- [ ] **Session Bootstrap**: the `load_fractalsql.sql` snippet (`.load` + `fractalsql_set` lines) is passed to every session (`sqlite3 -init load_fractalsql.sql mydb.sqlite`), and is protected like a credential (it contains `http_token` in plain text).
+- [ ] **Session Bootstrap**: the `load_fractalsql.sql` snippet (`.load` + `fractal_config_set` lines) is passed to every session (`sqlite3 -init load_fractalsql.sql mydb.sqlite`), and is protected like a credential (it contains `http_token` in plain text).
 - [ ] **Access Model**: the reasoning connection's database file / authorizer hook bounds what executed SQL may touch (no engine-side roles in SQLite).
 - [ ] **Isolation**: tenant-sensitive rows are only reachable through tenant-scoped views or a scoped database file.
 - [ ] **Egress Review**: Cloud endpoints' DPA/BAA have been reviewed for the specific data classification.

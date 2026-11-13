@@ -40,7 +40,7 @@
 #                      (re-aim: PG's low-privilege role becomes an
 #                      authorizer hook in a python driver)
 #   09  guc_superuser  relative/traversal reasoning_plugin paths       ~1s
-#                      rejected at fractalsql_set time (re-aim: PG's
+#                      rejected at fractal_config_set time (re-aim: PG's
 #                      GUC_SUPERUSER_ONLY check becomes strict set-time
 #                      path validation; stock SQLite cannot gate
 #                      per-role, so the same boundary is enforced on
@@ -264,6 +264,13 @@
 #                      across sequential acquire() calls saturates
 #                      the same counters deterministically, with no
 #                      real concurrency or timing dependency needed.
+#   47  mcp_cli        the MCP server started every way its command line, environment, database path and extension path
+#                      allow, including a database file deleted, overwritten and truncated under a running server
+#                      (mcp/tests/mcp_cli.py); each run must end in an orderly way
+#   48  mcp_faults     FAULT ONLY (--fault, not in DEFAULT/QUICK), Linux, not under a sanitizer: the server under
+#                      tests/oom_preload.c with one allocation, file call or
+#                      socket call failed at a time while every tool is called (mcp/tests/mcp_faults.py); it must keep
+#                      answering. Allocation-failure injection for the extension too (its allocations happen in the server).
 #   43  kits           the twenty-nine newer industry kits (demo/demo-       ~10s
 #                      vertical-{ev-battery-lifecycle,adas-safety-
 #                      validation,v2x-warranty-triage,critical-
@@ -290,18 +297,29 @@
 #   FUZZ    = 21                                       --fuzz, not part of
 #                                                      DEFAULT (adds real
 #                                                      wall-time)
+#   FAULT   = 48                                       --fault runs DEFAULT, then ADDS gate 48 after it
+#                                                      (48 injects one allocation, file or socket failure inside
+#                                                      each MCP tool call; Linux only, and it skips under a
+#                                                      sanitizer -- the fault shim and the sanitizer runtime cannot
+#                                                      both interpose the allocator. Deliberately NOT in DEFAULT and
+#                                                      not in CI: --fault is a local, on-demand run.)
 #
 # Usage:
 #   ./build_test.sh                 # DEFAULT
 #   ./build_test.sh --quick
 #   ./build_test.sh --fuzz          # gate 21 only -- libFuzzer smoke
+#   ./build_test.sh --fault         # DEFAULT, then gate 48 -- the MCP server under injected allocation,
+#                                   # file and socket failures (Linux only; a local run, not part of CI)
 #   ./build_test.sh --gate 04
-#   ./build_test.sh --gate mcp      # only the MCP server gates (37 38 40 41 42);
-#                                    # combine with --asan/--ubsan/--tsan/--coverage
+#   ./build_test.sh --gate mcp      # only the MCP server gates (37 38 40 41 42 47; plus 48
+#                                   # with --fault); combine with --asan/--ubsan/--tsan/--coverage
 #   ./build_test.sh --asan          # or --ubsan, composable with each other
 #   ./build_test.sh --tsan          # NOT composable with --asan (see note)
 #   ./build_test.sh --coverage      # gcov-instrumented build; DEFAULT
 #                                    # gates; lcov/genhtml report after
+#   ./build_test.sh --profile       # Linux: valgrind memcheck over the extension (units, the demo kits through
+#                                   # the sqlite3 shell) and the MCP server's probes; test/valgrind_run.sh. Fails on a
+#                                   # memcheck error or definite/indirect leak with a frame in our code. Not in any gate set.
 #   ./build_test.sh --list
 #
 # Environment:
@@ -460,7 +478,7 @@ fi
 
 # A nonexistent-but-absolute plugin path for the "unloadable plugin"
 # negative tests (gates 15/24): must be absolute on BOTH POSIX and
-# MSYS so fractalsql_set's own absolute-path validation lets it
+# MSYS so fractal_config_set's own absolute-path validation lets it
 # through to the actual load attempt, rather than rejecting it a step
 # earlier with a different error. $BTROOTW is already native-form
 # (C:/tmp on MSYS, /tmp on POSIX) and MSYS-argument-conversion-safe,
@@ -478,9 +496,15 @@ wpath() {
   fi
 }
 
-DEFAULT_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 31 32 34 35 36 37 38 39 40 41 42 43 45 46)
+DEFAULT_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 31 32 34 35 36 37 38 39 40 41 42 43 45 46 47 49 50 51)
 QUICK_GATES=(01 02)
 FUZZ_GATES=(21 44)
+# The fault gates. A fault gate injects an allocation, file or socket failure and proves the
+# server survives it, so it needs a fault shim (Linux only) and cannot run under a sanitizer
+# (the shim and the sanitizer runtime cannot both interpose the allocator). They are
+# deliberately NOT in DEFAULT_GATES and not in CI: --fault is a local, on-demand run.
+FAULT_GATES=(48)
+MCP_FAULT_GATES=(48)   # the fault gates that are also MCP server gates (--gate mcp --fault)
 
 MODE="default"
 ONE_GATE=""
@@ -521,12 +545,14 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --quick)   MODE="quick" ;;
     --fuzz)    MODE="fuzz" ;;
+    --fault)   MODE="fault" ;;
     --gate)    ONE_GATE="$2"; shift ;;
     --asan)    ASAN=1 ;;
     --ubsan)   UBSAN=1 ;;
     --tsan)    TSAN=1 ;;
     --coverage) COVERAGE=1 ;;
-    --list)    printf "gates: %s\nfuzz gates: %s\n" "${DEFAULT_GATES[*]}" "${FUZZ_GATES[*]}"; exit 0 ;;
+    --profile) exec "$HERE/test/valgrind_run.sh" ;;
+    --list)    printf "gates: %s\nfuzz gates: %s\nfault gates: %s\n" "${DEFAULT_GATES[*]}" "${FUZZ_GATES[*]}" "${FAULT_GATES[*]}"; exit 0 ;;
     -h|--help) usage ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -704,7 +730,7 @@ resolve_ext() {
 # Run SQL through a FRESH connection with the extension loaded.
 # Each argument is one statement; a script can also be piped on stdin.
 # Config is per-connection, so every gate invocation carries its own
-# fractalsql_set() preamble: the connection's own config surface.
+# fractal_config_set() preamble: the connection's own config surface.
 sqlq() { "$SQLITE3" -batch -bail -cmd ".load $EXTW" "$DBW" "$@" 2>&1; }
 
 # Expect a clean SQL error containing $1 from a fresh connection;
@@ -1166,10 +1192,10 @@ gate_01_build() {
 }
 
 gate_02_smoke() {
-  local ver; ver=$(sqlq "SELECT fractalsql_version();")
-  [[ "$ver" = "2.0.12" ]] \
+  local ver; ver=$(sqlq "SELECT fractal_version();")
+  [[ "$ver" = "2.0.13" ]] \
     && pass "02 smoke: version=$ver" \
-    || fail "02 smoke: version='$ver' (want 2.0.12)"
+    || fail "02 smoke: version='$ver' (want 2.0.13)"
   # fractal_search convergence: self-distance ~0
   local d; d=$(sqlq "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');")
   if [[ "$d" = "0.0" ]] || python_abs_lt_1e6 "$d"; then
@@ -1184,7 +1210,7 @@ gate_02_smoke() {
   else
     fail "02 smoke: convergence=$d2"
   fi
-  local ed; ed=$(sqlq "SELECT fractalsql_edition();")
+  local ed; ed=$(sqlq "SELECT fractal_edition();")
   [[ "$ed" = "Community" ]] \
     && pass "02 smoke: edition=$ed" \
     || fail "02 smoke: edition='$ed'"
@@ -1262,8 +1288,8 @@ t2s_expect() {
   local canned="$1" want="$2" label="$3"
   printf '%s' "$canned" > "$SQLTXT"
   local r; r=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
-    "SELECT fractalsql_set('text_to_sql_allowed_statements','select');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('text_to_sql_allowed_statements','select');" \
     "SELECT fractal_text_to_sql('q');")
   local rc=$?
   if [[ -z "$want" ]]; then
@@ -1319,8 +1345,8 @@ gate_04_text_to_sql() {
   # candidate.
   printf '' > "$SQLTXT"
   if expect_err "the model response contained no SQL" \
-      "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
-      "SELECT fractalsql_set('text_to_sql_max_attempts','1');" \
+      "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
+      "SELECT fractal_config_set('text_to_sql_max_attempts','1');" \
       "SELECT fractal_text_to_sql('q');"; then
     pass "04 empty candidate -> rejected (no fenced block, no bare statement)"
   else
@@ -1336,7 +1362,7 @@ gate_04_text_to_sql() {
   # instead of code mode's "return verbatim" shortcut.
   printf 'SELECT count(*) FROM bt_orders' > "$SQLTXT"
   r=$(FSQL_MOCK_FLIP_FENCE=1 sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT fractal_text_to_sql('q');")
   [[ $? -eq 0 ]] && grep <<< "$r" -Fq "SELECT count(*) FROM bt_orders" \
     && pass "04 extract_sql_from_response strips a \`\`\`sql fenced block (FLIP_FENCE)" \
@@ -1348,32 +1374,32 @@ gate_04_text_to_sql() {
   # there is no explicit-names form here; discovery is the only path).
   printf 'SELECT count(*) FROM bt_orders' > "$SQLTXT"
   local auto; auto=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT fractal_text_to_sql('q');")
   [[ $? -eq 0 ]] \
     && pass "04 auto-discovery: text_to_sql off the auto-built context" \
     || fail "04 auto-discovery: got '$auto'"
   # Model-generated SQL run by fractal_sql_agent(auto_execute) must not reach
   # the functions that change configuration. The model's reply is a SELECT:
-  # read-only, so it passes validation, but it calls fractalsql_set.
-  printf '%s' "SELECT fractalsql_set('text_to_sql_max_attempts','9')" > "$SQLTXT"
+  # read-only, so it passes validation, but it calls fractal_config_set.
+  printf '%s' "SELECT fractal_config_set('text_to_sql_max_attempts','9')" > "$SQLTXT"
   local gen; gen=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
-    "SELECT fractalsql_set('text_to_sql_max_attempts','1');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('text_to_sql_max_attempts','1');" \
     "SELECT fractal_sql_agent('q', NULL, 1, 1);" \
-    "SELECT fractalsql_get('text_to_sql_max_attempts');")
+    "SELECT fractal_config_get('text_to_sql_max_attempts');")
   if grep -q '"execution_status":"execution_failed"' <<< "$gen" \
       && [[ "$(tail -n 1 <<< "$gen")" = "1" ]]; then
     pass "04 model-generated SQL cannot change configuration (auto_execute)"
   else
-    fail "04 model-generated SQL reached fractalsql_set: $gen"
+    fail "04 model-generated SQL reached fractal_config_set: $gen"
   fi
   # Control: the same path does run a harmless generated SELECT, so the
   # refusal above is the guard and not a broken auto_execute.
   printf '%s' "SELECT count(*) FROM bt_orders" > "$SQLTXT"
   gen=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
-    "SELECT fractalsql_set('text_to_sql_max_attempts','1');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('text_to_sql_max_attempts','1');" \
     "SELECT fractal_sql_agent('q', NULL, 1, 1);")
   grep -q '"execution_status":"executed"' <<< "$gen" \
     && pass "04 auto_execute still runs a harmless generated SELECT" \
@@ -1405,14 +1431,14 @@ gate_05_evil_overread() {
   # backends, which needed the fixed-file convention).
   export FSQL_EVIL_SQL_FILE="$SQLTXTW"
   if survived \
-      "SELECT fractalsql_set('reasoning_plugin','$EVILNT');" \
+      "SELECT fractal_config_set('reasoning_plugin','$EVILNT');" \
       "SELECT fractal_text_to_sql('q');"; then
     pass "05 evil_overread: GENERATE path (non-terminated guard-page response) survived"
   else
     fail "05 evil_overread: GENERATE path crashed the process"
   fi
   if survived \
-      "SELECT fractalsql_set('reasoning_plugin','$EVILNT');" \
+      "SELECT fractal_config_set('reasoning_plugin','$EVILNT');" \
       "SELECT fractal_reason('q','ctx');"; then
     pass "05 evil_overread: bare fractal_reason() survived"
   else
@@ -1420,8 +1446,8 @@ gate_05_evil_overread() {
   fi
   echo "2" > "$EVILTRIG"
   if survived \
-      "SELECT fractalsql_set('reasoning_plugin','$EVILNT');" \
-      "SELECT fractalsql_set('text_to_sql_use_review','on');" \
+      "SELECT fractal_config_set('reasoning_plugin','$EVILNT');" \
+      "SELECT fractal_config_set('text_to_sql_use_review','on');" \
       "SELECT fractal_text_to_sql('q');"; then
     pass "05 evil_overread: REVIEW path survived"
   else
@@ -1444,7 +1470,7 @@ gate_06_crash_recovery() {
   echo "1" > "$EVILTRIG"
   local r rc
   r=$(sqlq \
-      "SELECT fractalsql_set('reasoning_plugin','$CRASH');" \
+      "SELECT fractal_config_set('reasoning_plugin','$CRASH');" \
       "SELECT fractal_reason('q','ctx');")
   rc=$?
   if ! crashed "$r" "$rc"; then
@@ -1492,15 +1518,15 @@ gate_07_evil_lying_length() {
   }
   echo "1" > "$EVILTRIG"
   expect_rej "GENERATE path" \
-    "SELECT fractalsql_set('reasoning_plugin','$LYING');" \
+    "SELECT fractal_config_set('reasoning_plugin','$LYING');" \
     "SELECT fractal_text_to_sql('q');"
   expect_rej "bare fractal_reason()" \
-    "SELECT fractalsql_set('reasoning_plugin','$LYING');" \
+    "SELECT fractal_config_set('reasoning_plugin','$LYING');" \
     "SELECT fractal_reason('q');"
   echo "2" > "$EVILTRIG"
   expect_rej "REVIEW path" \
-    "SELECT fractalsql_set('reasoning_plugin','$LYING');" \
-    "SELECT fractalsql_set('text_to_sql_use_review','on');" \
+    "SELECT fractal_config_set('reasoning_plugin','$LYING');" \
+    "SELECT fractal_config_set('text_to_sql_use_review','on');" \
     "SELECT fractal_text_to_sql('q');"
   echo "1" > "$EVILTRIG"
 }
@@ -1574,23 +1600,23 @@ gate_08_authz() {
 }
 
 gate_09_guc_superuser() {
-  # Enforced at fractalsql_set time: a path key must be absolute with
+  # Enforced at fractal_config_set time: a path key must be absolute with
   # no traversal segments, whatever the caller's privileges.
   if expect_err "must be an absolute path with no '..' segments" \
-      "SELECT fractalsql_set('reasoning_plugin','plugins/mock.so');"; then
+      "SELECT fractal_config_set('reasoning_plugin','plugins/mock.so');"; then
     pass "09 guc_superuser: relative reasoning_plugin rejected"
   else
     fail "09 guc_superuser: relative path accepted"
   fi
   if expect_err "must be an absolute path with no '..' segments" \
-      "SELECT fractalsql_set('reasoning_plugin','$BTROOTW/../evil$PLUGSUF');"; then
+      "SELECT fractal_config_set('reasoning_plugin','$BTROOTW/../evil$PLUGSUF');"; then
     pass "09 guc_superuser: traversal reasoning_plugin rejected"
   else
     fail "09 guc_superuser: traversal path accepted"
   fi
   # Control: the canonical absolute form is accepted (no load happens
   # at set time; set-time validation only).
-  local r; r=$(sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');")
+  local r; r=$(sqlq "SELECT fractal_config_set('reasoning_plugin','$MOCK');")
   [[ "$r" == "ok" ]] \
     && pass "09 guc_superuser: canonical absolute path accepted" \
     || fail "09 guc_superuser: canonical path rejected: $r"
@@ -1783,8 +1809,8 @@ gate_13_siu_mode() {
   siu() {  # siu <canned-sql> <want> <label>
     printf '%s' "$1" > "$SQLTXT"
     local r; r=$(sqlq \
-      "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
-      "SELECT fractalsql_set('text_to_sql_allowed_statements',
+      "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
+      "SELECT fractal_config_set('text_to_sql_allowed_statements',
             'select_insert_update');" \
       "SELECT fractal_text_to_sql('q');")
     local rc=$?
@@ -1821,8 +1847,8 @@ gate_14_retry() {
   fi
   rm -f "$RETRYPROMPT"
   local r; r=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$RETRY');" \
-    "SELECT fractalsql_set('text_to_sql_max_attempts','2');" \
+    "SELECT fractal_config_set('reasoning_plugin','$RETRY');" \
+    "SELECT fractal_config_set('text_to_sql_max_attempts','2');" \
     "SELECT fractal_text_to_sql('q');")
   if [[ $? -eq 0 ]] && grep <<< "$r" -q "SELECT 1"; then
     pass "14 retry: attempt 1 rejected, attempt 2 succeeded"
@@ -1842,8 +1868,8 @@ gate_15_embed() {
   # fractal_embed() itself: real dispatch through the EMBED tier.
   local d
   d=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCKEMB');" \
-    "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCKEMB');" \
+    "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" \
     "SELECT fractal_vector_dims(fractal_embed('hello'));")
   [[ "$(tail -n1 <<< "$d")" == "3" ]] \
     && pass "15 embed: fractal_embed returns the canned 3-dim vector" \
@@ -1867,15 +1893,15 @@ gate_15_embed() {
     fail "15 embed: unconfigured embed did not error"
   fi
   if expect_err "http_embed_url is not configured" \
-      "SELECT fractalsql_set('reasoning_plugin','$MOCKEMB');" \
+      "SELECT fractal_config_set('reasoning_plugin','$MOCKEMB');" \
       "SELECT fractal_embed('x');"; then
     pass "15 embed: chat-only config rejected (no http_url fallback)"
   else
     fail "15 embed: missing http_embed_url did not error"
   fi
   if expect_err "failed to load reasoning plugin" \
-      "SELECT fractalsql_set('reasoning_plugin','$BADPLUGIN$PLUGSUF');" \
-      "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" \
+      "SELECT fractal_config_set('reasoning_plugin','$BADPLUGIN$PLUGSUF');" \
+      "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" \
       "SELECT fractal_embed('x');"; then
     pass "15 embed: unloadable plugin errors clearly"
   else
@@ -1883,8 +1909,8 @@ gate_15_embed() {
   fi
   if [[ -f "$(wpath "$EVOLEMB")" ]]; then
     if expect_err "could not parse embedding response" \
-        "SELECT fractalsql_set('reasoning_plugin','$EVOLEMB');" \
-        "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" \
+        "SELECT fractal_config_set('reasoning_plugin','$EVOLEMB');" \
+        "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" \
         "SELECT fractal_embed('x');"; then
       pass "15 embed: over-limit (16385-elem) response rejected"
     else
@@ -1900,8 +1926,8 @@ gate_15_embed() {
     "CREATE TABLE bt_vembed(
         id INTEGER PRIMARY KEY, body TEXT, emb TEXT);" \
     "INSERT INTO bt_vembed(body) VALUES ('a'),('b'),('c');" \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCKEMB');" \
-    "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCKEMB');" \
+    "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" \
     "SELECT fractal_vectorizer_create('bt_vembed','body','emb');" \
     "SELECT 'PROCESSED=' || fractal_vectorizer_process_queue(10);" \
     "SELECT 'DONE=' || n FROM fractal_vectorizer_status
@@ -1945,8 +1971,8 @@ gate_15_embed() {
   local rsq; rsq=$(sqlq \
     "CREATE TABLE bt_vsq(id INTEGER PRIMARY KEY, body TEXT, emb TEXT);" \
     "INSERT INTO bt_vsq(body) VALUES ('a');" \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCKEMB');" \
-    "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCKEMB');" \
+    "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" \
     "SELECT fractal_vectorizer_create('main.bt_vsq','body','emb');")
   if [[ $? -eq 0 ]]; then
     pass "15 vectorizer: schema-qualified source_table (main.tbl) accepted"
@@ -1980,8 +2006,8 @@ gate_15_embed() {
   local rcap; rcap=$(sqlq \
     "CREATE TABLE bt_vrate(id INTEGER PRIMARY KEY, body TEXT, emb TEXT);" \
     "INSERT INTO bt_vrate(body) VALUES ('a'),('b'),('c');" \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCKEMB');" \
-    "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCKEMB');" \
+    "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" \
     "SELECT fractal_vectorizer_create('bt_vrate','body','emb',
       '{\"max_embeds_per_window\":1,\"rate_window_secs\":3600}');" \
     "SELECT 'PROCESSED=' || fractal_vectorizer_process_queue(10);" \
@@ -2008,8 +2034,8 @@ gate_15_embed() {
   if expect_err "already exists" \
       "CREATE TEMP TRIGGER \"fractal_vectorizer_trg_1\"
         AFTER INSERT ON bt_vclean BEGIN SELECT 1; END;" \
-      "SELECT fractalsql_set('reasoning_plugin','$MOCKEMB');" \
-      "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" \
+      "SELECT fractal_config_set('reasoning_plugin','$MOCKEMB');" \
+      "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" \
       "SELECT fractal_vectorizer_create('bt_vclean','body','emb');"; then
     pass "15 vectorizer: a trigger-name collision mid-create rolls back the registry row"
   else
@@ -2021,8 +2047,8 @@ gate_15_embed() {
     "CREATE TABLE bt_vsoak_stub(
         id INTEGER PRIMARY KEY, body TEXT, emb TEXT);" \
     "INSERT INTO bt_vsoak_stub(body) VALUES ('p');" \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCKEMB');" \
-    "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCKEMB');" \
+    "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" \
     "SELECT fractal_vectorizer_create('bt_vsoak_stub','body','emb');" \
     "SELECT fractal_vectorizer_pause(1);" \
     "SELECT 'P=' || fractal_vectorizer_process_queue(10);" \
@@ -2083,8 +2109,8 @@ gate_15_embed() {
   sqlq "CREATE TABLE bt_vdup(id INTEGER PRIMARY KEY, body TEXT, emb TEXT);" \
     >/dev/null 2>&1
   if expect_err "already exists (id=" \
-      "SELECT fractalsql_set('reasoning_plugin','$MOCKEMB');" \
-      "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" \
+      "SELECT fractal_config_set('reasoning_plugin','$MOCKEMB');" \
+      "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" \
       "SELECT fractal_vectorizer_create('bt_vdup','body','emb');" \
       "SELECT fractal_vectorizer_create('bt_vdup','body','emb');"; then
     pass "15 vectorizer: create rejects a duplicate source/text/embedding triple"
@@ -2191,8 +2217,8 @@ gate_17_embed_soak() {
     || { fail "17 embed_soak: bt_vsoak setup failed"; return; }
   local r
   r=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCKEMB');" \
-    "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCKEMB');" \
+    "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" \
     "SELECT fractal_vectorizer_create('bt_vsoak','body','emb');" \
     "SELECT 'P=' || fractal_vectorizer_process_queue(20);" \
     "SELECT 'P=' || fractal_vectorizer_process_queue(20);" \
@@ -2222,8 +2248,8 @@ gate_18_embed_crash() {
     INSERT INTO bt_vcrash(body) VALUES ('a'),('b');" >/dev/null 2>&1
   local r rc
   r=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$CRASH');" \
-    "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" \
+    "SELECT fractal_config_set('reasoning_plugin','$CRASH');" \
+    "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" \
     "SELECT fractal_vectorizer_create('bt_vcrash','body','emb');" \
     "SELECT fractal_vectorizer_process_queue(10);")
   rc=$?
@@ -2345,7 +2371,7 @@ gate_20_api_func() {
   printf 'canary-reason-response' > "$SQLTXT"
   local r
   r=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT fractal_reason('q');")
   grep <<< "$r" -q "canary-reason-response" \
     && pass "20 api_func: fractal_reason returns the canned response" \
@@ -2426,8 +2452,8 @@ gate_20_api_func() {
         id INTEGER PRIMARY KEY, body TEXT, emb TEXT);" \
     "INSERT INTO bt_vstale(id, body)
       VALUES (995,'a'),(996,'b'),(997,'c'),(998,'d'),(999,'e');" \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCKEMB');" \
-    "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCKEMB');" \
+    "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" \
     "SELECT fractal_vectorizer_create('bt_vstale','body','emb');" \
     "UPDATE fractal_vectorizer_queue
       SET status='processing',
@@ -2462,14 +2488,14 @@ gate_20_api_func() {
     >/dev/null 2>&1
   printf 'SELECT 1' > "$SQLTXT"
   if expect_err "exhausted" \
-      "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
-      "SELECT fractalsql_set('text_to_sql_use_review','on');" \
+      "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
+      "SELECT fractal_config_set('text_to_sql_use_review','on');" \
       "SELECT fractal_text_to_sql('q');"; then
     pass "20 api_func: text_to_sql_use_review exhausts attempts when REVIEW never PASSes"
   else
     fail "20 api_func: expected an exhausted-attempts ERROR"
   fi
-  sqlq "SELECT fractalsql_set('text_to_sql_use_review','off');" \
+  sqlq "SELECT fractal_config_set('text_to_sql_use_review','off');" \
        "DROP TABLE IF EXISTS bt_t2s_review_exhaust;" >/dev/null 2>&1
   printf 'SELECT 1' > "$SQLTXT"
 }
@@ -3315,23 +3341,23 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
     && pass "22 v2_functions: sin(NULL) -> NULL" \
     || fail "22 v2_functions: sin(NULL): $r"
 
-  # --- fractalsql_get -------------------------------------------------
-  r=$(sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
-           "SELECT fractalsql_get('reasoning_plugin');" | tail -n1)
+  # --- fractal_config_get -------------------------------------------------
+  r=$(sqlq "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
+           "SELECT fractal_config_get('reasoning_plugin');" | tail -n1)
   [[ "$r" = "$MOCK" ]] \
-    && pass "22 v2_functions: fractalsql_get round-trips a string key" \
-    || fail "22 v2_functions: fractalsql_get: $r"
+    && pass "22 v2_functions: fractal_config_get round-trips a string key" \
+    || fail "22 v2_functions: fractal_config_get: $r"
   if expect_err "unknown config key" \
-      "SELECT fractalsql_get('not_a_real_key');"; then
-    pass "22 v2_functions: fractalsql_get rejects an unknown key"
+      "SELECT fractal_config_get('not_a_real_key');"; then
+    pass "22 v2_functions: fractal_config_get rejects an unknown key"
   else
-    fail "22 v2_functions: fractalsql_get accepted an unknown key"
+    fail "22 v2_functions: fractal_config_get accepted an unknown key"
   fi
   if expect_err "expects TEXT" \
-      "SELECT fractalsql_get(123);"; then
-    pass "22 v2_functions: fractalsql_get rejects a non-TEXT name"
+      "SELECT fractal_config_get(123);"; then
+    pass "22 v2_functions: fractal_config_get rejects a non-TEXT name"
   else
-    fail "22 v2_functions: fractalsql_get accepted a non-TEXT name"
+    fail "22 v2_functions: fractal_config_get accepted a non-TEXT name"
   fi
 
   # --- scattered argument-validation guards, each otherwise dead ------
@@ -3356,8 +3382,8 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
   fi
   if [[ -f "$(wpath "$MOCKEMB")" ]]; then
     if expect_err "no rows found in the corpus" \
-        "SELECT fractalsql_set('reasoning_plugin','$MOCKEMB');" \
-        "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" \
+        "SELECT fractal_config_set('reasoning_plugin','$MOCKEMB');" \
+        "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" \
         "SELECT fractal_agent_plan_explore('1.0,2.0,3.0','bt_v22_empty','emb',5);"; then
       pass "22 v2_functions: plan_explore raises a clean ERROR when the corpus table is empty"
     else
@@ -3712,31 +3738,31 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
   fi
 
   # --- fsql_config.c surfaces not exercised above --------------------
-  # fractalsql_get on every string-typed key -- each is its own
+  # fractal_config_get on every string-typed key -- each is its own
   # strcmp(key,...) line in cfg_str_value, never reached unless that
   # exact key is queried.
   r=$(sqlq \
-    "SELECT fractalsql_get('http_url');" \
-    "SELECT fractalsql_get('http_token');" \
-    "SELECT fractalsql_get('http_model');" \
-    "SELECT fractalsql_get('http_embed_url');" \
-    "SELECT fractalsql_get('http_embed_model');" \
-    "SELECT fractalsql_get('http_think');" \
-    "SELECT fractalsql_get('http_think_provider');" \
-    "SELECT fractalsql_get('http_native_url');" \
-    "SELECT fractalsql_get('text_to_sql_allowed_statements');" \
-    "SELECT fractalsql_get('enterprise_lib');" \
-    "SELECT fractalsql_get('enterprise_ledger_key');")
+    "SELECT fractal_config_get('http_url');" \
+    "SELECT fractal_config_get('http_token');" \
+    "SELECT fractal_config_get('http_model');" \
+    "SELECT fractal_config_get('http_embed_url');" \
+    "SELECT fractal_config_get('http_embed_model');" \
+    "SELECT fractal_config_get('http_think');" \
+    "SELECT fractal_config_get('http_think_provider');" \
+    "SELECT fractal_config_get('http_native_url');" \
+    "SELECT fractal_config_get('text_to_sql_allowed_statements');" \
+    "SELECT fractal_config_get('enterprise_lib');" \
+    "SELECT fractal_config_get('enterprise_ledger_key');")
   if [[ $? -eq 0 ]]; then
-    pass "22 v2_functions: fractalsql_get reads every string-typed config key"
+    pass "22 v2_functions: fractal_config_get reads every string-typed config key"
   else
-    fail "22 v2_functions: fractalsql_get string-key sweep: $r"
+    fail "22 v2_functions: fractal_config_get string-key sweep: $r"
   fi
   # Empty-string reset: a previously-set key goes back to unset (NULL).
   local cfgreset; cfgreset=$(sqlq \
-    "SELECT fractalsql_set('http_token','x');" \
-    "SELECT fractalsql_set('http_token','');" \
-    "SELECT fractalsql_get('http_token');" | tail -n1)
+    "SELECT fractal_config_set('http_token','x');" \
+    "SELECT fractal_config_set('http_token','');" \
+    "SELECT fractal_config_get('http_token');" | tail -n1)
   [[ -z "$cfgreset" ]] \
     && pass "22 v2_functions: an empty-string set resets a config key to unset" \
     || fail "22 v2_functions: expected NULL after empty-string reset, got: $cfgreset"
@@ -3744,73 +3770,73 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
   # (8192 cap).
   local longurl; longurl=$(printf 'a%.0s' $(seq 1 2100))
   if expect_err "too long" \
-      "SELECT fractalsql_set('http_embed_url','https://x/$longurl');"; then
+      "SELECT fractal_config_set('http_embed_url','https://x/$longurl');"; then
     pass "22 v2_functions: config rejects an over-2048-char URL key"
   else
     fail "22 v2_functions: config accepted an over-2048-char URL key"
   fi
   local longstr; longstr=$(printf 'a%.0s' $(seq 1 8200))
   if expect_err "too long" \
-      "SELECT fractalsql_set('enterprise_ledger_key','$longstr');"; then
+      "SELECT fractal_config_set('enterprise_ledger_key','$longstr');"; then
     pass "22 v2_functions: config rejects an over-8192-char plain string key"
   else
     fail "22 v2_functions: config accepted an over-8192-char plain string key"
   fi
   if expect_err "must be one of" \
-      "SELECT fractalsql_set('text_to_sql_allowed_statements','bogus');"; then
+      "SELECT fractal_config_set('text_to_sql_allowed_statements','bogus');"; then
     pass "22 v2_functions: config rejects an unknown enum value"
   else
     fail "22 v2_functions: config accepted an unknown enum value"
   fi
   r=$(sqlq \
-    "SELECT fractalsql_set('agent_partial_reasoning_fail','1');" \
-    "SELECT fractalsql_set('agent_partial_reasoning_fail','yes');" \
-    "SELECT fractalsql_set('agent_partial_reasoning_fail','0');" \
-    "SELECT fractalsql_set('agent_partial_reasoning_fail','no');" \
-    "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" \
-    "SELECT fractalsql_set('agent_partial_reasoning_fail','true');" \
-    "SELECT fractalsql_set('agent_partial_reasoning_fail','false');")
+    "SELECT fractal_config_set('agent_partial_reasoning_fail','1');" \
+    "SELECT fractal_config_set('agent_partial_reasoning_fail','yes');" \
+    "SELECT fractal_config_set('agent_partial_reasoning_fail','0');" \
+    "SELECT fractal_config_set('agent_partial_reasoning_fail','no');" \
+    "SELECT fractal_config_set('agent_partial_reasoning_fail','off');" \
+    "SELECT fractal_config_set('agent_partial_reasoning_fail','true');" \
+    "SELECT fractal_config_set('agent_partial_reasoning_fail','false');")
   if [[ $? -eq 0 ]]; then
     pass "22 v2_functions: config bool setter accepts 1/yes/0/no/true/false spellings"
   else
     fail "22 v2_functions: config bool spellings: $r"
   fi
-  sqlq "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
+  sqlq "SELECT fractal_config_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
   if expect_err "expects an integer" \
-      "SELECT fractalsql_set('text_to_sql_max_attempts','bogus');"; then
+      "SELECT fractal_config_set('text_to_sql_max_attempts','bogus');"; then
     pass "22 v2_functions: config int setter rejects a non-numeric value"
   else
     fail "22 v2_functions: config int setter accepted a non-numeric value"
   fi
   if expect_err "expects an integer" \
-      "SELECT fractalsql_set('text_to_sql_max_attempts','3abc');"; then
+      "SELECT fractal_config_set('text_to_sql_max_attempts','3abc');"; then
     pass "22 v2_functions: config int setter rejects a value with trailing junk"
   else
     fail "22 v2_functions: config int setter accepted trailing junk"
   fi
   if expect_err "must be 1..10" \
-      "SELECT fractalsql_set('text_to_sql_max_attempts','0');"; then
+      "SELECT fractal_config_set('text_to_sql_max_attempts','0');"; then
     pass "22 v2_functions: config int setter rejects a below-range value"
   else
     fail "22 v2_functions: config int setter accepted a below-range value"
   fi
   if expect_err "must be 1..10" \
-      "SELECT fractalsql_set('text_to_sql_max_attempts','11');"; then
+      "SELECT fractal_config_set('text_to_sql_max_attempts','11');"; then
     pass "22 v2_functions: config int setter rejects an above-range value"
   else
     fail "22 v2_functions: config int setter accepted an above-range value"
   fi
   if expect_err "expects true/false/on/off/1/0" \
-      "SELECT fractalsql_set('agent_partial_reasoning_fail','bogus');"; then
+      "SELECT fractal_config_set('agent_partial_reasoning_fail','bogus');"; then
     pass "22 v2_functions: config bool setter rejects an unknown spelling"
   else
     fail "22 v2_functions: config bool setter accepted an unknown spelling"
   fi
   if expect_err "unknown config key" \
-      "SELECT fractalsql_set('not_a_real_key','x');"; then
-    pass "22 v2_functions: fractalsql_set rejects an unknown config key"
+      "SELECT fractal_config_set('not_a_real_key','x');"; then
+    pass "22 v2_functions: fractal_config_set rejects an unknown config key"
   else
-    fail "22 v2_functions: fractalsql_set accepted an unknown config key"
+    fail "22 v2_functions: fractal_config_set accepted an unknown config key"
   fi
 
   # --- fractalsql_sqlite.c surfaces not exercised above --------------
@@ -4005,10 +4031,10 @@ gate_23_agents() {
   # Preamble shared by every agent invocation (chat + embed tiers both
   # served by the embed-capable mock; endpoint keys are dummies).
   local PRE=(
-    "SELECT fractalsql_set('reasoning_plugin','$MOCKEMB');"
-    "SELECT fractalsql_set('http_url','https://llm.invalid/v1');"
-    "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');"
-    "SELECT fractalsql_set('http_model','mock-model');"
+    "SELECT fractal_config_set('reasoning_plugin','$MOCKEMB');"
+    "SELECT fractal_config_set('http_url','https://llm.invalid/v1');"
+    "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');"
+    "SELECT fractal_config_set('http_model','mock-model');"
   )
   agent() {  # agent <label> <sql...> (premble prepended)
     local label="$1"; shift
@@ -4117,9 +4143,9 @@ gate_23_agents() {
   " >/dev/null 2>&1
   printf 'SELECT count(*) AS n FROM bt_sql_t2s' > "$SQLTXT"
   local r_t2s; r_t2s=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
-    "SELECT fractalsql_set('http_url','https://llm.invalid/v1');" \
-    "SELECT fractalsql_set('http_model','mock-model');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('http_url','https://llm.invalid/v1');" \
+    "SELECT fractal_config_set('http_model','mock-model');" \
     "SELECT fractal_sql_agent('count rows','[\"bt_sql_t2s\"]',2,1);")
   grep <<< "$r_t2s" -q '"execution_status":"executed"' \
     && grep <<< "$r_t2s" -q '"rows":\[\[2\]\]' \
@@ -4131,7 +4157,7 @@ gate_23_agents() {
   sqlq "CREATE TABLE bt_sql_t2s2(id INTEGER PRIMARY KEY, w INTEGER);
     INSERT INTO bt_sql_t2s2 VALUES (1,5);" >/dev/null 2>&1
   local r_t2s2; r_t2s2=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT fractal_sql_agent('count rows',
        '[\"bt_sql_t2s\",\"bt_sql_t2s2\"]',2,0);")
   if [[ $? -eq 0 ]]; then
@@ -4146,7 +4172,7 @@ gate_23_agents() {
   # single-row count(*) call above never takes either comma branch.
   printf 'SELECT id, v FROM bt_sql_t2s ORDER BY id' > "$SQLTXT"
   local r_t2s3; r_t2s3=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT fractal_sql_agent('list rows','[\"bt_sql_t2s\"]',2,1);")
   grep <<< "$r_t2s3" -Fq '"rows":[[1,10],[2,20]]' \
     && pass "23 sql_agent auto_execute joins multiple columns and rows with commas" \
@@ -4164,7 +4190,7 @@ gate_23_agents() {
   # last rejection reason.
   printf 'DROP TABLE x' > "$SQLTXT"
   local r_t2svf; r_t2svf=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT fractal_sql_agent('count rows','[\"bt_sql_t2s\"]',2,0);")
   grep <<< "$r_t2svf" -Fq '"execution_status":"validation_failed"' \
     && grep <<< "$r_t2svf" -Fq '"retry_count":2' \
@@ -4177,7 +4203,7 @@ gate_23_agents() {
   # agents_exec_select_json itself fail after `passed` is already set.
   printf "SELECT fractal_vector_from_text('bad!')" > "$SQLTXT"
   local r_t2sef; r_t2sef=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT fractal_sql_agent('count rows','[\"bt_sql_t2s\"]',2,1);")
   grep <<< "$r_t2sef" -Fq '"execution_status":"execution_failed"' \
     && grep <<< "$r_t2sef" -Fq '"status":"execution_failed","rows":[]' \
@@ -4423,7 +4449,7 @@ gate_23_agents() {
   # search_debug/search_agent/rag_agent's optional trailing args are
   # otherwise only ever exercised at ONE arg count each above; add the
   # max-args call (every optional arg supplied) each is missing.
-  sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" >/dev/null 2>&1
+  sqlq "SELECT fractal_config_set('reasoning_plugin','$MOCK');" >/dev/null 2>&1
   local rdbg; rdbg=$(sqlq "SELECT fractal_search_debug('0.6,0.8,0.0,0.0',10,20,3);")
   [[ "$rdbg" != *ERROR* && -n "$rdbg" ]] \
     && pass "23 agents: search_debug succeeds with all 4 args supplied (iterations/pop_size/diff_f included)" \
@@ -4539,7 +4565,7 @@ gate_24_enterprise() {
   # found") rather than at the loader ("could not load"); either way it
   # is a distinct message from the unconfigured dormant-tier one.
   if expect_err "no signature found for enterprise library" \
-      "SELECT fractalsql_set('enterprise_lib',
+      "SELECT fractal_config_set('enterprise_lib',
         '$BADPLUGIN-enterprise$PLUGSUF');" \
       "SELECT fractal_ledger_flush();"; then
     pass "24 enterprise: bogus enterprise_lib surfaces the load failure"
@@ -4557,7 +4583,7 @@ gate_24_enterprise() {
     if "$CC" -shared -fPIC -std=c99 -x c /dev/null -o "$empty_so" \
           >"$PDIRW/empty_lib_build.log" 2>&1; then
       if FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 expect_err "missing expected enterprise symbols" \
-          "SELECT fractalsql_set('enterprise_lib','$empty_so');" \
+          "SELECT fractal_config_set('enterprise_lib','$empty_so');" \
           "SELECT fractal_ledger_flush();"; then
         pass "24 enterprise: a symbol-less .so dlopens cleanly but is rejected and closed"
       else
@@ -4589,7 +4615,7 @@ gate_24_enterprise() {
             fractal_ledger_load; do
     local r
     r=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
-      "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+      "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
       "SELECT $fn();")
     if [[ $? -eq 0 ]]; then
       pass "24 enterprise: $fn succeeds while the mock is loaded"
@@ -4597,17 +4623,17 @@ gate_24_enterprise() {
       fail "24 enterprise: $fn errored while the mock is loaded: $r"
     fi
   done
-  # fractalsql_set() itself returns "ok" as a visible row, so a
+  # fractal_config_set() itself returns "ok" as a visible row, so a
   # multi-statement sqlq call's output is "ok"\n<actual result> --
   # tail -n1 the way every exact-equality check below does.
   local tc; tc=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
-    "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+    "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
     "SELECT fractal_ledger_truth_count();" | tail -n1)
   [[ "$tc" = "0" ]] \
     && pass "24 enterprise: truth_count succeeds while the mock is loaded" \
     || fail "24 enterprise: expected 0 from truth_count, got: $tc"
   local sc; sc=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
-    "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+    "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
     "SELECT fractal_ledger_shadow_count();" | tail -n1)
   [[ "$sc" = "0" ]] \
     && pass "24 enterprise: shadow_count succeeds while the mock is loaded" \
@@ -4619,7 +4645,7 @@ gate_24_enterprise() {
   local sentinel="$PDIR/fractalsql_bt_mock_ent_fail"
   rm -f "$sentinel"; touch "$sentinel"
   local rf; rf=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 FSQL_MOCK_ENT_FAIL="$sentinel" sqlq \
-    "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+    "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
     "SELECT fractal_ledger_flush();")
   local rfrc=$?
   if [[ $rfrc -ne 0 ]]; then
@@ -4633,7 +4659,7 @@ gate_24_enterprise() {
   # mock: the UDF prefers _ex when available, so this also exercises
   # that resolved-pointer branch, not just the plain symbol).
   local pm; pm=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
-    "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+    "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
     "SELECT json_extract(fractal_optimize_portfolio_multimodal(
        '0.1,0.05','0.04,0.01,0.01,0.03',1,2),'\$.n_found');" | tail -n1)
   [[ "$pm" = "1" ]] \
@@ -4643,7 +4669,7 @@ gate_24_enterprise() {
   # to 8, so n_restarts must be >= 8 unless max_front is also given --
   # pass both explicitly (2,2) to keep max_front<=n_restarts trivially.
   local pmp; pmp=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
-    "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+    "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
     "SELECT json_extract(fractal_optimize_portfolio_multimodal_pareto(
        '0.1,0.05','0.04,0.01,0.01,0.03',1,2,2),'\$.n_found');" | tail -n1)
   [[ "$pmp" = "1" ]] \
@@ -4654,13 +4680,13 @@ gate_24_enterprise() {
   # is a pure echo (its own header comment), so round-tripping a blob
   # through it is an exact equality check.
   local au; au=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
-    "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+    "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
     "SELECT fractal_audit_unpack('hello world') = 'hello world';" | tail -n1)
   [[ "$au" = "1" ]] \
     && pass "24 enterprise: audit_unpack round-trips a payload through the mock" \
     || fail "24 enterprise: expected audit_unpack to echo the payload back exactly, got: $au"
   local aun; aun=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
-    "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+    "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
     "SELECT fractal_audit_unpack(NULL);" | tail -n1)
   [[ -z "$aun" ]] \
     && pass "24 enterprise: audit_unpack(NULL) -> NULL (STRICT)" \
@@ -4677,7 +4703,7 @@ gate_24_enterprise() {
   # parsing it at all) -- 'levy' exercises the accept branch, a bogus
   # value the reject branch.
   local dm; dm=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
-    "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+    "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
     "SELECT json_extract(fractal_optimize_portfolio_multimodal(
        '0.1,0.05','0.04,0.01,0.01,0.03',1,2,0.15,0.9,NULL,0,'levy'),'\$.n_found');" | tail -n1)
   [[ "$dm" = "1" ]] \
@@ -4686,7 +4712,7 @@ gate_24_enterprise() {
   # pareto has its own separate parse_diffusion_mode call site --
   # untested until now even though multimodal's is covered above.
   local dmp; dmp=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
-    "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+    "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
     "SELECT json_extract(fractal_optimize_portfolio_multimodal_pareto(
        '0.1,0.05','0.04,0.01,0.01,0.03',1,2,2,0,0,'levy'),'\$.n_found');" | tail -n1)
   [[ "$dmp" = "1" ]] \
@@ -4695,7 +4721,7 @@ gate_24_enterprise() {
   # parse_seed's TEXT branch: seed normally arrives as INTEGER; passing
   # it as a TEXT digit string exercises the strtoull parse path.
   local sdt; sdt=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
-    "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+    "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
     "SELECT json_extract(fractal_optimize_portfolio_multimodal(
        '0.1,0.05','0.04,0.01,0.01,0.03',1,2,0.15,0.9,'42',0,'levy'),'\$.n_found');" | tail -n1)
   [[ "$sdt" = "1" ]] \
@@ -4759,7 +4785,7 @@ def connect():
     con.enable_load_extension(True)
     con.load_extension(ext)
     con.execute("PRAGMA busy_timeout=5000")
-    con.execute("SELECT fractalsql_set('enterprise_lib', ?)", (absw,))
+    con.execute("SELECT fractal_config_set('enterprise_lib', ?)", (absw,))
     return con
 
 # ---- Phase A: fill-to-cap (64 truth + 64 shadow = 128) + 10 churn
@@ -4890,7 +4916,7 @@ except sqlite3.Error as e:
 try:
     con = connect()
     con.execute("DROP TABLE IF EXISTS fractalsql_ledger")
-    con.execute("SELECT fractalsql_set('enterprise_ledger_key', 'gate25-mac-key')")
+    con.execute("SELECT fractal_config_set('enterprise_ledger_key', 'gate25-mac-key')")
     con.execute("SELECT fractal_diversify_enable()")
     con.execute("SELECT fractal_ledger_reset_hard()")
     con.execute("SELECT fractal_feedback_report(1, 'positive')")
@@ -4930,11 +4956,11 @@ try:
     # Phase D(b): a row flushed with NO key set (mac_null) is later
     # loaded with a key configured -- the "has no MAC" branch, distinct
     # from the HMAC-mismatch branch above.
-    con.execute("SELECT fractalsql_set('enterprise_ledger_key', '');")
+    con.execute("SELECT fractal_config_set('enterprise_ledger_key', '');")
     con.execute("SELECT fractal_ledger_reset_hard()")
     con.execute("SELECT fractal_feedback_report(1, 'positive')")
     con.execute("SELECT fractal_ledger_flush()")  # no key -> mac_null
-    con.execute("SELECT fractalsql_set('enterprise_ledger_key', 'gate25-mac-key')")
+    con.execute("SELECT fractal_config_set('enterprise_ledger_key', 'gate25-mac-key')")
     nomac_caught = False
     nomac_detail = ""
     try:
@@ -5011,7 +5037,7 @@ gate_26_enterprise_signature() {
   # signature=on must still surface the LOAD error, not a signature
   # error.
   local r; r=$(sqlq \
-    "SELECT fractalsql_set('enterprise_require_signature','on');" \
+    "SELECT fractal_config_set('enterprise_require_signature','on');" \
     "SELECT fractal_ledger_flush();")
   local rc=$?
   if [[ $rc -ne 0 ]] && grep <<< "$r" -q "enterprise tier not loaded" \
@@ -5039,11 +5065,11 @@ gate_27_think() {
   # 1) fractal_reason's chat tier forwards all four keys.
   rm -f "$THINKDUMP"
   sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$THINK');" \
-    "SELECT fractalsql_set('http_think','high');" \
-    "SELECT fractalsql_set('http_think_provider','openai');" \
-    "SELECT fractalsql_set('http_native_url','https://native.invalid/x');" \
-    "SELECT fractalsql_set('http_num_ctx','8192');" \
+    "SELECT fractal_config_set('reasoning_plugin','$THINK');" \
+    "SELECT fractal_config_set('http_think','high');" \
+    "SELECT fractal_config_set('http_think_provider','openai');" \
+    "SELECT fractal_config_set('http_native_url','https://native.invalid/x');" \
+    "SELECT fractal_config_set('http_num_ctx','8192');" \
     "SELECT fractal_reason('q');" >/dev/null 2>&1
   assert_dump "fractal_reason forwards the THINK block" \
     "^THINK=high$" "^THINK_PROVIDER=openai$" \
@@ -5051,11 +5077,11 @@ gate_27_think() {
   # 2) fractal_text_to_sql's GENERATE step forwards them too.
   rm -f "$THINKDUMP"
   sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$THINK');" \
-    "SELECT fractalsql_set('http_think','low');" \
-    "SELECT fractalsql_set('http_think_provider','anthropic');" \
-    "SELECT fractalsql_set('http_native_url','https://native.invalid/y');" \
-    "SELECT fractalsql_set('http_num_ctx','4096');" \
+    "SELECT fractal_config_set('reasoning_plugin','$THINK');" \
+    "SELECT fractal_config_set('http_think','low');" \
+    "SELECT fractal_config_set('http_think_provider','anthropic');" \
+    "SELECT fractal_config_set('http_native_url','https://native.invalid/y');" \
+    "SELECT fractal_config_set('http_num_ctx','4096');" \
     "SELECT fractal_text_to_sql('q');" >/dev/null 2>&1
   assert_dump "fractal_text_to_sql GENERATE forwards the THINK block" \
     "^THINK=low$" "^THINK_PROVIDER=anthropic$" \
@@ -5064,12 +5090,12 @@ gate_27_think() {
   # in its own env block; think keys are chat-effort only).
   rm -f "$THINKDUMP"
   sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$THINK');" \
-    "SELECT fractalsql_set('http_think','high');" \
-    "SELECT fractalsql_set('http_think_provider','openai');" \
-    "SELECT fractalsql_set('http_native_url','https://native.invalid/x');" \
-    "SELECT fractalsql_set('http_num_ctx','8192');" \
-    "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" \
+    "SELECT fractal_config_set('reasoning_plugin','$THINK');" \
+    "SELECT fractal_config_set('http_think','high');" \
+    "SELECT fractal_config_set('http_think_provider','openai');" \
+    "SELECT fractal_config_set('http_native_url','https://native.invalid/x');" \
+    "SELECT fractal_config_set('http_num_ctx','8192');" \
+    "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" \
     "SELECT fractal_embed('x');" >/dev/null 2>&1
   assert_dump "fractal_embed sees NO THINK keys" \
     "^THINK=(unset)$" "^THINK_PROVIDER=(unset)$"
@@ -5097,7 +5123,7 @@ gate_28_review_isolation() {
   printf 'SELECT 1' > "$SQLTXT"
   rm -f "$REVIEWDUMP"
   sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT fractal_text_to_sql('q');" >/dev/null 2>&1
   assert_dump "GENERATE still runs under T2S's forced RESPONSE_MODE=code" \
     "^RESPONSE_MODE=code$"
@@ -5107,8 +5133,8 @@ gate_28_review_isolation() {
   printf 'SELECT 1' > "$SQLTXT"
   rm -f "$REVIEWDUMP"
   sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
-    "SELECT fractalsql_set('text_to_sql_use_review','on');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('text_to_sql_use_review','on');" \
     "SELECT fractal_text_to_sql('q');" >/dev/null 2>&1
   assert_dump "REVIEW never sees T2S's forced RESPONSE_MODE=code" \
     "^RESPONSE_MODE=(unset)$"
@@ -5150,14 +5176,14 @@ gate_29_domain_agents() {
 
   # --- 1: fractal_agent_anomaly_triage (table + drift + reason) ------
   local r1; r1=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_anomaly_triage('bt_da_logs','metric','ts','host','host-1',32),'\$.threat_score');")
   grep <<< "$r1" -Eq '^-?[0-9]+(\.[0-9]+)?$' \
     && pass "29 domain_agents: anomaly_triage threat_score is a real computed drift float" \
     || fail "29 domain_agents: expected a numeric threat_score, got: $r1"
 
   local r1b; r1b=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_anomaly_triage('bt_da_logs','metric','ts','host','host-1',32),'\$.triage_summary');")
   grep <<< "$r1b" -q 'domain-agent-canary' \
     && pass "29 domain_agents: anomaly_triage composes drift -> reason (reason step ran)" \
@@ -5172,14 +5198,14 @@ gate_29_domain_agents() {
   # Partial-result mode: data half (threat_score) survives a broken reasoning
   # endpoint instead of being discarded.
   local r2pf; r2pf=$(sqlq \
-    "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
-    "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+    "SELECT fractal_config_set('agent_partial_reasoning_fail','on');" \
+    "SELECT fractal_config_set('reasoning_plugin','$bogus_plugin');" \
     "SELECT fractal_agent_anomaly_triage('bt_da_logs','metric','ts','host','host-1',32);")
   [[ "$r2pf" == *'"reasoning_step_failed"'* && "$r2pf" == *'"threat_score"'* ]] \
     && pass "29 domain_agents: anomaly_triage partial document on a broken reasoning endpoint" \
     || fail "29 domain_agents: anomaly_triage expected the partial document, got: $r2pf"
-  sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
-       "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
+  sqlq "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
+       "SELECT fractal_config_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
   if expect_err "expects 5 or 6 args" \
       "SELECT fractal_agent_anomaly_triage('bt_da_logs','metric','ts','host');"; then
     pass "29 domain_agents: anomaly_triage rejects too few args"
@@ -5254,14 +5280,14 @@ gate_29_domain_agents() {
   local series; series=$(awk 'BEGIN{srand(7); out="";
     for(i=0;i<100;i++){v=0.1*i+(rand()-0.5)*0.05; if(i>0) out=out","; out=out v} print out}')
   local r4; r4=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_regime_triage('$series',32),'\$.dfa_exponent');")
   grep <<< "$r4" -Eq '^-?[0-9]+(\.[0-9]+)?$' \
     && pass "29 domain_agents: regime_triage dfa_exponent is a real computed float" \
     || fail "29 domain_agents: expected a numeric dfa_exponent, got: $r4"
 
   local r4b; r4b=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_regime_triage('$series',32),'\$.rationale');")
   grep <<< "$r4b" -q 'domain-agent-canary' \
     && pass "29 domain_agents: regime_triage composes dfa+drift -> reason (reason step ran)" \
@@ -5301,7 +5327,7 @@ gate_29_domain_agents() {
   " >/dev/null 2>&1 \
     || { fail "29 domain_agents: bad-state fixture setup failed"; return; }
   local r5; r5=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT fractal_agent_outlier_intercept('0.95,0.05,0.0',
        'bt_da_badstates', 'state_vec', 0.5);")
   grep <<< "$r5" -q '"intercepted":true' \
@@ -5311,7 +5337,7 @@ gate_29_domain_agents() {
   # The small-magnitude state is ~0.95 away in Euclidean terms even
   # though cosine would call it near -- the exact-L2 path allows it.
   local r5b; r5b=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT fractal_agent_outlier_intercept('0.05,0.0,0.0',
        'bt_da_badstates', 'state_vec', 0.8, 'l2');")
   grep <<< "$r5b" -q '"intercepted":false' \
@@ -5320,7 +5346,7 @@ gate_29_domain_agents() {
     || fail "29 domain_agents: outlier_intercept l2: $r5b"
   # Any other metric value (including 'euclid' and NULL) is a hard error.
   if expect_err "metric must be 'cosine' or 'l2'" \
-      "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+      "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
       "SELECT fractal_agent_outlier_intercept('1.0,0.0,0.0',
         'bt_da_badstates','state_vec', 0.5, 'euclid');"; then
     pass "29 domain_agents: outlier_intercept unknown metric rejected"
@@ -5356,15 +5382,15 @@ gate_29_domain_agents() {
   # Partial-result mode: data half (intercepted/nearest_distance) survives a
   # broken reasoning endpoint instead of being discarded.
   local r5pf; r5pf=$(sqlq \
-    "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
-    "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+    "SELECT fractal_config_set('agent_partial_reasoning_fail','on');" \
+    "SELECT fractal_config_set('reasoning_plugin','$bogus_plugin');" \
     "SELECT fractal_agent_outlier_intercept('0.95,0.05,0.0',
        'bt_da_badstates', 'state_vec', 0.5);")
   [[ "$r5pf" == *'"reasoning_step_failed"'* && "$r5pf" == *'"intercepted"'* ]] \
     && pass "29 domain_agents: outlier_intercept partial document on a broken reasoning endpoint" \
     || fail "29 domain_agents: outlier_intercept expected the partial document, got: $r5pf"
-  sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
-       "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
+  sqlq "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
+       "SELECT fractal_config_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
 
   # --- 5: fractal_agent_recommend_diverse (real catalog id + score) ----
   sqlq "
@@ -5415,7 +5441,7 @@ gate_29_domain_agents() {
     INSERT INTO bt_da_data VALUES (1,10.5),(2,20.5);
   " >/dev/null 2>&1 || { fail "29 domain_agents: data_analyst fixture setup failed"; return; }
   local r7; r7=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_data_analyst(
        'sum of val','[\"bt_da_data\"]',2),'\$.generated_sql');")
   grep <<< "$r7" -q 'domain-agent-canary' \
@@ -5426,28 +5452,28 @@ gate_29_domain_agents() {
   # (run). The canary file is restored right after.
   printf 'SELECT id, val FROM bt_da_data' > "$SQLTXT"
   local r7b; r7b=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_data_analyst(
        'sum of val','[\"bt_da_data\"]',2),'\$.result_json') IS NULL;" | tail -n 1)
   [[ "$r7b" = "1" ]] \
     && pass "29 domain_agents: data_analyst does not run the generated SQL unless asked (result_json is null)" \
     || fail "29 domain_agents: expected a null result_json on the default call, got: $r7b"
   local r7c; r7c=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_data_analyst(
        'sum of val','[\"bt_da_data\"]',2),'\$.analysis') IS NULL;" | tail -n 1)
   [[ "$r7c" = "1" ]] \
     && pass "29 domain_agents: data_analyst does no reasoning unless asked (analysis is null)" \
     || fail "29 domain_agents: expected a null analysis on the default call, got: $r7c"
   local r7d; r7d=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_data_analyst(
        'sum of val','[\"bt_da_data\"]',2,'{}',1),'\$.result_json');")
   grep <<< "$r7d" -q 'executed' \
     && pass "29 domain_agents: data_analyst with auto_execute=1 runs the generated SQL" \
     || fail "29 domain_agents: expected an executed result on the explicit opt-in, got: $r7d"
   local r7e; r7e=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_data_analyst(
        'sum of val','[\"bt_da_data\"]',2,'{}',1),'\$.analysis') IS NULL;" | tail -n 1)
   [[ "$r7e" = "0" ]] \
@@ -5482,7 +5508,7 @@ gate_29_domain_agents() {
       (3,'0.2,0.2,0.2,0.2'),(4,'0.85,-0.75,0.65,0.55');
   " >/dev/null 2>&1 || { fail "29 domain_agents: patient fixture setup failed"; return; }
   local r8; r8=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_patient_deterioration_triage(
        'bt_da_patients','vitals','0.9,-0.8,0.7,0.6',
        '0.1,0.1,0.1,0.1','0.95,-0.85,0.75,0.65',NULL,5,'id'),'\$.nearest_cohort_id');")
@@ -5490,7 +5516,7 @@ gate_29_domain_agents() {
     && pass "29 domain_agents: patient_deterioration_triage returns the real nearest cohort id" \
     || fail "29 domain_agents: expected a numeric nearest_cohort_id, got: $r8"
   local r8b; r8b=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_patient_deterioration_triage(
        'bt_da_patients','vitals','0.9,-0.8,0.7,0.6',
        '0.1,0.1,0.1,0.1','0.95,-0.85,0.75,0.65',NULL,5,'id'),'\$.rationale');")
@@ -5501,16 +5527,16 @@ gate_29_domain_agents() {
   # Partial-result mode: data half (nearest_cohort_id/cohort_distance) survives a
   # broken reasoning endpoint instead of being discarded.
   local r8pf; r8pf=$(sqlq \
-    "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
-    "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+    "SELECT fractal_config_set('agent_partial_reasoning_fail','on');" \
+    "SELECT fractal_config_set('reasoning_plugin','$bogus_plugin');" \
     "SELECT fractal_agent_patient_deterioration_triage(
        'bt_da_patients','vitals','0.9,-0.8,0.7,0.6',
        '0.1,0.1,0.1,0.1','0.95,-0.85,0.75,0.65',NULL,5,'id');")
   [[ "$r8pf" == *'"reasoning_step_failed"'* && "$r8pf" == *'"nearest_cohort_id"'* ]] \
     && pass "29 domain_agents: patient_deterioration_triage partial document on a broken reasoning endpoint" \
     || fail "29 domain_agents: patient_deterioration_triage expected the partial document, got: $r8pf"
-  sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
-       "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
+  sqlq "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
+       "SELECT fractal_config_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
 
   if expect_err "expects 5 to 8 args" \
       "SELECT fractal_agent_patient_deterioration_triage('bt_da_patients','vitals');"; then
@@ -5600,14 +5626,14 @@ gate_29_domain_agents() {
       (1,'0.9,0.1,0.0,0.0,0.0'),(2,'0.0,0.0,0.9,0.1,0.0'),(3,'0.1,0.0,0.0,0.0,0.9');
   " >/dev/null 2>&1 || { fail "29 domain_agents: node fixture setup failed"; return; }
   local r10; r10=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_schedule_workload(
        '0.8,0.1,0.0,0.0,0.1','bt_da_nodes','capability','id',30,50,5),'\$.assigned_node');")
   grep <<< "$r10" -Eq '^[0-9]+$' \
     && pass "29 domain_agents: schedule_workload returns the real nearest node" \
     || fail "29 domain_agents: expected a numeric assigned_node, got: $r10"
   local r10b; r10b=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_schedule_workload(
        '0.8,0.1,0.0,0.0,0.1','bt_da_nodes','capability','id',30,50,5),'\$.rationale');")
   grep <<< "$r10b" -q 'domain-agent-canary' \
@@ -5617,15 +5643,15 @@ gate_29_domain_agents() {
   # Partial-result mode: data half (assigned_node/confidence) survives a broken
   # reasoning endpoint instead of being discarded.
   local r10pf; r10pf=$(sqlq \
-    "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
-    "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+    "SELECT fractal_config_set('agent_partial_reasoning_fail','on');" \
+    "SELECT fractal_config_set('reasoning_plugin','$bogus_plugin');" \
     "SELECT fractal_agent_schedule_workload(
        '0.8,0.1,0.0,0.0,0.1','bt_da_nodes','capability','id',30,50,5);")
   [[ "$r10pf" == *'"reasoning_step_failed"'* && "$r10pf" == *'"assigned_node"'* ]] \
     && pass "29 domain_agents: schedule_workload partial document on a broken reasoning endpoint" \
     || fail "29 domain_agents: schedule_workload expected the partial document, got: $r10pf"
-  sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
-       "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
+  sqlq "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
+       "SELECT fractal_config_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
 
   sqlq "DELETE FROM bt_da_nodes;" >/dev/null 2>&1
   if expect_err "no node rows in bt_da_nodes" \
@@ -5669,7 +5695,7 @@ gate_29_domain_agents() {
     INSERT INTO bt29z_nodes VALUES (1,NULL,'0.9,0.1,0.0,0.0,0.0');
   " >/dev/null 2>&1
   local r10n; r10n=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT fractal_agent_schedule_workload(
        '0.8,0.1,0.0,0.0,0.1','bt29z_nodes','capability','label',30,50,5);")
   grep <<< "$r10n" -Fq '"assigned_node":null' \
@@ -5685,7 +5711,7 @@ gate_29_domain_agents() {
       (1,'0.25,0.25,0.25,0.25'),(2,'0.4,0.3,0.2,0.1'),(3,'0.1,0.2,0.3,0.4');
   " >/dev/null 2>&1 || { fail "29 domain_agents: alloc fixture setup failed"; return; }
   local r11; r11=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_rebalance_sibling(
        '0.05,0.10,0.15,0.20',
        '0.04,0.0,0.0,0.0,0.0,0.09,0.0,0.0,0.0,0.0,0.16,0.0,0.0,0.0,0.0,0.25',
@@ -5694,7 +5720,7 @@ gate_29_domain_agents() {
     && pass "29 domain_agents: rebalance_sibling sharpe is the real optimizer output" \
     || fail "29 domain_agents: expected a numeric sharpe, got: $r11"
   local r11b; r11b=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_rebalance_sibling(
        '0.05,0.10,0.15,0.20',
        '0.04,0.0,0.0,0.0,0.0,0.09,0.0,0.0,0.0,0.0,0.16,0.0,0.0,0.0,0.0,0.25',
@@ -5706,8 +5732,8 @@ gate_29_domain_agents() {
   # Partial-result mode: data half (sharpe/weights/nearest_alloc_id) survives a
   # broken reasoning endpoint instead of being discarded.
   local r11pf; r11pf=$(sqlq \
-    "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
-    "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+    "SELECT fractal_config_set('agent_partial_reasoning_fail','on');" \
+    "SELECT fractal_config_set('reasoning_plugin','$bogus_plugin');" \
     "SELECT fractal_agent_rebalance_sibling(
        '0.05,0.10,0.15,0.20',
        '0.04,0.0,0.0,0.0,0.0,0.09,0.0,0.0,0.0,0.0,0.16,0.0,0.0,0.0,0.0,0.25',
@@ -5715,8 +5741,8 @@ gate_29_domain_agents() {
   [[ "$r11pf" == *'"reasoning_step_failed"'* && "$r11pf" == *'"sharpe"'* ]] \
     && pass "29 domain_agents: rebalance_sibling partial document on a broken reasoning endpoint" \
     || fail "29 domain_agents: rebalance_sibling expected the partial document, got: $r11pf"
-  sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
-       "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
+  sqlq "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
+       "SELECT fractal_config_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
 
   sqlq "DELETE FROM bt_da_alloc;" >/dev/null 2>&1
   if expect_err "no allocation rows in bt_da_alloc" \
@@ -5768,7 +5794,7 @@ gate_29_domain_agents() {
       (1,'0.1,0.1,0.1,0.1','0.8,0.7,0.6,0.5'),(2,'0.2,0.2,0.2,0.2','0.25,0.25,0.25,0.25');
   " >/dev/null 2>&1 || { fail "29 domain_agents: vehicle fixture setup failed"; return; }
   local r12; r12=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_detour_classify(
        'bt_da_vehicles','current','0.1,0.1,0.1,0.1','0.8,0.7,0.6,0.5',
        '$trace',5,'id',2),'\$.trace_complexity');")
@@ -5776,7 +5802,7 @@ gate_29_domain_agents() {
     && pass "29 domain_agents: detour_classify trace_complexity is the real box-counting dimension" \
     || fail "29 domain_agents: expected a numeric trace_complexity, got: $r12"
   local r12b; r12b=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_detour_classify(
        'bt_da_vehicles','current','0.1,0.1,0.1,0.1','0.8,0.7,0.6,0.5',
        '$trace',5,'id',2),'\$.rationale');")
@@ -5788,16 +5814,16 @@ gate_29_domain_agents() {
   # trace_complexity) survives a broken reasoning endpoint instead of
   # being discarded.
   local r12pf; r12pf=$(sqlq \
-    "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
-    "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+    "SELECT fractal_config_set('agent_partial_reasoning_fail','on');" \
+    "SELECT fractal_config_set('reasoning_plugin','$bogus_plugin');" \
     "SELECT fractal_agent_detour_classify(
        'bt_da_vehicles','current','0.1,0.1,0.1,0.1','0.8,0.7,0.6,0.5',
        '$trace',5,'id',2);")
   [[ "$r12pf" == *'"reasoning_step_failed"'* && "$r12pf" == *'"nearest_fleet_id"'* ]] \
     && pass "29 domain_agents: detour_classify partial document on a broken reasoning endpoint" \
     || fail "29 domain_agents: detour_classify expected the partial document, got: $r12pf"
-  sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
-       "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
+  sqlq "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
+       "SELECT fractal_config_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
 
   sqlq "DELETE FROM bt_da_vehicles;" >/dev/null 2>&1
   if expect_err "no vehicle rows in bt_da_vehicles" \
@@ -5844,7 +5870,7 @@ gate_29_domain_agents() {
       (1,'0.1,0.1,0.1,0.1','0.7,-0.4,-0.8,0.9'),(2,'0.2,0.2,0.2,0.2','0.24,0.24,0.24,0.24');
   " >/dev/null 2>&1 || { fail "29 domain_agents: track fixture setup failed"; return; }
   local r13; r13=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_track_anomaly(
        'bt_da_tracks','current','0.1,0.1,0.1,0.1','0.7,-0.4,-0.8,0.9',
        '$heading',5,'id'),'\$.dfa_exponent');")
@@ -5852,7 +5878,7 @@ gate_29_domain_agents() {
     && pass "29 domain_agents: track_anomaly dfa_exponent is the real DFA exponent" \
     || fail "29 domain_agents: expected a numeric dfa_exponent, got: $r13"
   local r13b; r13b=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_track_anomaly(
        'bt_da_tracks','current','0.1,0.1,0.1,0.1','0.7,-0.4,-0.8,0.9',
        '$heading',5,'id'),'\$.rationale');")
@@ -5864,16 +5890,16 @@ gate_29_domain_agents() {
   # dfa_exponent) survives a broken reasoning endpoint instead of
   # being discarded.
   local r13pf; r13pf=$(sqlq \
-    "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
-    "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+    "SELECT fractal_config_set('agent_partial_reasoning_fail','on');" \
+    "SELECT fractal_config_set('reasoning_plugin','$bogus_plugin');" \
     "SELECT fractal_agent_track_anomaly(
        'bt_da_tracks','current','0.1,0.1,0.1,0.1','0.7,-0.4,-0.8,0.9',
        '$heading',5,'id');")
   [[ "$r13pf" == *'"reasoning_step_failed"'* && "$r13pf" == *'"nearest_fleet_id"'* ]] \
     && pass "29 domain_agents: track_anomaly partial document on a broken reasoning endpoint" \
     || fail "29 domain_agents: track_anomaly expected the partial document, got: $r13pf"
-  sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
-       "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
+  sqlq "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
+       "SELECT fractal_config_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
 
   sqlq "DELETE FROM bt_da_tracks;" >/dev/null 2>&1
   if expect_err "no track rows in bt_da_tracks" \
@@ -5922,14 +5948,14 @@ gate_29_domain_agents() {
                         else {v=4.0+3.0*sin(t*1.4)+(rand()-0.5)*0.4}
       if(t>1) out=out","; out=out v } print out}')
   local r14; r14=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_network_coverage_alert(
        '$cloud','$drift',2,48,0.5),'\$.morph_dimension');")
   grep <<< "$r14" -Eq '^[0-9]+(\.[0-9]+)?$' \
     && pass "29 domain_agents: network_coverage_alert morph_dimension is the real morphological complexity" \
     || fail "29 domain_agents: expected a numeric morph_dimension, got: $r14"
   local r14b; r14b=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_network_coverage_alert(
        '$cloud','$drift',2,48,0.5),'\$.rationale');")
   grep <<< "$r14b" -q 'domain-agent-canary' \
@@ -5959,7 +5985,7 @@ gate_29_domain_agents() {
   local flat_drift; flat_drift=$(awk 'BEGIN{srand(3); out="";
     for(t=1;t<=96;t++){v=4.0+0.1*sin(t*0.1); if(t>1) out=out","; out=out v} print out}')
   local r14f; r14f=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT fractal_agent_network_coverage_alert('$cloud','$flat_drift',2,48,0.5);")
   grep <<< "$r14f" -Fq '"drift_detected":false' \
     && pass "29 domain_agents: network_coverage_alert drift_detected:false on a flat series" \
@@ -5980,25 +6006,25 @@ gate_29_domain_agents() {
   # Partial-result mode: data half (morph_dimension/lacunarity) survives a broken
   # reasoning endpoint instead of being discarded.
   local r14pf; r14pf=$(sqlq \
-    "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
-    "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+    "SELECT fractal_config_set('agent_partial_reasoning_fail','on');" \
+    "SELECT fractal_config_set('reasoning_plugin','$bogus_plugin');" \
     "SELECT fractal_agent_network_coverage_alert('$cloud','$drift',2,48,0.5);")
   [[ "$r14pf" == *'"reasoning_step_failed"'* && "$r14pf" == *'"morph_dimension"'* ]] \
     && pass "29 domain_agents: network_coverage_alert partial document on a broken reasoning endpoint" \
     || fail "29 domain_agents: network_coverage_alert expected the partial document, got: $r14pf"
-  sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
-       "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
+  sqlq "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
+       "SELECT fractal_config_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
 
   # --- 14: fractal_agent_allocate (optimize_portfolio -> reason) +
   # cov-length rejection ------------------------------------------------
   local r15; r15=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT fractal_agent_allocate('0.05,0.1','1.0,0.0,0.0,1.0',1,'{}');")
   grep <<< "$r15" -q '"sharpe"' \
     && pass "29 domain_agents: allocate composes optimize_portfolio -> reason (real optimizer jsonb with sharpe)" \
     || fail "29 domain_agents: expected a sharpe-bearing allocation jsonb, got: $r15"
   local r15b; r15b=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_allocate(
        '0.05,0.1','1.0,0.0,0.0,1.0',1,'{}'),'\$.rationale');")
   grep <<< "$r15b" -q 'domain-agent-canary' \
@@ -6038,14 +6064,14 @@ gate_29_domain_agents() {
   # Partial-result mode: data half (sharpe/allocation) survives a broken
   # reasoning endpoint instead of being discarded.
   local r15pf; r15pf=$(sqlq \
-    "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
-    "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+    "SELECT fractal_config_set('agent_partial_reasoning_fail','on');" \
+    "SELECT fractal_config_set('reasoning_plugin','$bogus_plugin');" \
     "SELECT fractal_agent_allocate('0.05,0.1','1.0,0.0,0.0,1.0',1,'{}');")
   [[ "$r15pf" == *'"reasoning_step_failed"'* && "$r15pf" == *'"sharpe"'* ]] \
     && pass "29 domain_agents: allocate partial document on a broken reasoning endpoint" \
     || fail "29 domain_agents: allocate expected the partial document, got: $r15pf"
-  sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
-       "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
+  sqlq "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
+       "SELECT fractal_config_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
 
   # --- 15: fractal_agent_route_task (telemetry -> reason) + empty-
   # capability-table guard ----------------------------------------------
@@ -6054,14 +6080,14 @@ gate_29_domain_agents() {
     INSERT INTO bt_da_caps VALUES ('cap-a','0.1,0.2,0.3'),('cap-b','0.9,0.8,0.7');
   " >/dev/null 2>&1 || { fail "29 domain_agents: capability fixture setup failed"; return; }
   local r16; r16=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_route_task(
        '0.1,0.2,0.3','bt_da_caps','emb','capability_name',1000),'\$.routed_to');" | tail -n1)
   [[ "$r16" = "cap-a" ]] \
     && pass "29 domain_agents: route_task returns the real nearest capability name" \
     || fail "29 domain_agents: expected routed_to=cap-a, got: $r16"
   local r16b; r16b=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT json_extract(fractal_agent_route_task(
        '0.1,0.2,0.3','bt_da_caps','emb','capability_name',1000),'\$.rationale');")
   grep <<< "$r16b" -q 'domain-agent-canary' \
@@ -6071,15 +6097,15 @@ gate_29_domain_agents() {
   # Partial-result mode: data half (routed_to/confidence) survives a broken
   # reasoning endpoint instead of being discarded.
   local r16pf; r16pf=$(sqlq \
-    "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
-    "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+    "SELECT fractal_config_set('agent_partial_reasoning_fail','on');" \
+    "SELECT fractal_config_set('reasoning_plugin','$bogus_plugin');" \
     "SELECT fractal_agent_route_task(
        '0.1,0.2,0.3','bt_da_caps','emb','capability_name',1000);")
   [[ "$r16pf" == *'"reasoning_step_failed"'* && "$r16pf" == *'"routed_to"'* ]] \
     && pass "29 domain_agents: route_task partial document on a broken reasoning endpoint" \
     || fail "29 domain_agents: route_task expected the partial document, got: $r16pf"
-  sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
-       "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
+  sqlq "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
+       "SELECT fractal_config_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
 
   sqlq "DELETE FROM bt_da_caps;" >/dev/null 2>&1
   if expect_err "no capability rows in bt_da_caps" \
@@ -6137,8 +6163,8 @@ gate_29_domain_agents() {
   fi
   if [[ -n "$(wpath "$MOCKENT")" && -f "$(wpath "$MOCKENT")" ]]; then
     local r17; r17=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
-      "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
-      "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+      "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
+      "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
       "SELECT json_extract(fractal_agent_diverse_portfolios(
          '0.05,0.1','1.0,0.0,0.0,1.0',1),'\$[0].candidate_id');" | tail -n1)
     grep <<< "$r17" -Eq '^[0-9]+$' \
@@ -6164,9 +6190,9 @@ gate_29_domain_agents() {
     # Partial-result mode: data half (candidates/n_found) survives a broken
     # reasoning endpoint instead of being discarded.
     local r17pf; r17pf=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
-      "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
-      "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
-      "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+      "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
+      "SELECT fractal_config_set('agent_partial_reasoning_fail','on');" \
+      "SELECT fractal_config_set('reasoning_plugin','$bogus_plugin');" \
       "SELECT fractal_agent_diverse_portfolios('0.05,0.1','1.0,0.0,0.0,1.0',1);")
     [[ "$r17pf" == *'"reasoning_step_failed"'* && "$r17pf" == *'"candidates"'* ]] \
       && pass "29 domain_agents: diverse_portfolios partial document on a broken reasoning endpoint" \
@@ -6181,7 +6207,7 @@ gate_29_domain_agents() {
     rm -f "$zf_sentinel"; touch "$zf_sentinel"
     if FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 FSQL_MOCK_ENT_ZERO_FOUND="$zf_sentinel" \
         expect_err "no candidates found" \
-        "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+        "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
         "SELECT fractal_agent_diverse_portfolios('0.05,0.1','1.0,0.0,0.0,1.0',1);"; then
       pass "29 domain_agents: diverse_portfolios raises a clean ERROR when n_found<=0"
     else
@@ -6203,16 +6229,16 @@ gate_29_domain_agents() {
   # step, so its failure is the whole result and keeps raising either
   # way. (bogus_plugin is hoisted to this gate's top, reused above too.)
   if expect_err "failed to load reasoning plugin" \
-      "SELECT fractalsql_set('agent_partial_reasoning_fail','off');" \
-      "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+      "SELECT fractal_config_set('agent_partial_reasoning_fail','off');" \
+      "SELECT fractal_config_set('reasoning_plugin','$bogus_plugin');" \
       "SELECT fractal_agent_regime_triage('$series',32);"; then
     pass "29 domain_agents: flag off (default) keeps the reasoning-endpoint raise"
   else
     fail "29 domain_agents: expected the default raise with agent_partial_reasoning_fail off"
   fi
   local r18; r18=$(sqlq \
-    "SELECT fractalsql_set('agent_partial_reasoning_fail','on');" \
-    "SELECT fractalsql_set('reasoning_plugin','$bogus_plugin');" \
+    "SELECT fractal_config_set('agent_partial_reasoning_fail','on');" \
+    "SELECT fractal_config_set('reasoning_plugin','$bogus_plugin');" \
     "SELECT fractal_agent_regime_triage('$series',32);")
   grep <<< "$r18" -q '"reasoning_step_failed"' \
     && pass "29 domain_agents: flag on returns the data half plus reasoning_step_failed" \
@@ -6222,7 +6248,7 @@ gate_29_domain_agents() {
     || fail "29 domain_agents: partial document lost the data half, got: $r18"
 
   # Restore the live mock for any later cases in this gate.
-  sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" >/dev/null 2>&1
+  sqlq "SELECT fractal_config_set('reasoning_plugin','$MOCK');" >/dev/null 2>&1
 
   # --- 18: argument-count extremes not exercised above --------------
   # Every "Engine" primitive above has its own optional trailing args
@@ -6269,7 +6295,7 @@ gate_29_domain_agents() {
 
   argc_ok() {  # argc_ok <label> <sql...>
     local label="$1"; shift
-    local r; r=$(sqlq "SELECT fractalsql_set('reasoning_plugin','$MOCK');" "$@")
+    local r; r=$(sqlq "SELECT fractal_config_set('reasoning_plugin','$MOCK');" "$@")
     [[ "$r" != *ERROR* && -n "$r" ]] \
       && pass "29 domain_agents: $label" \
       || fail "29 domain_agents: $label -- got: $r"
@@ -6322,16 +6348,16 @@ gate_29_domain_agents() {
 
   if [[ -n "$(wpath "$MOCKENT")" && -f "$(wpath "$MOCKENT")" ]]; then
     local r19; r19=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
-      "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
-      "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+      "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
+      "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
       "SELECT fractal_agent_diverse_portfolios(
          '0.05,0.1','1.0,0.0,0.0,1.0',1,8,0.15,0.9,42,'{\"hint\":1}','sharpe');")
     [[ "$r19" != *ERROR* && -n "$r19" ]] \
       && pass "29 domain_agents: diverse_portfolios succeeds with all 9 args supplied (sharpe mode)" \
       || fail "29 domain_agents: diverse_portfolios 9-arg sharpe call, got: $r19"
     local r19b; r19b=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
-      "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
-      "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+      "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
+      "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
       "SELECT fractal_agent_diverse_portfolios(
          '0.05,0.1','1.0,0.0,0.0,1.0',1,4,0.15,0.9,NULL,'{}','pareto');")
     [[ "$r19b" != *ERROR* && -n "$r19b" ]] \
@@ -6382,8 +6408,8 @@ gate_29_domain_agents() {
 
   if [[ -n "$(wpath "$MOCKENT")" && -f "$(wpath "$MOCKENT")" ]]; then
     local r20; r20=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
-      "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
-      "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+      "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
+      "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
       "SELECT fractal_agent_diverse_portfolios(
          '0.05,0.1','1.0,0.0,0.0,1.0',1,NULL,NULL,NULL,NULL,NULL,NULL);")
     [[ "$r20" != *ERROR* && -n "$r20" ]] \
@@ -6410,7 +6436,7 @@ gate_29_domain_agents() {
   # text "null" -- check the raw document instead of round-tripping
   # through json_extract's own NULL-vs-"null" ambiguity.
   local rrid; rrid=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT fractal_agent_track_anomaly(
        'bt29z_tracks','current','0.1,0.1,0.1,0.1','0.7,-0.4,-0.8,0.9',
        '$heading',5,'label');" | tail -n1)
@@ -6432,7 +6458,7 @@ gate_29_domain_agents() {
   " >/dev/null 2>&1 || fail "29 domain_agents: resolved_id-NULL fixtures (2) setup failed"
 
   local rras; rras=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT fractal_agent_rebalance_sibling(
        '0.05,0.10,0.15,0.20',
        '0.04,0.0,0.0,0.0,0.0,0.09,0.0,0.0,0.0,0.0,0.16,0.0,0.0,0.0,0.0,0.25',
@@ -6442,7 +6468,7 @@ gate_29_domain_agents() {
     || fail "29 domain_agents: expected nearest_alloc_id:null, got: $rras"
 
   local rdc; rdc=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT fractal_agent_detour_classify(
        'bt29z_vehicles','current','0.1,0.1,0.1,0.1','0.8,0.7,0.6,0.5',
        '$trace',5,'label');" | tail -n1)
@@ -6451,7 +6477,7 @@ gate_29_domain_agents() {
     || fail "29 domain_agents: expected nearest_fleet_id:null, got: $rdc"
 
   local rrt; rrt=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT fractal_agent_route_task('0.1,0.2,0.3','bt29z_caps','emb','label',1000);" | tail -n1)
   grep <<< "$rrt" -Fq '"routed_to":null' \
     && pass "29 domain_agents: route_task reports routed_to:null when the id column is itself NULL" \
@@ -6797,8 +6823,8 @@ gate_31_ledger_chain() {
   if [[ -n "$(wpath "$MOCKENT")" && -f "$(wpath "$MOCKENT")" ]]; then
     sqlq "DELETE FROM fractalsql_ledger WHERE kind = 2;" >/dev/null 2>&1
     local rw; rw=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
-      "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
-      "SELECT fractalsql_set('enterprise_ledger_key','gate31-hmac-test-key');" \
+      "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
+      "SELECT fractal_config_set('enterprise_ledger_key','gate31-hmac-test-key');" \
       "SELECT fractal_audit_log('test.small','{\"n\":1}');" \
       "SELECT fractal_ledger_verify(2);" | tail -n1)
     grep <<< "$rw" -q '"ok":true' \
@@ -6811,7 +6837,7 @@ gate_31_ledger_chain() {
     # otherwise dead since every entry_type elsewhere in this suite is
     # a plain identifier-shaped string.
     local rwe; rwe=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
-      "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+      "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
       "SELECT fractal_audit_log('has\"quote\\backslash','{\"n\":2}');" \
       "SELECT fractal_audit_unpack(payload) FROM fractalsql_ledger
          WHERE kind=2 ORDER BY rowid DESC LIMIT 1;" | tail -n1)
@@ -6828,7 +6854,7 @@ gate_31_ledger_chain() {
     # keeps the whole question.
     local qtext='how many rows mention the word zephyr in the customer notes column ENDTOKEN'
     local red; red=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 FSQL_AUDIT_REDACT=hash sqlq \
-      "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+      "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
       "SELECT fractal_audit_log('test.redact','{\"question\":\"$qtext\",\"n\":1}');" \
       "SELECT fractal_audit_unpack(payload) FROM fractalsql_ledger
          WHERE kind=2 ORDER BY rowid DESC LIMIT 1;" | tail -n1)
@@ -6849,7 +6875,7 @@ gate_31_ledger_chain() {
       || fail "31 ledger_chain: redaction damaged the non-text fields, got: $red"
 
     local trc; trc=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 FSQL_AUDIT_REDACT=truncate sqlq \
-      "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+      "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
       "SELECT fractal_audit_log('test.truncate','{\"question\":\"$qtext\",\"n\":1}');" \
       "SELECT fractal_audit_unpack(payload) FROM fractalsql_ledger
          WHERE kind=2 ORDER BY rowid DESC LIMIT 1;" | tail -n1)
@@ -6868,7 +6894,7 @@ gate_31_ledger_chain() {
     # published outside the database, so a chain whose tail was deleted
     # no longer matches what was published.
     local anc; anc=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 FSQL_LEDGER_ANCHOR_LOG=stderr sqlq \
-      "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+      "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
       "SELECT fractal_audit_log('test.anchor','{\"n\":3}');")
     local anchor_line; anchor_line=$(grep -o '{"event":"ledger_head"[^}]*}' <<< "$anc" | tail -n1)
     if [[ -n "$anchor_line" ]]; then
@@ -6889,7 +6915,7 @@ gate_31_ledger_chain() {
     fi
     # Without the anchor log switched on, nothing is published.
     local noanc; noanc=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
-      "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
+      "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
       "SELECT fractal_audit_log('test.anchor.off','{\"n\":4}');")
     if grep -q 'ledger_head' <<< "$noanc"; then
       fail "31 ledger_chain: the anchor log published a line while it was switched off"
@@ -6947,8 +6973,8 @@ gate_32_enterprise_signature_real() {
   # require=off -- soft: still loads and works.
   local ra rca
   ra=$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
-    "SELECT fractalsql_set('enterprise_lib', '$absw');" \
-    "SELECT fractalsql_set('enterprise_require_signature','off');" \
+    "SELECT fractal_config_set('enterprise_lib', '$absw');" \
+    "SELECT fractal_config_set('enterprise_require_signature','off');" \
     "SELECT fractal_ledger_reset_hard();")
   rca=$?
   if [[ $rca -eq 0 ]] && ! grep <<< "$ra" -q "enterprise tier not loaded"; then
@@ -6961,8 +6987,8 @@ gate_32_enterprise_signature_real() {
   # require=off (verification is mandatory without the opt-out).
   local rb rcb
   rb=$(sqlq \
-    "SELECT fractalsql_set('enterprise_lib', '$absw');" \
-    "SELECT fractalsql_set('enterprise_require_signature','off');" \
+    "SELECT fractal_config_set('enterprise_lib', '$absw');" \
+    "SELECT fractal_config_set('enterprise_require_signature','off');" \
     "SELECT fractal_ledger_reset_hard();")
   rcb=$?
   if [[ $rcb -ne 0 ]] && grep <<< "$rb" -q "no signature found" \
@@ -6978,8 +7004,8 @@ gate_32_enterprise_signature_real() {
   head -c 64 /dev/urandom > "$sig_path"
   local rc rcc
   rc=$(sqlq \
-    "SELECT fractalsql_set('enterprise_lib', '$absw');" \
-    "SELECT fractalsql_set('enterprise_require_signature','off');" \
+    "SELECT fractal_config_set('enterprise_lib', '$absw');" \
+    "SELECT fractal_config_set('enterprise_require_signature','off');" \
     "SELECT fractal_ledger_reset_hard();")
   rcc=$?
   if [[ $rcc -ne 0 ]] && grep <<< "$rc" -q "failed signature verification"; then
@@ -6993,8 +7019,8 @@ gate_32_enterprise_signature_real() {
   head -c 32 /dev/urandom > "$sig_path"
   local rd rcd
   rd=$(sqlq \
-    "SELECT fractalsql_set('enterprise_lib', '$absw');" \
-    "SELECT fractalsql_set('enterprise_require_signature','off');" \
+    "SELECT fractal_config_set('enterprise_lib', '$absw');" \
+    "SELECT fractal_config_set('enterprise_require_signature','off');" \
     "SELECT fractal_ledger_reset_hard();")
   rcd=$?
   if [[ $rcd -ne 0 ]] && grep <<< "$rd" -q "failed signature verification"; then
@@ -7182,7 +7208,7 @@ gate_34_oom_inject() {
 
   local lev2; lev2=$(LD_PRELOAD="$shim" FSQL_OOM_FAIL_SIZE=512 \
     FSQL_OOM_TARGET_SO=fractalsql.so sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT fractal_text_to_sql('q');")
   grep <<< "$lev2" -qi "out of memory" \
     && pass "34 oom_inject: fsql_t2s.c's StrBuf 512-byte sb_init() failure cascades to a clean out-of-memory error (fractal_text_to_sql's schema-context build)" \
@@ -7250,16 +7276,16 @@ gate_34_oom_inject() {
   # unconditional regardless of input (a response-parsing buffer sized
   # at the dimension ceiling, not the actual response).
   local base9; base9=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCKEMB');" \
-    "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCKEMB');" \
+    "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" \
     "SELECT fractal_vector_dims(fractal_embed('x'));")
   [[ "$(tail -n1 <<< "$base9")" == "3" ]] \
     && pass "34 oom_inject: fractal_embed('x') succeeds with no fault injected (baseline)" \
     || fail "34 oom_inject: baseline fractal_embed failed: $base9"
   local oom9; oom9=$(LD_PRELOAD="$shim" FSQL_OOM_FAIL_SIZE=131072 \
     FSQL_OOM_TARGET_SO=fractalsql.so sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCKEMB');" \
-    "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCKEMB');" \
+    "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" \
     "SELECT fractal_embed('x');")
   grep <<< "$oom9" -qi "out of memory" \
     && pass "34 oom_inject: fractal_embed's embedding-response scratch-buffer malloc failure surfaces as a clean out-of-memory error" \
@@ -7272,14 +7298,14 @@ gate_34_oom_inject() {
   # +1 for the copy's NUL = 13.
   printf 'X' > "$SQLTXT"
   local base10; base10=$(sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT length(fractal_reason('q'));" | tail -n1)
   [[ "$base10" =~ ^[0-9]+$ ]] \
     && pass "34 oom_inject: fractal_reason('q') succeeds with no fault injected (baseline)" \
     || fail "34 oom_inject: baseline fractal_reason failed: $base10"
   local oom10; oom10=$(LD_PRELOAD="$shim" FSQL_OOM_FAIL_SIZE=13 \
     FSQL_OOM_TARGET_SO=fractalsql.so sqlq \
-    "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+    "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
     "SELECT fractal_reason('q');")
   grep <<< "$oom10" -qi "out of memory" \
     && pass "34 oom_inject: fractal_reason's response-copy malloc failure surfaces as a clean out-of-memory error" \
@@ -7300,7 +7326,7 @@ gate_34_oom_inject() {
     local label="$1"; shift
     local r; r=$(LD_PRELOAD="$shim" FSQL_OOM_FAIL_SIZE=256 \
       FSQL_OOM_TARGET_SO=fractalsql.so sqlq \
-      "SELECT fractalsql_set('reasoning_plugin','$MOCK');" "$@")
+      "SELECT fractal_config_set('reasoning_plugin','$MOCK');" "$@")
     grep <<< "$r" -qi "out of memory" \
       && pass "34 oom_inject: $label" \
       || fail "34 oom_inject: $label -- expected an out-of-memory error, got: $r"
@@ -7314,8 +7340,8 @@ gate_34_oom_inject() {
     local label="$1"; shift
     local r; r=$(LD_PRELOAD="$shim" FSQL_OOM_FAIL_SIZE=256 \
       FSQL_OOM_TARGET_SO=fractalsql.so sqlq \
-      "SELECT fractalsql_set('reasoning_plugin','$MOCKEMB');" \
-      "SELECT fractalsql_set('http_embed_url','https://embed.invalid/v1');" "$@")
+      "SELECT fractal_config_set('reasoning_plugin','$MOCKEMB');" \
+      "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" "$@")
     grep <<< "$r" -qi "out of memory" \
       && pass "34 oom_inject: $label" \
       || fail "34 oom_inject: $label -- expected an out-of-memory error, got: $r"
@@ -7344,8 +7370,8 @@ gate_34_oom_inject() {
     local label="$1"; shift
     local r; r=$(LD_PRELOAD="$shim" FSQL_OOM_FAIL_SIZE=256 \
       FSQL_OOM_TARGET_SO=fractalsql.so FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 sqlq \
-      "SELECT fractalsql_set('enterprise_lib','$MOCKENT');" \
-      "SELECT fractalsql_set('reasoning_plugin','$MOCK');" "$@")
+      "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
+      "SELECT fractal_config_set('reasoning_plugin','$MOCK');" "$@")
     grep <<< "$r" -qi "out of memory" \
       && pass "34 oom_inject: $label" \
       || fail "34 oom_inject: $label -- expected an out-of-memory error, got: $r"
@@ -7762,7 +7788,7 @@ gate_37_mcp_smoke() {
   # absolute /tmp contract path, unaffected by CWD. The client driver
   # gets everything through the environment, per the MCP server's own
   # configuration convention.
-  local bootsql="SELECT fractalsql_set('reasoning_plugin','$MOCK');"
+  local bootsql="SELECT fractal_config_set('reasoning_plugin','$MOCK');"
 
   # $EXT is CWD-relative when resolve_ext() set it (single-gate runs),
   # but gate 01 sets it to the already-absolute "$HERE/fractalsql.so"
@@ -8174,15 +8200,15 @@ gate_41_db_probe() {
   rm -f "$mainobj" "$errobj" "$logobj" "$sqliteobj"
   ( cd "$HERE/mcp" && \
     env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g \
-        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.12\"" \
+        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.13\"" \
         -I../deps/sqlite -Ivendor -Isrc ${ossl_cflags[@]+"${ossl_cflags[@]}"} \
         -c tests/db_probe.cpp -o "$mainobj" \
      && env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g \
-        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.12\"" \
+        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.13\"" \
         -I../deps/sqlite -Ivendor -Isrc ${ossl_cflags[@]+"${ossl_cflags[@]}"} \
         -c src/errors.cpp -o "$errobj" \
      && env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g \
-        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.12\"" \
+        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.13\"" \
         -I../deps/sqlite -Ivendor -Isrc ${ossl_cflags[@]+"${ossl_cflags[@]}"} \
         -c src/logging.cpp -o "$logobj" \
      && env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$CC" -std=c99 -O1 -g -fPIC \
@@ -8354,7 +8380,7 @@ gate_43_kits() {
     extabs="$(wpath "$(cd "$(dirname "$EXT")" && pwd)/$(basename "$EXT")")"
     out=$(cd "$tmp" && "$SQLITE3" -batch \
             -cmd ".load $extabs" \
-            -cmd "SELECT fractalsql_set('reasoning_plugin','$MOCK');" \
+            -cmd "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
             :memory: ".read $kitabs" 2>&1)
     nerr=$(grep -ciE '^(Runtime|Parse) error|^Error[: ]' <<< "$out")
     want=0; [[ "$k" == scenario-planning-simulation ]] && want=1; [[ "$k" == periodicity-portfolio-selection ]] && want=1
@@ -8470,6 +8496,16 @@ gate_45_mcp_conformance() {
     ext_abs="$ext_for_abs"
   fi
 
+  # Under a sanitizer the MCP server is instrumented too (mcp/Makefile takes
+  # ASAN/UBSAN/TSAN), so it carries its own runtime: a TSan server that also
+  # inherits the harness's preloaded libtsan dies on the second copy of the
+  # runtime, and the driver then waits out its socket timeout for a server
+  # that never answers. The wrapper gives the server its own sanitizer log
+  # and, for TSan, drops the preload -- the same arrangement gates 37, 38
+  # and 47 use.
+  local san_dir="$TMPROOT/fractalsql_bt_mcp_san_45_$$"
+  mcp_exe="$(mcp_san_wrap "$mcp_exe" "$san_dir")"
+
   local out="$PDIRW/mcp_conformance.log"
   MCP_SERVER_EXE="$(wpath "$mcp_exe")" \
   MCP_SERVER_CWD="$(wpath "$BTROOT")" \
@@ -8477,7 +8513,7 @@ gate_45_mcp_conformance() {
   MCPC_GATE=45 \
   MCPC_LOCK_DIR="$(wpath "$HERE/mcp")" \
   MCPC_PASSTHROUGH_ENV="SQLITE_DB_PATH,FRACTALSQL_EXTENSION_PATH" \
-  MCPC_READ_TOOL="fractalsql_get_version" \
+  MCPC_READ_TOOL="fractal_version" \
   MCPC_READ_ARGS='{}' \
   MCPC_STATE_TOOL="fractal_diversify_enable" \
   MCPC_STATE_ARGS='{}' \
@@ -8487,6 +8523,7 @@ gate_45_mcp_conformance() {
   FRACTALSQL_EXTENSION_PATH="$ext_abs" \
     "$mcp_py" -u "$HERE/mcp/tests/mcp_conformance.py" >"$out" 2>&1
   local rc=$?
+  mcp_san_check "$san_dir" "45 mcp_conformance" || rc=1
   if [[ $rc -eq 0 ]] && grep -q "ALL GREEN" "$out"; then
     pass "45 mcp_conformance: protocol eras, authentication, framing, operator switches and catalog conformance"
   else
@@ -8516,6 +8553,211 @@ gate_45_mcp_conformance() {
 # FSQL_REASONING_REQUIRE_SIGNATURE override): the genuine plugin+sig must pass
 # the signature check, a one-byte-changed copy must be refused, and a copy with
 # no .sig must be refused.
+# 47 mcp_cli: the MCP server started every way its command line, environment, database path and extension path allow, including a
+# database file that is deleted, overwritten and truncated under a running server (mcp/tests/mcp_cli.py). Each run must end in
+# an orderly way; what a particular misconfiguration is refused with is not asserted.
+gate_47_mcp_cli() {
+  if [[ ! -f "$HERE/mcp/tests/mcp_cli.py" || ! -f "$HERE/mcp/src/main.cpp" ]]; then
+    skip "47 mcp_cli (mcp/ server code not present)"; return
+  fi
+  local mcp_py
+  mcp_py="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
+  [[ -n "$PY" ]] && mcp_py="$PY"
+  if [[ -z "$mcp_py" ]]; then skip "47 mcp_cli (no python3 on PATH -- the driver needs it)"; return; fi
+  local mcp_exe
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      mcp_exe="$HERE/mcp/dist/windows-mcp/fractalsql-sqlite-mcp.exe"
+      [[ -f "$mcp_exe" ]] || { skip "47 mcp_cli (no mcp/dist/windows-mcp build -- run mcp\\scripts\\windows\\build.bat)"; return; }
+      ;;
+    *) mcp_build_posix "47 mcp_cli" 0 || return; mcp_exe="$MCP_EXE" ;;
+  esac
+  local exe_dir; exe_dir="$(dirname "$mcp_exe")"
+  for lock_name in .mcp-schema-lock .mcp-safety-annotations-lock; do
+    [[ -f "$HERE/mcp/$lock_name" ]] && cp -f "$HERE/mcp/$lock_name" "$exe_dir/$lock_name" 2>/dev/null || true
+  done
+  local ext_for_abs="$EXT"
+  [[ "$ext_for_abs" = /* ]] || ext_for_abs="$HERE/$ext_for_abs"
+  local ext_abs="$EXTW"
+  if command -v cygpath >/dev/null 2>&1; then ext_abs="$(cygpath -m "$ext_for_abs" 2>/dev/null)" || ext_abs="$EXTW"; else ext_abs="$ext_for_abs"; fi
+  local cwd="$PDIRW/mcp_cli_cwd" san="$TMPROOT/fractalsql_bt_mcp_san_47_$$"
+  rm -rf "$cwd"; mkdir -p "$cwd"
+  mcp_exe="$(mcp_san_wrap "$mcp_exe" "$san")"
+  local out="$PDIRW/mcp_cli.log"
+  MCP_SERVER_EXE="$(wpath "$mcp_exe")" \
+  MCP_SERVER_CWD="$(wpath "$cwd")" \
+  SQLITE_DB_PATH="$(wpath "$cwd/cli.db")" \
+  FRACTALSQL_EXTENSION_PATH="$ext_abs" \
+    "$mcp_py" -u "$HERE/mcp/tests/mcp_cli.py" >"$out" 2>&1
+  local rc=$?
+  mcp_san_check "$san" "47 mcp_cli" || rc=1
+  if [[ $rc -eq 0 ]] && grep -q "ALL GREEN" "$out"; then
+    pass "47 mcp_cli: $(grep -c '^PASS' "$out") checks passed ($(grep -E 'mcp-cli: ' "$out" | tail -1 | sed 's/^mcp-cli: //'))"
+  else
+    grep -E '^FAIL|offender' "$out" | head -12 >&2 || true
+    if ! grep -qE '^FAIL ' "$out"; then tail -n 30 "$out" | sed 's/^/        /' >&2; fi
+    fail "47 mcp_cli: the server did not end in order for every start-up tried (see $out)"
+  fi
+}
+
+# 49 redact_unit: test/redact_unit.c, the header-level unit test of src/fsql_audit_redact.h (hash and truncate modes, buffer limits, every JSON
+# shape the walker handles, malformed documents, escapes with surrogate pairs, allocation failure in the walker). The SQL gates reach that
+# code only through the enterprise audit path, so without this its branches are dead in a --coverage run. Built with the sanitizers under
+# --asan/--ubsan, and with gcov under --coverage (an object named src/_redact_unit.o, so its counters ADD to the build's).
+gate_49_redact_unit() {
+  local cc="${FSQL_CC:-cc}"
+  command -v "$cc" >/dev/null 2>&1 || { skip "49 redact_unit (no C compiler on PATH)"; return; }
+  [[ -f "$HERE/test/redact_unit.c" ]] || { skip "49 redact_unit (test/redact_unit.c not present)"; return; }
+  local obj="$HERE/src/_redact_unit.o" covflags=() sanflags=()
+  [[ "$COVERAGE" -eq 1 ]] && covflags+=(--coverage)
+  [[ "$ASAN" -eq 1 ]] && sanflags+=(-fsanitize=address -fno-omit-frame-pointer)
+  [[ "$UBSAN" -eq 1 ]] && sanflags+=(-fsanitize=undefined -fno-sanitize-recover=undefined)
+  local log="$TMPROOT/fractalsql_bt_redact_unit_build.log" bin="$TMPROOT/fractalsql_bt_redact_unit"
+  rm -f "$obj"
+  if ! env -u LD_PRELOAD "$cc" -std=c11 -O1 -g -Wno-unused-function ${covflags[@]+"${covflags[@]}"} ${sanflags[@]+"${sanflags[@]}"} \
+        -I"$HERE/src" -c "$HERE/test/redact_unit.c" -o "$obj" >"$log" 2>&1 \
+     || ! env -u LD_PRELOAD "$cc" ${covflags[@]+"${covflags[@]}"} ${sanflags[@]+"${sanflags[@]}"} "$obj" -o "$bin" >>"$log" 2>&1; then
+    tail -5 "$log" | sed 's/^/         /'; fail "49 redact_unit: the unit test did not build (see $log)"; rm -f "$obj"; return
+  fi
+  local out rc
+  # LeakSanitizer does not exist on macOS: asking for it there makes the ASan runtime itself refuse to start.
+  local leaks=1; [[ "$(uname -s)" == Darwin ]] && leaks=0
+  out="$(env -u LD_PRELOAD ASAN_OPTIONS=detect_leaks=$leaks "$bin" 2>&1)"; rc=$?
+  rm -f "$obj" "$bin"
+  if [[ "$COVERAGE" -ne 1 ]]; then rm -f "${obj%.o}.gcno" "${obj%.o}.gcda"; fi
+  if [[ $rc -eq 0 ]]; then pass "49 redact_unit: $(tail -1 <<< "$out")"
+  else printf '%s\n' "$out" | tail -12 | sed 's/^/         /'; fail "49 redact_unit: see the output above"; fi
+}
+
+# 50 ledger_unit: test/ledger_unit.c, the ledger and audit chain at the storage seam. The extension's own sources (all but the
+# enterprise loader) are linked with a stand-in core that persists through the host's storage VFS, so flush, load, the tip and seed
+# checks, every refusal of a damaged row, the reset/compact slot rules, the audit entry shapes and the chain verifier run for real.
+# Several modes, because the row cap and the anchor mode are read once per process. Sanitizers under --asan/--ubsan, gcov under --coverage.
+gate_50_ledger_unit() {
+  local cc="${FSQL_CC:-cc}" plat
+  command -v "$cc" >/dev/null 2>&1 || { skip "50 ledger_unit (no C compiler on PATH)"; return; }
+  [[ -f "$HERE/test/ledger_unit.c" ]] || { skip "50 ledger_unit (test/ledger_unit.c not present)"; return; }
+  if [[ "$IS_MSYS" -eq 1 || "$(uname -s)" == MINGW* ]]; then skip "50 ledger_unit (POSIX only)"; return; fi
+  plat="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
+  local arch="$HERE/include/$plat/libfractalsql-community-sovereign-c.a"
+  [[ -f "$arch" ]] || { skip "50 ledger_unit (no sovereign core archive for $plat)"; return; }
+  echo '#include <sqlite3.h>' | "$cc" -E -x c - >/dev/null 2>&1 || { skip "50 ledger_unit (no sqlite3.h / libsqlite3 development files)"; return; }
+  local flags=(-std=c11 -O1 -g -Wno-unused-function -DSQLITE_CORE -DFSQL_SQLITE_SOVEREIGN -I"$HERE/include" -I"$HERE/src")
+  [[ "$COVERAGE" -eq 1 ]] && flags+=(--coverage -fprofile-update=atomic)
+  [[ "$ASAN" -eq 1 ]] && flags+=(-fsanitize=address -fno-omit-frame-pointer)
+  [[ "$UBSAN" -eq 1 ]] && flags+=(-fsanitize=undefined -fno-sanitize-recover=undefined)
+  local log="$TMPROOT/fractalsql_bt_ledger_unit_build.log" bin="$TMPROOT/fractalsql_bt_ledger_unit" srcs=() f
+  for f in "$HERE"/src/*.c; do [[ "$(basename "$f")" == fsql_enterprise.c ]] || srcs+=("$f"); done
+  if ! env -u LD_PRELOAD "$cc" "${flags[@]}" "$HERE/test/ledger_unit.c" "${srcs[@]}" "$arch" -lsqlite3 -lm -ldl -lpthread -o "$bin" >"$log" 2>&1; then
+    tail -6 "$log" | sed 's/^/         /'; fail "50 ledger_unit: the unit test did not build (see $log)"; return
+  fi
+  local m total=0 bad=0 out
+  for m in "default" "cap FSQL_LEDGER_MAX_ROWS=3" "badcap FSQL_LEDGER_MAX_ROWS=abc" "nocap FSQL_LEDGER_MAX_ROWS=0" "anchor FSQL_LEDGER_ANCHOR_LOG=STDERR" \
+           "anchor-syslog FSQL_LEDGER_ANCHOR_LOG=syslog" "anchor-bogus FSQL_LEDGER_ANCHOR_LOG=bogus"; do
+    set -- $m
+    out="$(env -u LD_PRELOAD ASAN_OPTIONS=detect_leaks=0 ${2:+"$2"} "$bin" "$1" 2>&1)" || bad=$((bad + 1))
+    [[ "$out" == *"ledger_unit["* && "$out" != *"FAIL"* ]] || { printf '%s\n' "$out" | tail -8 | sed 's/^/         /'; bad=$((bad + 1)); }
+    total=$((total + $(grep -o '[0-9]* checks passed' <<< "$out" | grep -o '^[0-9]*' | head -1 | grep . || echo 0)))
+  done
+  rm -f "$bin"
+  if [[ "$bad" -eq 0 ]]; then pass "50 ledger_unit: $total checks passed across 7 modes"
+  else fail "50 ledger_unit: $bad mode(s) failed, see the output above"; fi
+}
+
+# 51 refusals: the three drivers that exercise what the extension refuses, in the real shell. test/enterprise_errors.py (every refusal of the
+# enterprise library: a wrong, short, long or empty .sig, a missing .sig, an unreadable library, one without the core's symbols, an attempt
+# that is not retried), test/plugin_gate.py (the same for the reasoning plugin) and test/config_matrix.py (every configuration key, accepted
+# and refused values). A valid signature needs the vendor's private key, so the accepted path is gate 26's; these are the refusals.
+gate_51_refusals() {
+  local d
+  for d in enterprise_errors plugin_gate config_matrix t2s_matrix vectorizer_matrix sql_agent_matrix; do
+    [[ -f "$HERE/test/$d.py" ]] || { skip "51 refusals (test/$d.py not present)"; return; }
+  done
+  if [[ "$IS_MSYS" -eq 1 ]]; then skip "51 refusals (POSIX shell and compiler only)"; return; fi
+  local py; py="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"; [[ -n "${PY:-}" ]] && py="$PY"
+  [[ -n "$py" ]] || { skip "51 refusals (no python3 on PATH)"; return; }
+  resolve_ext || { fail "51 refusals: no extension found (run gate 01 or set FSQL_EXT)"; return; }
+  local ext_abs; ext_abs="$(cd "$(dirname "$EXT")" && pwd)/$(basename "$EXT")"
+  local out total=0 bad=0 refused=0 n
+  # Darwin --asan: the instrumented extension cannot be loaded into an unsanitized host (SIP strips DYLD_INSERT_LIBRARIES and the runtime
+  # refuses to start "too late"), so the two drivers that only run the sqlite3 shell get one built with the sanitizer from the amalgamation:
+  # the runtime is then part of the process from its first instruction. The other four load the extension through Python's sqlite3 module,
+  # which is Apple's, so they stay skipped here (macOS without a sanitizer and Linux ASan run the same checks).
+  local san_shell=""
+  if [[ ( "$sysname" == "Darwin" && "$ASAN" -eq 1 ) || -n "${FSQL_SAN_SHELL:-}" ]] && [[ -f "$HERE/deps/sqlite/shell.c" ]]; then
+    san_shell="$TMPROOT/fractalsql_bt_sqlite3_san"
+    if ! env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "${FSQL_CC:-cc}" -std=c99 -O1 -g -fno-omit-frame-pointer -fsanitize=address \
+         -DSQLITE_ENABLE_LOAD_EXTENSION=1 -DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_COLUMN_METADATA=1 \
+         "$HERE/deps/sqlite/shell.c" "$HERE/deps/sqlite/sqlite3.c" -I"$HERE/deps/sqlite" -lpthread -lm -ldl -o "$san_shell" \
+         >"$TMPROOT/fractalsql_bt_sqlite3_san.log" 2>&1; then
+      echo "         (the sanitized sqlite3 shell did not build, see $TMPROOT/fractalsql_bt_sqlite3_san.log; those drivers stay skipped)"
+      san_shell=""
+    fi
+  fi
+  for d in enterprise_errors plugin_gate config_matrix t2s_matrix vectorizer_matrix sql_agent_matrix; do
+    local host=(); [[ -n "$san_shell" && ( "$d" == enterprise_errors || "$d" == plugin_gate ) ]] && host=(SQLITE3="$san_shell")
+    # The sanitizer runtime stays preloaded into the driver: it loads the extension under test into
+    # its own process (or drives the sqlite3 CLI that does), and an instrumented extension cannot be
+    # loaded into a host whose library list does not already start with the runtime -- the abort is
+    # "ASan runtime does not come first in initial library list". The drivers strip it again for the
+    # compiler they run, so the toolchain itself stays unsanitized.
+    out="$(cd "$HERE" && env FSQL_EXT="$ext_abs" ${host[@]+"${host[@]}"} "$py" -I "test/$d.py" 2>&1)" || bad=$((bad + 1))
+    if [[ "$out" == *" 0 failed"* ]]; then n="$(grep -o '[0-9]* checks passed' <<< "$out" | grep -o '^[0-9]*' | head -1)"; total=$((total + n))
+    elif [[ "$sysname" == "Darwin" ]] && grep -qE "Interceptors are not working|loaded too late" <<< "$out"; then
+      # Darwin --asan: the sanitizer runtime refused to start in the host process (the unsanitized sqlite3 CLI the driver runs). That says
+      # nothing about the extension, so it is a skip, the same as the other gates that load the extension into a host.
+      refused=$((refused + 1)); bad=$((bad - 1))
+    else printf '%s\n' "$out" | tail -8 | sed 's/^/         /'; fi
+  done
+  if [[ "$bad" -eq 0 && "$refused" -gt 0 ]]; then skip "51 refusals: $refused driver(s) skipped -- the sanitizer runtime refused to start in this host process (Darwin DYLD_INSERT_LIBRARIES; not an extension failure); $total checks passed in the rest"
+  elif [[ "$bad" -eq 0 ]]; then pass "51 refusals: $total checks passed (enterprise library, reasoning plugin, configuration keys, text-to-SQL replies, the vectorizer, the SQL agent)"
+  else fail "51 refusals: $bad driver(s) failed, see the output above"; fi
+}
+
+# 48 mcp_faults (Linux): the server under tests/oom_preload.c with one allocation, file call or socket call failed at a time while
+# every tool is called (mcp/tests/mcp_faults.py). The server must keep answering; the main thread (the request reader) is spared.
+# This is also allocation-failure injection for the extension, whose allocations happen inside the server. Skipped under any
+# sanitizer: a sanitizer runtime and the fault shim cannot both interpose the allocator.
+gate_48_mcp_faults() {
+  if [[ ! -f "$HERE/mcp/tests/mcp_faults.py" || ! -f "$HERE/tests/oom_preload.c" || ! -f "$HERE/mcp/src/main.cpp" ]]; then
+    skip "48 mcp_faults (mcp/ server code or tests/oom_preload.c not present)"; return
+  fi
+  if [[ "$(uname -s)" != Linux ]]; then skip "48 mcp_faults (needs LD_PRELOAD and signals, Linux only)"; return; fi
+  if [[ "$ASAN" -eq 1 || "$UBSAN" -eq 1 || "$TSAN" -eq 1 ]]; then
+    skip "48 mcp_faults (a sanitizer runtime and the fault shim cannot both interpose the allocator)"; return
+  fi
+  local mcp_py
+  mcp_py="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
+  [[ -n "$PY" ]] && mcp_py="$PY"
+  if [[ -z "$mcp_py" ]]; then skip "48 mcp_faults (no python3 on PATH -- the driver needs it)"; return; fi
+  mcp_build_posix "48 mcp_faults" 0 || return
+  local exe_dir; exe_dir="$(dirname "$MCP_EXE")"
+  for lock_name in .mcp-schema-lock .mcp-safety-annotations-lock; do
+    [[ -f "$HERE/mcp/$lock_name" ]] && cp -f "$HERE/mcp/$lock_name" "$exe_dir/$lock_name" 2>/dev/null || true
+  done
+  local w="$PDIRW/mcp_faults"; rm -rf "$w"; mkdir -p "$w"
+  if ! env -u LD_PRELOAD cc -O2 -fPIC -shared -o "$w/oom_preload.so" "$HERE/tests/oom_preload.c" -ldl 2>"$w/build.log"; then
+    cat "$w/build.log" >&2; fail "48 mcp_faults: oom_preload.so failed to build"; return
+  fi
+  local ext_for_abs="$EXT"
+  [[ "$ext_for_abs" = /* ]] || ext_for_abs="$HERE/$ext_for_abs"
+  local out="$w/faults.log" rc
+  MCP_OOM_PRELOAD="$w/oom_preload.so" \
+  MCP_SERVER_EXE="$MCP_EXE" \
+  MCP_SERVER_CWD="$w" \
+  SQLITE_DB_PATH="$w/faults.db" \
+  FRACTALSQL_EXTENSION_PATH="$ext_for_abs" \
+  FRACTALSQL_BOOTSTRAP_SQL="SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
+    timeout 420 "$mcp_py" -u "$HERE/mcp/tests/mcp_faults.py" >"$out" 2>&1
+  rc=$?
+  if [[ $rc -eq 0 ]] && grep -q 'ALL GREEN' "$out"; then
+    pass "48 mcp_faults: $(grep -c '^ *PASS' "$out") checks passed ($(grep -E '^PASS faults: [0-9]+ injected alloc' "$out" | head -1 | cut -c1-110))"
+  else
+    grep -E '^ *FAIL|cause' "$out" | head -10 >&2
+    fail "48 mcp_faults: the server did not survive the injected failures (see $out)"
+  fi
+}
+
 gate_46_plugin_sig_vendored() {
   local n=0 bad=0 f
   for f in include/*/fractalsql-reasoning-http.so include/*/fractalsql-reasoning-http.dll; do
@@ -8555,7 +8797,7 @@ gate_46_plugin_sig_vendored() {
     out=$( unset FSQL_REASONING_REQUIRE_SIGNATURE FRACTALSQL_REASONING_PLUGIN
            "$SQLITE3" -batch -bail \
             -cmd ".load $EXTW" "$DBW" \
-            "SELECT fractalsql_set('reasoning_plugin','$d/${call}.so');" \
+            "SELECT fractal_config_set('reasoning_plugin','$d/${call}.so');" \
             "SELECT fractal_reason('say ok');" 2>&1 ); rc=$?
     case "$call" in
       good)
@@ -8610,6 +8852,11 @@ gate_title() {
     43) echo "kits" ;;
     45) echo "mcp_conformance" ;;
     46) echo "plugin_sig_vendored" ;;
+    47) echo "mcp_cli" ;;
+    48) echo "mcp_faults" ;;
+    49) echo "redact_unit" ;;
+    50) echo "ledger_unit" ;;
+    51) echo "refusals" ;;
   esac
 }
 
@@ -8646,6 +8893,11 @@ run_gate() {
     43) gate_43_kits ;;
     45) gate_45_mcp_conformance ;;
     46) gate_46_plugin_sig_vendored ;;
+    47) gate_47_mcp_cli ;;
+    48) gate_48_mcp_faults ;;
+    49) gate_49_redact_unit ;;
+    50) gate_50_ledger_unit ;;
+    51) gate_51_refusals ;;
   esac
 }
 
@@ -8782,7 +9034,10 @@ main() {
   if [[ "$ONE_GATE" == "mcp" ]]; then
     # The MCP server gates only. Under a sanitizer or coverage the
     # extension they load must be built for it too, so gate 01 goes first.
-    gates=(37 38 40 41 42)
+    # A fault gate is one of them only when faults were asked for
+    # (--gate mcp --fault): on its own, --gate mcp runs no fault injection.
+    gates=(37 38 40 41 42 47)
+    [[ "$MODE" == "fault" ]] && gates+=("${MCP_FAULT_GATES[@]}")
     if [[ "$ASAN$UBSAN$TSAN$COVERAGE" != "0000" ]]; then gates=(01 "${gates[@]}"); fi
   elif [[ -n "$ONE_GATE" ]]; then
     gates=("$ONE_GATE")
@@ -8790,6 +9045,8 @@ main() {
     gates=("${QUICK_GATES[@]}")
   elif [[ "$MODE" == "fuzz" ]]; then
     gates=("${FUZZ_GATES[@]}")
+  elif [[ "$MODE" == "fault" ]]; then
+    gates=("${DEFAULT_GATES[@]}" "${FAULT_GATES[@]}")
   else
     gates=("${DEFAULT_GATES[@]}")
   fi

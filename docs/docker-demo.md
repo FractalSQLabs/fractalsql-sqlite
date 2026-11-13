@@ -32,7 +32,7 @@ One command, no flags, gives you the bare minimum:
   (WAL mode, persisted on the `demo_data` volume), and reasoning
   **pre-configured per connection**: `docker/demo-entrypoint.sh` writes
   the bootstrap snippet (`demo_init.sql`, the same `.load` +
-  `fractalsql_set()` lines the `easy_install.sh` wizard generates) from
+  `fractal_config_set()` lines the `easy_install.sh` wizard generates) from
   the compose `FRACTALSQL_*` env vars, pointing at the `ollama` service.
 - **Every demo + the `bench/` head-to-head** inside the container
   (`/demo/`, `/bench/`). Demos are **demoable on demand**: they are not
@@ -59,8 +59,8 @@ docker compose exec demo sqlite3 fractalsql_demo.sqlite \
 Confirm the extension is alive and which edition it is:
 ```bash
 docker compose exec demo sqlite3 fractalsql_demo.sqlite \
-  -init demo_init.sql "SELECT fractalsql_edition(), fractalsql_version();"
-# expect: Community|2.0.12
+  -init demo_init.sql "SELECT fractal_edition(), fractal_version();"
+# expect: Community|2.0.13
 ```
 
 Run any demo (re-runnable; each recreates its own fixture tables):

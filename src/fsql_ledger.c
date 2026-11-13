@@ -49,7 +49,7 @@
  *
  * Ledger seal envelope, defined ONCE, here:
  *
- *   When cfg.enterprise_ledger_key is set (fractalsql_set(
+ *   When cfg.enterprise_ledger_key is set (fractal_config_set(
  *   'enterprise_ledger_key', ...)), every persisted payload carries a
  *   32-byte authentication tag:
  *
@@ -1246,8 +1246,9 @@ static void ledger_reset_common(sqlite3_context *sctx,
     }
     int rc = core_call(st->ctx);
     if (rc != FSQL_OK) { ledger_core_error(sctx, st, api, rc); return; }
-    for (int k = min_kind < 1 ? 1 : min_kind; k <= FSQL_LEDGER_MAX_KIND; k++)
-        ledger_slot_clear(&lc->slot[k]);
+    if (min_kind >= 0)   /* negative: keep every slot (compact) */
+        for (int k = min_kind < 1 ? 1 : min_kind; k <= FSQL_LEDGER_MAX_KIND; k++)
+            ledger_slot_clear(&lc->slot[k]);
     sqlite3_result_text(sctx, "ok", -1, SQLITE_STATIC);
 }
 
@@ -1657,6 +1658,24 @@ static void ledger_set_actor_fn(sqlite3_context *sctx, int argc,
 }
 
 /* ------------------------------------------------------------------ */
+/* True when every id in [from, to) belongs to a row of some kind other than `kind`: the
+ * ids are shared by all the chains, so those are not missing rows of this one. */
+static int ledger_gap_is_other_kinds(sqlite3 *db, int kind,
+                                     sqlite3_int64 from, sqlite3_int64 to) {
+    sqlite3_stmt *gs = NULL;
+    int other = 0;
+    if (sqlite3_prepare_v2(db,
+            "SELECT COUNT(*) FROM fractalsql_ledger WHERE id>=?1 AND id<?2 AND kind<>?3",
+            -1, &gs, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(gs, 1, from);
+        sqlite3_bind_int64(gs, 2, to);
+        sqlite3_bind_int(gs, 3, kind);
+        if (sqlite3_step(gs) == SQLITE_ROW) other = (sqlite3_column_int64(gs, 0) == to - from);
+    }
+    if (gs) sqlite3_finalize(gs);
+    return other;
+}
+
 /* fractal_ledger_verify([kind]) -> TEXT (JSON)                        */
 /* ------------------------------------------------------------------ */
 
@@ -1775,6 +1794,11 @@ static void ledger_verify_fn(sqlite3_context *sctx, int argc,
         sqlite3_int64 row_id = sqlite3_column_int64(stmt, 0);
         rows++;
 
+        /* ids are one sequence shared by every kind, so a hole between two rows of
+         * this chain is only a deletion when the missing ids are not other chains' rows. */
+        if (expect_id >= 0 && row_id > expect_id &&
+            ledger_gap_is_other_kinds(st->db, kind, expect_id, row_id))
+            expect_id = -1;
         const char *row_reason = ledger_verify_chain_row(stmt, expect_prev,
                                                          expect_id, row_id);
         if (row_reason) {

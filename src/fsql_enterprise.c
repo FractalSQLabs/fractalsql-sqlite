@@ -39,7 +39,7 @@
  * --------------------------
  * enterprise_require_signature is a SQL-settable config key, and every
  * principal that can run SQL against the connection can call
- * fractalsql_set() -- a key any statement author can flip to 0 is not
+ * fractal_config_set() -- a key any statement author can flip to 0 is not
  * an operator control. So the SQL key can only ever STRENGTHEN the
  * check; weakening it requires a process-environment opt-out that no
  * SQL statement can touch:
@@ -178,7 +178,8 @@ static ent_sig_result_t ent_check_signature(const char *lib_path) {
     if (!f) return ENT_SIG_IOERROR;
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return ENT_SIG_IOERROR; }
     lib_len = ftell(f);
-    if (lib_len < 0 || fseek(f, 0, SEEK_SET) != 0) {
+    /* a directory opens with fopen() on POSIX and then reports LONG_MAX: refuse it, and any size no library has, before malloc() */
+    if (lib_len < 0 || lib_len > 256L * 1024 * 1024 || fseek(f, 0, SEEK_SET) != 0) {
         fclose(f);
         return ENT_SIG_IOERROR;
     }

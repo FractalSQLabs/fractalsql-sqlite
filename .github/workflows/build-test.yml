@@ -97,6 +97,21 @@ jobs:
                       -NewName "sqlite"
           Add-Content -Path $env:GITHUB_ENV -Value "FSQL_SQLITE_DIR=$PWD\deps\sqlite"
 
+      - name: Install OpenSSL (vcpkg, for the MCP server)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          # The windows-2022 runner image ships vcpkg preinstalled at
+          # %VCPKG_INSTALLATION_ROOT%; mcp\scripts\windows\build.bat
+          # looks for VCPKG_ROOT specifically. Gates 37/38/45 build the
+          # MCP server (which links libssl/libcrypto) and gate 41
+          # compiles against the same headers -- without them those
+          # gates skip, so a green CI would not mean the MCP surface
+          # works. Same step the windows-asan/windows-ubsan jobs use.
+          echo VCPKG_ROOT=%VCPKG_INSTALLATION_ROOT%>>%GITHUB_ENV%
+          "%VCPKG_INSTALLATION_ROOT%\vcpkg" install openssl:x64-windows-static
+          if errorlevel 1 exit /b 1
+
       - name: SQLite amalgamation headers (POSIX)
         if: runner.os != 'Windows'
         shell: bash

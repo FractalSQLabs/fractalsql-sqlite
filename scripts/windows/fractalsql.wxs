@@ -36,7 +36,7 @@
        the default here keeps a plain local `candle scripts/windows/
        fractalsql.wxs` working with no flag at all, sourced from the
        same version string everything else in the repo reads
-       (FSQL_SQLITE_VERSION_STR, which fractalsql_version() returns). -->
+       (FSQL_SQLITE_VERSION_STR, which fractal_version() returns). -->
   <?ifndef MSI_VERSION ?>
   <?define MSI_VERSION = "2.0.0" ?>
   <?endif ?>

@@ -42,8 +42,8 @@ def main():
     cur = conn.cursor()
 
     # Smoke: the extension must at least expose the edition metadata.
-    if cur.execute("SELECT fractalsql_edition()").fetchone()[0] != "Community":
-        fail("fractalsql_edition() != 'Community'")
+    if cur.execute("SELECT fractal_edition()").fetchone()[0] != "Community":
+        fail("fractal_edition() != 'Community'")
 
     passed = 0
 
