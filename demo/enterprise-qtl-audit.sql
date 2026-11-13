@@ -5,7 +5,7 @@
 -- The QTL ledger and CISO audit surface are enterprise-tier features,
 -- runtime-gated behind the enterprise core shared library. The community
 -- extension (what the Docker image ships by default) carries all eight SQL
--- signatures, but they are DORMANT until `fractalsql_set('enterprise_lib',
+-- signatures, but they are DORMANT until `fractal_config_set('enterprise_lib',
 -- ...)` points at a present enterprise core library (libfractalsql-
 -- enterprise-sovereign-c.so / .dylib / .dll). There is no server config
 -- to reload -- the setting takes effect immediately, per connection.
@@ -31,10 +31,10 @@
 -- point at wherever your licensed core landed):
 --
 --   sqlite3 mydb.sqlite -cmd ".load ./dist/amd64/fractalsql" \
---     -cmd "SELECT fractalsql_set('enterprise_lib', '/path/to/libfractalsql-enterprise-sovereign-c.so');" \
+--     -cmd "SELECT fractal_config_set('enterprise_lib', '/path/to/libfractalsql-enterprise-sovereign-c.so');" \
 --     ".read demo/enterprise-qtl-audit.sql"
 --
--- Omit the fractalsql_set line entirely to see the dormant path.
+-- Omit the fractal_config_set line entirely to see the dormant path.
 --
 -- Safe to re-run: the persisted ledger table is dropped up front and the
 -- in-memory ledger context is per-connection (a fresh connection starts

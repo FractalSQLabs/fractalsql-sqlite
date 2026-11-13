@@ -111,9 +111,9 @@ jobs:
           # Explicit entry point on EVERY .load: without one, .load
           # derives it from the file name, and "fractalsql-legacy.so"
           # yields the wrong "sqlite3_fractalsqllegacy_init".
-          OUT=$(sqlite3 :memory: ".load ${SO} sqlite3_fractalsql_init" "SELECT fractalsql_edition() || '|' || fractalsql_version();")
+          OUT=$(sqlite3 :memory: ".load ${SO} sqlite3_fractalsql_init" "SELECT fractal_edition() || '|' || fractal_version();")
           echo "result: ${OUT}"
-          test "${OUT}" = "Community|2.0.12"
+          test "${OUT}" = "Community|2.0.13"
           DIST=$(sqlite3 :memory: ".load ${SO} sqlite3_fractalsql_init" "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');")
           echo "self-search distance: ${DIST}"
           awk -v d="${DIST}" 'BEGIN { if (d >= 1e-6) exit 1 }'
@@ -135,12 +135,12 @@ jobs:
             # embedding single quotes through the two shells gets
             # unreadable), so edition and version are asserted
             # separately.
-            OUT=$(sqlite3 :memory: ".load '"${SO}"' sqlite3_fractalsql_init" "SELECT fractalsql_edition();")
+            OUT=$(sqlite3 :memory: ".load '"${SO}"' sqlite3_fractalsql_init" "SELECT fractal_edition();")
             echo "edition: ${OUT}"
             test "${OUT}" = "Community"
-            OUT=$(sqlite3 :memory: ".load '"${SO}"' sqlite3_fractalsql_init" "SELECT fractalsql_version();")
+            OUT=$(sqlite3 :memory: ".load '"${SO}"' sqlite3_fractalsql_init" "SELECT fractal_version();")
             echo "version: ${OUT}"
-            test "${OUT}" = "2.0.12"
+            test "${OUT}" = "2.0.13"
           '
 
       # Every profile installs to the SAME fixed path regardless of the
@@ -384,9 +384,9 @@ jobs:
           # confirm the sovereign self-search path returns ~0 distance.
           OUT=$("${SQLITE_BIN}" :memory: \
               ".load ${DYLIB}" \
-              "SELECT fractalsql_edition() || '|' || fractalsql_version();")
+              "SELECT fractal_edition() || '|' || fractal_version();")
           echo "result: ${OUT}"
-          test "${OUT}" = "Community|2.0.12"
+          test "${OUT}" = "Community|2.0.13"
           DIST=$("${SQLITE_BIN}" :memory: \
               ".load ${DYLIB}" \
               "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');")
@@ -596,9 +596,9 @@ jobs:
           # LoadLibrary accepts both. (build_test.ps1's Resolve-Ext
           # documents the same tokenizer behavior.)
           $load = '.load "C:/Program Files/FractalSQL/fractalsql.dll"'
-          $out = & $cmd.Source ':memory:' $load "SELECT fractalsql_edition() || '|' || fractalsql_version();"
+          $out = & $cmd.Source ':memory:' $load "SELECT fractal_edition() || '|' || fractal_version();"
           Write-Host "result: $out"
-          if ($out -ne 'Community|2.0.12') { Write-Host "FATAL: unexpected edition|version: $out"; exit 1 }
+          if ($out -ne 'Community|2.0.13') { Write-Host "FATAL: unexpected edition|version: $out"; exit 1 }
 
           $dist = & $cmd.Source ':memory:' $load "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');"
           Write-Host "self-search distance: $dist"

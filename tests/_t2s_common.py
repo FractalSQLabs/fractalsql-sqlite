@@ -1,7 +1,7 @@
 """tests/_t2s_common.py — shared helpers for the fractalsql-sqlite test
 suite (test_vector_*.py, test_vectorizer.py, test_text_to_sql_*.py).
 
-SQLite configuration is per-connection state (fractalsql_set writes
+SQLite configuration is per-connection state (fractal_config_set writes
 straight into the extension's FsqlConfig), so it takes effect
 immediately. reconnect() just closes and reopens a fresh connection,
 which also resets config to defaults — sometimes exactly what a
@@ -37,7 +37,7 @@ def get_db_path():
 
 def get_reasoning_plugin_path():
     """Absolute path to the reasoning plugin fixture. Must be absolute —
-    fractalsql_set('reasoning_plugin', ...) rejects relative paths
+    fractal_config_set('reasoning_plugin', ...) rejects relative paths
     (traversal hygiene, gate 09)."""
     p = os.environ.get("FRACTALSQL_REASONING_PLUGIN")
     if p:
@@ -75,26 +75,26 @@ def configure_reasoning(cur, plugin_path, http_url, model=None,
                         use_review=None, max_attempts=None,
                         allowed_statements=None,
                         embed_url=None, embed_model=None):
-    """fractalsql_set() the reasoning config keys. Takes effect on this
+    """fractal_config_set() the reasoning config keys. Takes effect on this
     connection immediately — no reconnect needed."""
-    cur.execute("SELECT fractalsql_set('reasoning_plugin', ?)", (plugin_path,))
-    cur.execute("SELECT fractalsql_set('http_url', ?)", (http_url,))
-    cur.execute("SELECT fractalsql_set('http_allow_plaintext', 'on')")
+    cur.execute("SELECT fractal_config_set('reasoning_plugin', ?)", (plugin_path,))
+    cur.execute("SELECT fractal_config_set('http_url', ?)", (http_url,))
+    cur.execute("SELECT fractal_config_set('http_allow_plaintext', 'on')")
     if model is not None:
-        cur.execute("SELECT fractalsql_set('http_model', ?)", (model,))
+        cur.execute("SELECT fractal_config_set('http_model', ?)", (model,))
     if use_review is not None:
-        cur.execute("SELECT fractalsql_set('text_to_sql_use_review', ?)",
+        cur.execute("SELECT fractal_config_set('text_to_sql_use_review', ?)",
                     ("on" if use_review else "off",))
     if max_attempts is not None:
-        cur.execute("SELECT fractalsql_set('text_to_sql_max_attempts', ?)",
+        cur.execute("SELECT fractal_config_set('text_to_sql_max_attempts', ?)",
                     (str(int(max_attempts)),))
     if allowed_statements is not None:
-        cur.execute("SELECT fractalsql_set('text_to_sql_allowed_statements', ?)",
+        cur.execute("SELECT fractal_config_set('text_to_sql_allowed_statements', ?)",
                     (allowed_statements,))
     if embed_url is not None:
-        cur.execute("SELECT fractalsql_set('http_embed_url', ?)", (embed_url,))
+        cur.execute("SELECT fractal_config_set('http_embed_url', ?)", (embed_url,))
     if embed_model is not None:
-        cur.execute("SELECT fractalsql_set('http_embed_model', ?)", (embed_model,))
+        cur.execute("SELECT fractal_config_set('http_embed_model', ?)", (embed_model,))
 
 
 def reconnect(conn, _dsn=None):

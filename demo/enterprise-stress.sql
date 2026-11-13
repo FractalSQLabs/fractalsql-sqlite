@@ -44,10 +44,10 @@
 -- point at wherever your licensed core landed):
 --
 --   sqlite3 mydb.sqlite -cmd ".load ./dist/amd64/fractalsql" \
---     -cmd "SELECT fractalsql_set('enterprise_lib', '/path/to/libfractalsql-enterprise-sovereign-c.so');" \
+--     -cmd "SELECT fractal_config_set('enterprise_lib', '/path/to/libfractalsql-enterprise-sovereign-c.so');" \
 --     ".read demo/enterprise-stress.sql"
 --
--- Omit the fractalsql_set line entirely to see the dormant path.
+-- Omit the fractal_config_set line entirely to see the dormant path.
 --
 -- Safe to re-run: the persisted ledger table is dropped up front and the
 -- in-memory ledger context is per-connection (a fresh connection starts
@@ -170,7 +170,7 @@ SELECT fractal_ledger_load();
 .print before the core decodes it, so a payload byte-flip the structural check
 .print cannot see (length + count preserved) is now rejected.
 
-SELECT fractalsql_set('enterprise_ledger_key', 'demo-mac-key');
+SELECT fractal_config_set('enterprise_ledger_key', 'demo-mac-key');
 
 -- Tag a fresh blob, then load (MAC verifies -> ok).
 SELECT fractal_ledger_reset_hard();
@@ -199,7 +199,7 @@ SELECT fractal_ledger_flush();
 SELECT fractal_ledger_load();
 
 -- Empty string resets a CFG_STR key back to unset.
-SELECT fractalsql_set('enterprise_ledger_key', '');
+SELECT fractal_config_set('enterprise_ledger_key', '');
 
 .print
 .print === Phase E: append-only chain ===

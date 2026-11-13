@@ -99,7 +99,7 @@ The six building blocks the agents above compose. Call them directly to build yo
 To prevent "hallucination-driven" database corruption, the Agent Tier implements two primary guardrails:
 
 1. **The Execution Barrier**: Functions like `fractal_sql_agent` with `auto_execute` on run generated SQL inside a guarded execution. If a constraint is violated or an error occurs, the failure is contained to the agent's attempt, the error is fed back to the LLM for a retry, and the main session remains intact.
-2. **The Deterministic Allowlist**: The `text_to_sql_allowed_statements` config key (`SELECT fractalsql_set('text_to_sql_allowed_statements', 'select');`) strictly limits the types of SQL the agent can generate (e.g., preventing `DROP TABLE` even if the LLM suggests it).
+2. **The Deterministic Allowlist**: The `text_to_sql_allowed_statements` config key (`SELECT fractal_config_set('text_to_sql_allowed_statements', 'select');`) strictly limits the types of SQL the agent can generate (e.g., preventing `DROP TABLE` even if the LLM suggests it).
 
 ---
 

@@ -98,7 +98,7 @@ namespace fsqlmcp
             Json cfg = Json::object();
             for( const char* key : kConfigKeys )
             {
-                const SqlValue v = g_db->callScalar( "SELECT fractalsql_get(?)", { std::string( key ) } );
+                const SqlValue v = g_db->callScalar( "SELECT fractal_config_get(?)", { std::string( key ) } );
                 cfg[ key ] = asScalarJson( v );
             }
             const Json body{ { "scope", "per-connection (THIS MCP session's dedicated connection)" },

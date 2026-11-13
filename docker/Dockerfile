@@ -180,8 +180,8 @@ conn.enable_load_extension(True)
 conn.load_extension("/smoke/fractalsql.so")
 conn.enable_load_extension(False)
 cur = conn.cursor()
-assert cur.execute("SELECT fractalsql_edition()").fetchone()[0] == "Community"
-ver = cur.execute("SELECT fractalsql_version()").fetchone()[0]
+assert cur.execute("SELECT fractal_edition()").fetchone()[0] == "Community"
+ver = cur.execute("SELECT fractal_version()").fetchone()[0]
 assert ver.count(".") == 2, ver
 d = cur.execute("SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0')").fetchone()[0]
 assert abs(d) < 1e-6, d
@@ -259,7 +259,7 @@ COPY --from=builder /build/mcp/.mcp-safety-annotations-lock /.mcp-safety-annotat
 #   * A demo database at /work/fractalsql_demo.sqlite (WAL mode,
 #     persisted via the compose demo_data volume).
 #   * The per-session bootstrap snippet (the easy_install.sh
-#     load_fractalsql.sql equivalent: .load + fractalsql_set() lines)
+#     load_fractalsql.sql equivalent: .load + fractal_config_set() lines)
 #     written by demo-entrypoint.sh from FRACTALSQL_* env vars,
 #     defaulting to the compose network's `ollama` service.
 #   * Every demo in /demo/ and the bench/ head-to-head in /bench/ (with

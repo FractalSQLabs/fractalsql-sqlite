@@ -1,4 +1,4 @@
-/* src/fsql_config.c: fractalsql_set / fractalsql_get.
+/* src/fsql_config.c: fractal_config_set / fractal_config_get.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: 2026 Daniel Gardiner d/b/a FractalSQLabs
@@ -32,7 +32,7 @@
  *   absolute with no traversal segments (mirroring fsql_load_reasoning's
  *   own rules), which is exactly what the configuration tests assert.
  *
- * Keys are named without a "fractalsql." prefix: fractalsql_set(
+ * Keys are named without a "fractalsql." prefix: fractal_config_set(
  * 'http_url', ...). The prefixed spelling ("fractalsql.http_url") is
  * also accepted.
  */
@@ -364,13 +364,13 @@ const char *fsql_config_get(const FsqlState *st, const char *name) {
 
 /* Apply the documented default of every key that has one. Called once,
  * when a connection's state is created, so a session that never calls
- * fractalsql_set() still starts from the values the documentation
+ * fractal_config_set() still starts from the values the documentation
  * promises: the text-to-SQL attempt budget is 2 (a rejected candidate
  * is regenerated once with the rejection fed back), the statement
  * allowlist is "select", and the remaining numeric and boolean keys
  * start at their documented zero. The defaults go through the same
  * validation as an explicit set, so a default can never be a value
- * fractalsql_set() would reject. */
+ * fractal_config_set() would reject. */
 void fsql_config_apply_defaults(FsqlState *st) {
     char err[192] = "";
     for (size_t i = 0; i < CFG_N; i++) {
@@ -384,23 +384,23 @@ void fsql_config_apply_defaults(FsqlState *st) {
 /* SQL wrappers                                                        */
 /* ------------------------------------------------------------------ */
 
-/* fractalsql_set(name TEXT, value TEXT) -> 'ok' (or raises). */
+/* fractal_config_set(name TEXT, value TEXT) -> 'ok' (or raises). */
 static void fs_set_fn(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
     (void)argc;
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
     if (!st) { sqlite3_result_error(ctx, "fractalsql: not initialized", -1); return; }
-    FSQL_REFUSE_IN_GENERATED_SQL(ctx, st, "fractalsql_set");
+    FSQL_REFUSE_IN_GENERATED_SQL(ctx, st, "fractal_config_set");
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT ||
         sqlite3_value_type(argv[1]) != SQLITE_TEXT) {
         sqlite3_result_error(ctx,
-            "fractalsql_set(name, value) expects 2 TEXT args", -1);
+            "fractal_config_set(name, value) expects 2 TEXT args", -1);
         return;
     }
     const char *name = (const char *)sqlite3_value_text(argv[0]);
     const char *value = (const char *)sqlite3_value_text(argv[1]);
     char err[192] = "";
     if (fsql_config_set(st, name, value, err, sizeof err) != 0) {
-        sqlite3_result_error(ctx, err[0] ? err : "fractalsql_set failed", -1);
+        sqlite3_result_error(ctx, err[0] ? err : "fractal_config_set failed", -1);
         return;
     }
     /* Changing the plugin path detaches the previously-attached plugin;
@@ -410,19 +410,19 @@ static void fs_set_fn(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
     sqlite3_result_text(ctx, "ok", -1, SQLITE_STATIC);
 }
 
-/* fractalsql_get(name TEXT) -> TEXT (NULL if unset / numeric keys). */
+/* fractal_config_get(name TEXT) -> TEXT (NULL if unset / numeric keys). */
 static void fs_get_fn(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
     (void)argc;
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
     if (!st) { sqlite3_result_error(ctx, "fractalsql: not initialized", -1); return; }
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(ctx, "fractalsql_get(name) expects TEXT", -1);
+        sqlite3_result_error(ctx, "fractal_config_get(name) expects TEXT", -1);
         return;
     }
     const char *name = (const char *)sqlite3_value_text(argv[0]);
     const CfgDef *d = cfg_lookup(name);
     if (!d) {
-        sqlite3_result_error(ctx, "fractalsql_get: unknown config key", -1);
+        sqlite3_result_error(ctx, "fractal_config_get: unknown config key", -1);
         return;
     }
     if (d->type == CFG_INT || d->type == CFG_BOOL) {
@@ -446,11 +446,11 @@ int fsql_config_register(sqlite3 *db, FsqlState *st) {
      * view or generated column) must not be able to run it. */
     const int flags_set = SQLITE_UTF8 | SQLITE_DIRECTONLY;
     int rc = sqlite3_create_function_v2(
-        db, "fractalsql_set", 2, flags_set, st,
+        db, "fractal_config_set", 2, flags_set, st,
         fs_set_fn, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     rc = sqlite3_create_function_v2(
-        db, "fractalsql_get", 1, flags, st,
+        db, "fractal_config_get", 1, flags, st,
         fs_get_fn, NULL, NULL, NULL);
     return rc;
 }

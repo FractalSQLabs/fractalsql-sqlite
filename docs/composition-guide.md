@@ -106,7 +106,7 @@ in [Safe Agency](#safe-agency--guardrails):
 
 ```sql
 -- per-connection config: restrict the statement classes the agent may emit
-SELECT fractalsql_set('text_to_sql_allowed_statements', 'select');
+SELECT fractal_config_set('text_to_sql_allowed_statements', 'select');
 
 SELECT json_extract(agent, '$.generated_sql')   AS generated_sql,
        json_extract(agent, '$.execution_status') AS execution_status,
@@ -117,7 +117,7 @@ SELECT json_extract(agent, '$.generated_sql')   AS generated_sql,
 ```
 
 (There are no database-level roles in SQLite; the per-connection
-`fractalsql_set` above plus the authorizer hook in Safe Agency is how you
+`fractal_config_set` above plus the authorizer hook in Safe Agency is how you
 pin this down per identity, instead of attaching the setting to a role.)
 
 The `data_analyst` agent is the productized version of this:
@@ -184,7 +184,7 @@ you'd treat any NL→SQL surface:
 - **Restrict the allowed statements.** The `text_to_sql_allowed_statements`
   config key gates which statement classes the agent may emit; tighten it to
   the set your workload needs (e.g. `select` only for a read-only analyst):
-  `SELECT fractalsql_set('text_to_sql_allowed_statements', 'select');`
+  `SELECT fractal_config_set('text_to_sql_allowed_statements', 'select');`
 - **Prefer `auto_execute` off for exploratory use.** Let the caller
   review `generated_sql` and run it themselves. The cognition agents (e.g.
   `data_analyst`) pass it on deliberately, *inside* their own composition with

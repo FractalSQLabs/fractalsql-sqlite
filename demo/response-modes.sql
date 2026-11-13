@@ -17,7 +17,7 @@
 -- Prerequisites:
 --   1. Run demo.sql first -- this reuses its demo_alerts table.
 --   2. Reasoning already configured per ../docs/reasoning-setup.md
---      (per-connection fractalsql_set state, so re-apply your
+--      (per-connection fractal_config_set state, so re-apply your
 --      load_fractalsql.sql snippet with -init for each section run).
 --
 -- Workflow for each section below:

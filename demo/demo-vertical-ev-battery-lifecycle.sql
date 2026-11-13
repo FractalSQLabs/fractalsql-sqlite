@@ -43,7 +43,7 @@
 .timer on
 
 .print === 0. Sanity check: extension loaded? ===
-SELECT fractalsql_edition(), fractalsql_version();
+SELECT fractal_edition(), fractal_version();
 
 -- ------------------------------------------------------------------
 -- 1. Fleet telemetry: 3 vehicles x 96 readings.  EV-101 and EV-102 age

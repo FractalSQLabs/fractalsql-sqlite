@@ -57,7 +57,8 @@ static int fsql_plugin_gate(const char *path, char *err, size_t err_cap) {
     unsigned char *bytes = NULL;
     long len = -1;
     if (fseek(f, 0, SEEK_END) == 0) len = ftell(f);
-    if (len < 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); snprintf(err, err_cap, "reasoning plugin \"%s\" cannot be read for verification", path); return -1; }
+    /* a directory opens with fopen() on POSIX and then reports LONG_MAX: refuse it, and any size no plugin has, before malloc() */
+    if (len < 0 || len > 256L * 1024 * 1024 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); snprintf(err, err_cap, "reasoning plugin \"%s\" cannot be read for verification", path); return -1; }
     bytes = (unsigned char *)malloc((size_t)len ? (size_t)len : 1);
     if (!bytes || fread(bytes, 1, (size_t)len, f) != (size_t)len) {
         fclose(f); free(bytes);

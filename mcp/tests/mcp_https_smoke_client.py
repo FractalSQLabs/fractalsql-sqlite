@@ -220,7 +220,7 @@ def main() -> int:
         s, _, b = https_req(port, "POST", "/mcp", token=token, session=minted,
                             body=json.dumps({"jsonrpc": "2.0", "id": 2,
                                             "method": "tools/call",
-                                            "params": {"name": "fractalsql_get_version",
+                                            "params": {"name": "fractal_version",
                                                        "arguments": {}}}))
         edition = None
         if s == 200 and b.startswith("{"):

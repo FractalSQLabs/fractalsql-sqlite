@@ -9,6 +9,15 @@
 
 namespace fsqlmcp
 {
+    // The seed is published as an optional integer; the SQL takes it as a
+    // REAL, so the value travels unchanged and an absent seed becomes the
+    // engine's own default.
+    static double optimizeSeed( const Json& a )
+    {
+        return a.contains( "seed" ) && !a.at( "seed" ).is_null()
+            ? static_cast<double>( a.at( "seed" ).get<std::int64_t>() )
+            : 0.0;
+    }
     std::vector<ToolSpec> buildAnalyticsTools( Db& db, const RowLimitConfig& rowCfg )
     {
         std::vector<ToolSpec> t;
@@ -97,12 +106,12 @@ namespace fsqlmcp
             "rank, NOT full simplicial H1 (over-counts when a filled triangle exists).";
 
         t.push_back( ToolSpec{ "fractal_state_fingerprint", "Analytics", ToolClass::Cheap,
-            { Vec("vec", true, "State vector."), Int("n_bits", true, "SimHash bits."), Num("seed", false, "SimHash seed.", 0.0) },
+            { Vec("vector", true, "State vector."), Int("n_bits", false, "SimHash bits.", 128), Int("seed", false, "SimHash seed.", 0.0) },
             std::nullopt, false, true,
             [&db]( const Json& a, CallCtx& ) {
                 SqlValue v = db.callScalar( "SELECT fractal_state_fingerprint(?, ?, ?)",
-                    { vectors::vectorParamToText( a.at("vec"), "vec" ),
-                      a.at("n_bits").get<std::int64_t>(), a.value( "seed", 0.0 ) } );
+                    { vectors::vectorParamToText( a.at("vector"), "vector" ),
+                      a.value( "n_bits", 128 ), a.value( "seed", 0.0 ) } );
                 auto blob = asBlob( v );
                 if( !blob )
                     throw ToolError( ErrorClass::ServerInternal, "fractal_state_fingerprint did not return a BLOB" );
@@ -135,18 +144,18 @@ namespace fsqlmcp
             "never substitute silently for cosine/L2.";
 
         t.push_back( ToolSpec{ "fractal_vector_quantize_int8", "Analytics", ToolClass::Cheap,
-            { Vec("v", true, "Vector to quantize.") }, std::nullopt, false, true,
+            { Vec("vector", true, "Vector to quantize.") }, std::nullopt, false, true,
             [&db]( const Json& a, CallCtx& ) { return parseJsonStrict( db.callScalar(
                 "SELECT fractal_vector_quantize_int8(?)",
-                { vectors::vectorParamToText( a.at("v"), "v" ) } ) ); } } );
+                { vectors::vectorParamToText( a.at("vector"), "vector" ) } ) ); } } );
         t.back().description = "Symmetric int8 quantization of one vector (4x compression). Returns "
             "{'scale':S,'codes':[...]}; dequantize via v[i] ~= codes[i]*scale.";
 
         t.push_back( ToolSpec{ "fractal_vector_quantize_binary", "Analytics", ToolClass::Cheap,
-            { Vec("v", true, "Vector to quantize.") }, std::nullopt, false, true,
+            { Vec("vector", true, "Vector to quantize.") }, std::nullopt, false, true,
             [&db]( const Json& a, CallCtx& ) {
                 SqlValue v = db.callScalar( "SELECT fractal_vector_quantize_binary(?)",
-                    { vectors::vectorParamToText( a.at("v"), "v" ) } );
+                    { vectors::vectorParamToText( a.at("vector"), "vector" ) } );
                 auto blob = asBlob( v );
                 if( !blob )
                     throw ToolError( ErrorClass::ServerInternal,
@@ -216,14 +225,14 @@ namespace fsqlmcp
 
         t.push_back( ToolSpec{ "fractal_optimize_portfolio", "Analytics", ToolClass::Cheap,
             { Vec("mu", true, "Expected returns."), Vec("cov", true, "Flattened 1-D row-major n x n covariance."),
-              Int("k", true, "Max nonzero assets."), Num("seed", true, "RNG seed."),
+              Int("k", true, "Max nonzero assets."), Int("seed", false, "RNG seed."),
               Bool_("use_obl", false, "Opposition-Based Learning per SFS trial (off by default; doubles the affected step's cost).", false),
               StrEnum("diffusion_mode", false, "'gaussian' or 'levy' (heavy-tailed, can escape local optima).", "gaussian") },
             std::nullopt, false, true,
             [&db]( const Json& a, CallCtx& ) { return parseJsonStrict( db.callScalar(
                 "SELECT fractal_optimize_portfolio(?, ?, ?, ?, ?, ?)",
                 { vectors::vectorParamToText( a.at("mu"), "mu" ), vectors::vectorParamToText( a.at("cov"), "cov" ),
-                  a.at("k").get<std::int64_t>(), a.at("seed").get<double>(),
+                  a.at("k").get<std::int64_t>(), optimizeSeed( a ),
                   static_cast<std::int64_t>( a.value( "use_obl", false ) ? 1 : 0 ),
                   a.value( "diffusion_mode", std::string( "gaussian" ) ) } ) ); } } );
         t.back().description = "SFS cardinality-constrained Sharpe-ratio maximizer: the best K assets out of a "
@@ -234,7 +243,7 @@ namespace fsqlmcp
             { Vec("mu", true, "Expected returns."), Vec("cov", true, "Flattened covariance."),
               Int("k", true, "Max nonzero assets."), Int("n_restarts", false, "Independent restarts.", 8),
               Num("overlap_threshold", false, "Asset-overlap threshold.", 0.15),
-              Num("quality_frac", false, "Quality fraction gate.", 0.90), Num("seed", true, "RNG seed."),
+              Num("quality_frac", false, "Quality fraction gate.", 0.90), Int("seed", false, "RNG seed."),
               Bool_("use_obl", false, "Requires an enterprise core build with OBL support.", false),
               StrEnum("diffusion_mode", false, "'gaussian' or 'levy'.", "gaussian") },
             std::nullopt, false, true,
@@ -243,7 +252,7 @@ namespace fsqlmcp
                 { vectors::vectorParamToText( a.at("mu"), "mu" ), vectors::vectorParamToText( a.at("cov"), "cov" ),
                   a.at("k").get<std::int64_t>(), a.value( "n_restarts", 8 ),
                   a.value( "overlap_threshold", 0.15 ), a.value( "quality_frac", 0.90 ),
-                  a.at("seed").get<double>(),
+                  optimizeSeed( a ),
                   static_cast<std::int64_t>( a.value( "use_obl", false ) ? 1 : 0 ),
                   a.value( "diffusion_mode", std::string( "gaussian" ) ) } ) ); } } );
         t.back().description = "Multi-restart diverse-candidate sibling of fractal_optimize_portfolio. Returns "
@@ -254,14 +263,14 @@ namespace fsqlmcp
             { Vec("mu", true, "Expected returns."), Vec("cov", true, "Flattened covariance."),
               Int("k", true, "Max nonzero assets."), Int("n_restarts", false, "Independent restarts.", 8),
               Int("max_front", false, "Pareto-front cap (1<=max_front<=n_restarts).", 8),
-              Num("seed", true, "RNG seed."), Bool_("use_obl", false, "OBL per trial.", false),
+              Int("seed", false, "RNG seed."), Bool_("use_obl", false, "OBL per trial.", false),
               StrEnum("diffusion_mode", false, "'gaussian' or 'levy'.", "gaussian") },
             std::nullopt, false, true,
             [&db]( const Json& a, CallCtx& ) { return parseJsonStrict( db.callScalar(
                 "SELECT fractal_optimize_portfolio_multimodal_pareto(?, ?, ?, ?, ?, ?, ?, ?)",
                 { vectors::vectorParamToText( a.at("mu"), "mu" ), vectors::vectorParamToText( a.at("cov"), "cov" ),
                   a.at("k").get<std::int64_t>(), a.value( "n_restarts", 8 ), a.value( "max_front", 8 ),
-                  a.at("seed").get<double>(),
+                  optimizeSeed( a ),
                   static_cast<std::int64_t>( a.value( "use_obl", false ) ? 1 : 0 ),
                   a.value( "diffusion_mode", std::string( "gaussian" ) ) } ) ); } } );
         t.back().description = "Pareto-front sibling: same restarts, scored by decomposed (return,risk), NSGA-II "
@@ -272,7 +281,7 @@ namespace fsqlmcp
             { Vec("item_values", true, "Per-item scores."), Vec("upper_bounds", true, "Per-item weight cap, each in [0,1]."),
               Int("k", true, "Max nonzero items."), Vec("prev_weights", false, "Previous weights (enables turnover_penalty)."),
               Num("turnover_penalty", false, "Only meaningful with prev_weights set.", 0.0),
-              Num("seed", true, "RNG seed."), RowLimit() },
+              Int("seed", false, "RNG seed."), RowLimit() },
             std::nullopt, false, true,
             [&db, &rowCfg]( const Json& a, CallCtx& ) {
                 SqlValue prevW = a.contains( "prev_weights" ) && !a.at( "prev_weights" ).is_null()
@@ -282,7 +291,7 @@ namespace fsqlmcp
                     { vectors::vectorParamToText( a.at("item_values"), "item_values" ),
                       vectors::vectorParamToText( a.at("upper_bounds"), "upper_bounds" ),
                       a.at( "k" ).get<std::int64_t>(), prevW, a.value( "turnover_penalty", 0.0 ),
-                      a.at( "seed" ).get<double>() } ) );
+                      optimizeSeed( a ) } ) );
             } } );
         t.back().description = "Value-weighted k-subset allocation over ANY scored item list: maximize "
             "sum(weight[i]*item_values[i]) with at most k nonzero, each weight<=upper_bounds[i], summing to 1.0. "
@@ -290,7 +299,7 @@ namespace fsqlmcp
             "subset exists (clean engine error).";
 
         t.push_back( ToolSpec{ "fractal_store_morphology", "Analytics", ToolClass::Cheap,
-            { NullableNum("doc_id", "Feature-store key (nullable bigint)."), Vec("feature_array", true, "Feature vector."),
+            { Int("doc_id", true, "Feature-store key."), Vec("feature_array", true, "Feature vector."),
               Bool_("force", false, "Overwrite a vector another client wrote. Default false: such an overwrite is refused.", false) },
             std::nullopt, true, false,
             [&db]( const Json& a, CallCtx& ctx ) {

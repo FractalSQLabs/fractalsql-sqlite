@@ -3,7 +3,7 @@
 %global mcpdocdir %{docdir}/mcp
 
 Name:           fractalsql-sqlite
-Version:        2.0.12
+Version:        2.0.13
 Release:        1%{?dist}
 Summary:        Stochastic Fractal Search SQLite loadable extension (Community)
 
@@ -24,8 +24,8 @@ BuildArch:      %{_arch}
 fractalsql-sqlite is a SQLite loadable extension exposing the full
 FractalSQL 2.0 surface:
 
-    fractalsql_edition()          -> 'Community'
-    fractalsql_version()          -> '2.0.12'
+    fractal_edition()          -> 'Community'
+    fractal_version()          -> '2.0.13'
     fractal_search(vector, query) -> REAL (cosine distance to
                                           SFS-refined projection
                                           of the query vector)
@@ -122,14 +122,17 @@ fractalsql-sqlite Community installed.
 Load inside any SQLite session:
 
     SELECT load_extension('/usr/local/lib/sqlite3/fractalsql');
-    SELECT fractalsql_edition();   -- 'Community'
-    SELECT fractalsql_version();   -- '2.0.12'
+    SELECT fractal_edition();   -- 'Community'
+    SELECT fractal_version();   -- '2.0.13'
 
 See /usr/share/doc/fractalsql-sqlite/load_extension.sql for examples.
 
 EOF
 
 %changelog
+* Fri Nov 13 2026 FractalSQLabs - 2.0.13-1
+- Version bump to 2.0.13.
+
 * Fri Nov 06 2026 FractalSQLabs - 2.0.12-1
 - Text-to-SQL agents: generated SQL is only run when the caller asks
   (auto_execute is 0 by default). With it off the statement is generated

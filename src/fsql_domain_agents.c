@@ -360,7 +360,7 @@ static int da_require_reasoning(const FsqlState *st, const char *who,
     if (!st->cfg.reasoning_plugin || !*st->cfg.reasoning_plugin) {
         da_set_err(err, err_cap,
                    "%s: reasoning plugin not configured (set "
-                   "fractalsql_set('reasoning_plugin', '/absolute/path.so'))",
+                   "fractal_config_set('reasoning_plugin', '/absolute/path.so'))",
                    who);
         return -1;
     }

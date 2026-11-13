@@ -12,10 +12,10 @@
 --
 -- Prerequisites: extension installed (sections 0-5 need nothing else).
 -- Section 6 calls fractal_reason() -- see ../docs/reasoning-setup.md
--- (per-connection fractalsql_set state, so re-apply your
+-- (per-connection fractal_config_set state, so re-apply your
 -- load_fractalsql.sql snippet with -init).
 --
--- Run (one invocation -- fractalsql_set state is per-connection):
+-- Run (one invocation -- fractal_config_set state is per-connection):
 --   sqlite3 -cmd ".load /usr/local/lib/sqlite3/fractalsql" ":memory:" \
 --     ".read demo/demo-vertical-recommendation-search.sql"
 --
@@ -42,7 +42,7 @@
 .timer on
 
 .print === 0. Sanity check: extension loaded? ===
-SELECT fractalsql_edition(), fractalsql_version();
+SELECT fractal_edition(), fractal_version();
 
 -- ------------------------------------------------------------------
 -- 1. 300-item catalog, 6 genre clusters x 50 items in R^8. Centers

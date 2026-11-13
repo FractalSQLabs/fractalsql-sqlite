@@ -4,8 +4,8 @@ name: Install test (packaging)
 # SQLite has no server plugin_dir — users load the extension by
 # explicit absolute path via `.load`. The test installs the package,
 # verifies the .so landed at /usr/local/lib/sqlite3/fractalsql.so
-# on both distros, then exercises the fractalsql_edition /
-# fractalsql_version UDFs in an in-memory database.
+# on both distros, then exercises the fractal_edition /
+# fractal_version UDFs in an in-memory database.
 
 on:
   push:
@@ -205,10 +205,10 @@ jobs:
 
           REPLY=$(sqlite3 :memory: \
               ".load /usr/local/lib/sqlite3/fractalsql" \
-              "SELECT fractalsql_set('reasoning_plugin', '${PLUGIN}');" \
-              "SELECT fractalsql_set('http_url', 'http://127.0.0.1:${MOCK_PORT}/v1/chat/completions');" \
-              "SELECT fractalsql_set('http_allow_plaintext', 'on');" \
-              "SELECT fractalsql_set('http_model', 'mock-model');" \
+              "SELECT fractal_config_set('reasoning_plugin', '${PLUGIN}');" \
+              "SELECT fractal_config_set('http_url', 'http://127.0.0.1:${MOCK_PORT}/v1/chat/completions');" \
+              "SELECT fractal_config_set('http_allow_plaintext', 'on');" \
+              "SELECT fractal_config_set('http_model', 'mock-model');" \
               "SELECT fractal_reason('ping');" 2>/dev/null | tail -1)
           kill "${MOCK_PID}" 2>/dev/null || true
           test "${REPLY}" = "pong-from-mock" \
@@ -381,11 +381,11 @@ jobs:
           SQLITE3_BIN: /opt/homebrew/opt/sqlite/bin/sqlite3
         run: |
           set -euo pipefail
-          EDITION=$("${SQLITE3_BIN}" :memory: ".load /usr/local/lib/sqlite3/fractalsql" "SELECT fractalsql_edition();")
-          VERSION=$("${SQLITE3_BIN}" :memory: ".load /usr/local/lib/sqlite3/fractalsql" "SELECT fractalsql_version();")
+          EDITION=$("${SQLITE3_BIN}" :memory: ".load /usr/local/lib/sqlite3/fractalsql" "SELECT fractal_edition();")
+          VERSION=$("${SQLITE3_BIN}" :memory: ".load /usr/local/lib/sqlite3/fractalsql" "SELECT fractal_version();")
           echo "edition=${EDITION} version=${VERSION}"
           test "${EDITION}" = "Community"
-          test "${VERSION}" = "2.0.12"
+          test "${VERSION}" = "2.0.13"
 
           # Search works with no further config.
           "${SQLITE3_BIN}" :memory: \
@@ -405,10 +405,10 @@ jobs:
 
           REPLY=$("${SQLITE3_BIN}" :memory: \
               ".load /usr/local/lib/sqlite3/fractalsql" \
-              "SELECT fractalsql_set('reasoning_plugin', '${PLUGIN}');" \
-              "SELECT fractalsql_set('http_url', 'http://127.0.0.1:${MOCK_PORT}/v1/chat/completions');" \
-              "SELECT fractalsql_set('http_allow_plaintext', 'on');" \
-              "SELECT fractalsql_set('http_model', 'mock-model');" \
+              "SELECT fractal_config_set('reasoning_plugin', '${PLUGIN}');" \
+              "SELECT fractal_config_set('http_url', 'http://127.0.0.1:${MOCK_PORT}/v1/chat/completions');" \
+              "SELECT fractal_config_set('http_allow_plaintext', 'on');" \
+              "SELECT fractal_config_set('http_model', 'mock-model');" \
               "SELECT fractal_reason('ping');" 2>/dev/null | tail -1)
           kill "${MOCK_PID}" 2>/dev/null || true
           test "${REPLY}" = "pong-from-mock" \
@@ -474,13 +474,13 @@ jobs:
               || { echo "FAIL: reasoning round-trip via easy_install.sh didn't reach the mock reply"; exit 1; }
 
           # tail -1: the snippet itself prints one "ok" per
-          # fractalsql_set it bootstraps — those fill the head of the
+          # fractal_config_set it bootstraps — those fill the head of the
           # captured output, and the UDF's answer is the last line.
-          EDITION=$(sqlite3 :memory: ".read /usr/local/lib/sqlite3/load_fractalsql.sql" "SELECT fractalsql_edition();" | tail -1)
-          VERSION=$(sqlite3 :memory: ".read /usr/local/lib/sqlite3/load_fractalsql.sql" "SELECT fractalsql_version();" | tail -1)
+          EDITION=$(sqlite3 :memory: ".read /usr/local/lib/sqlite3/load_fractalsql.sql" "SELECT fractal_edition();" | tail -1)
+          VERSION=$(sqlite3 :memory: ".read /usr/local/lib/sqlite3/load_fractalsql.sql" "SELECT fractal_version();" | tail -1)
           echo "edition=${EDITION} version=${VERSION}"
           test "${EDITION}" = "Community"
-          test "${VERSION}" = "2.0.12"
+          test "${VERSION}" = "2.0.13"
           echo "ok: easy_install.sh end-to-end (Debian)"
           SCRIPT
           chmod +x test-easy-install.sh

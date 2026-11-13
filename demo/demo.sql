@@ -10,7 +10,7 @@
 --      the statements here.
 --   2. Reasoning configured per ../docs/reasoning-setup.md -- this script
 --      assumes the reasoning_plugin / http_url / http_model config keys
---      are already set for the connection (fractalsql_set -- no server
+--      are already set for the connection (fractal_config_set -- no server
 --      config to reload; changes apply immediately). Any
 --      OpenAI-compatible endpoint works (Ollama, Bedrock, Azure, GCP
 --      Vertex, ...) -- this script doesn't care which.
@@ -32,7 +32,7 @@
 .timer on
 
 .print === 0. Sanity check: extension loaded? ===
-SELECT fractalsql_edition(), fractalsql_version();
+SELECT fractal_edition(), fractal_version();
 
 .print
 .print === 1. Set up a small alerts table with something worth noticing ===

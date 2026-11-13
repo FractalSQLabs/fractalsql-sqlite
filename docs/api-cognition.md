@@ -28,7 +28,7 @@ fractal_reason(
 | `context` | `text` | `'{}'` | A JSON payload containing search results, schema, or other data. |
 
 ### Reasoning Effort
-Hybrid-thinker models' internal reasoning trace is throttled via the `http_think` config key (`SELECT fractalsql_set('http_think', 'medium');`) and related keys -- see [Reasoning Setup: Reasoning Effort (THINK)](reasoning-setup.md#reasoning-effort-think).
+Hybrid-thinker models' internal reasoning trace is throttled via the `http_think` config key (`SELECT fractal_config_set('http_think', 'medium');`) and related keys -- see [Reasoning Setup: Reasoning Effort (THINK)](reasoning-setup.md#reasoning-effort-think).
 
 ---
 
@@ -48,8 +48,8 @@ fractal_embed(
 Requires `http_embed_url` and `http_embed_model` to be configured for this connection:
 
 ```sql
-SELECT fractalsql_set('http_embed_url',   'http://127.0.0.1:11434/v1/embeddings');
-SELECT fractalsql_set('http_embed_model', 'nomic-embed-text');
+SELECT fractal_config_set('http_embed_url',   'http://127.0.0.1:11434/v1/embeddings');
+SELECT fractal_config_set('http_embed_model', 'nomic-embed-text');
 ```
 
 ---
@@ -72,6 +72,8 @@ fractal_text_to_sql(
 | `question` | `text` | (Required) | The natural language question. |
 
 *SQLite difference:* the optional `table_names` argument is not ported here — there is no `text[]` type. `fractal_text_to_sql(question)` always auto-discovers the schema via `sqlite_master`; use `fractal_sql_agent(question, table_names_json, ...)` (its `table_names` is a JSON array TEXT, e.g. `'["orders","customers"]'`) when you need explicit scoping.
+
+The MCP tool `fractal_text_to_sql` does publish a `table_names` parameter, so that its surface matches the other engines. It is accepted and validated, then ignored: the engine still auto-discovers the schema. Use `fractal_sql_agent`'s `table_names` for explicit scoping.
 
 ### Safety Pipeline
 1. **Keyword pre-check**: raw-text first-keyword screen rejects multi-statement / DDL / utility / `PRAGMA` / `ATTACH` candidates before any parse.

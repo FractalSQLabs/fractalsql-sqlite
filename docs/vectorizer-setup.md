@@ -12,9 +12,9 @@ By running the embedding sync directly inside your SQLite process, FractalSQL el
 
 ## Prerequisites
 
-To enable automated embeddings, the following configuration is required (Community edition, no separate tier or license needed). There are no global config keys and no system-wide config file — configuration is **per-connection** state set with `fractalsql_set(key, value)` (the easy_install wizard's `load_fractalsql.sql` snippet, applied per session via `sqlite3 -init load_fractalsql.sql mydb.sqlite` or `.read load_fractalsql.sql`, is the standard way to apply it):
+To enable automated embeddings, the following configuration is required (Community edition, no separate tier or license needed). There are no global config keys and no system-wide config file — configuration is **per-connection** state set with `fractal_config_set(key, value)` (the easy_install wizard's `load_fractalsql.sql` snippet, applied per session via `sqlite3 -init load_fractalsql.sql mydb.sqlite` or `.read load_fractalsql.sql`, is the standard way to apply it):
 
-1. **Reasoning Plugin**: the `reasoning_plugin` key must point at the compiled `fractalsql-reasoning-http` plugin (`SELECT fractalsql_set('reasoning_plugin', '/usr/local/lib/sqlite3/fractalsql-reasoning-http.so');` — see [reasoning-setup.md](reasoning-setup.md)).
+1. **Reasoning Plugin**: the `reasoning_plugin` key must point at the compiled `fractalsql-reasoning-http` plugin (`SELECT fractal_config_set('reasoning_plugin', '/usr/local/lib/sqlite3/fractalsql-reasoning-http.so');` — see [reasoning-setup.md](reasoning-setup.md)).
 2. **Embeddings Endpoint**: the `http_embed_url` key must be set to your provider's **embeddings** endpoint. This is a distinct path from the chat endpoint (e.g., `/v1/embeddings` vs `/v1/chat/completions`).
 3. **Embedding Model**: the `http_embed_model` key specifies the purpose-trained model. If left unset, the plugin defaults to `text-embedding-3-small`. **Important**: Never reuse a chat model for embeddings; they are mathematically distinct tasks.
 
@@ -138,20 +138,20 @@ the dimension-mismatch assertions in `demo/demo-fractal-vector.sql`.
 
 ## Endpoint Providers
 
-The Vectorizer leverages the same auth-bridge as the Cognition tier's reasoning endpoint. Credentials and region settings are shared; only the URL and model change. Each block below is the `fractalsql_set` lines to put in your per-session `load_fractalsql.sql` snippet (the `fractalsql.`-prefixed key spelling from the original edition's docs is accepted too, but the bare spelling is canonical here).
+The Vectorizer leverages the same auth-bridge as the Cognition tier's reasoning endpoint. Credentials and region settings are shared; only the URL and model change. Each block below is the `fractal_config_set` lines to put in your per-session `load_fractalsql.sql` snippet (the `fractalsql.`-prefixed key spelling from the original edition's docs is accepted too, but the bare spelling is canonical here).
 
 ### Ollama (Local or Private Network)
 Ideal for fully air-gapped deployments where data never leaves your VPC.
 
 ```sql
 -- chat / text-to-sql
-SELECT fractalsql_set('http_url',     'http://127.0.0.1:11434/v1/chat/completions');
-SELECT fractalsql_set('http_model',   'gpt-oss:20b');
-SELECT fractalsql_set('http_allow_plaintext', 'on');
+SELECT fractal_config_set('http_url',     'http://127.0.0.1:11434/v1/chat/completions');
+SELECT fractal_config_set('http_model',   'gpt-oss:20b');
+SELECT fractal_config_set('http_allow_plaintext', 'on');
 
 -- embeddings
-SELECT fractalsql_set('http_embed_url',   'http://127.0.0.1:11434/v1/embeddings');
-SELECT fractalsql_set('http_embed_model', 'nomic-embed-text');
+SELECT fractal_config_set('http_embed_url',   'http://127.0.0.1:11434/v1/embeddings');
+SELECT fractal_config_set('http_embed_model', 'nomic-embed-text');
 ```
 *Note: You must run `ollama pull nomic-embed-text` separately.*
 
@@ -162,41 +162,41 @@ the model names change for embeddings.
 
 ```sql
 -- chat / text-to-sql
-SELECT fractalsql_set('http_url',     'http://127.0.0.1:12434/engines/v1/chat/completions');
-SELECT fractalsql_set('http_model',   'ai/gpt-oss:20b');   -- or 'ai/gemma4:12b' or 'ai/phi4'
-SELECT fractalsql_set('http_allow_plaintext', 'on');
+SELECT fractal_config_set('http_url',     'http://127.0.0.1:12434/engines/v1/chat/completions');
+SELECT fractal_config_set('http_model',   'ai/gpt-oss:20b');   -- or 'ai/gemma4:12b' or 'ai/phi4'
+SELECT fractal_config_set('http_allow_plaintext', 'on');
 
 -- embeddings
-SELECT fractalsql_set('http_embed_url',   'http://127.0.0.1:12434/engines/v1/embeddings');
-SELECT fractalsql_set('http_embed_model', 'ai/nomic-embed-text-v1.5');
+SELECT fractal_config_set('http_embed_url',   'http://127.0.0.1:12434/engines/v1/embeddings');
+SELECT fractal_config_set('http_embed_model', 'ai/nomic-embed-text-v1.5');
 ```
 *Note: Run `docker model pull ai/nomic-embed-text-v1.5` before connecting.*
 
 ### OpenAI-Compatible (OpenAI, Together AI, Fireworks, vLLM)
 ```sql
-SELECT fractalsql_set('http_url',   'https://api.openai.com/v1/chat/completions');
-SELECT fractalsql_set('http_token', 'sk-...');
-SELECT fractalsql_set('http_model', 'gpt-4o-mini');
+SELECT fractal_config_set('http_url',   'https://api.openai.com/v1/chat/completions');
+SELECT fractal_config_set('http_token', 'sk-...');
+SELECT fractal_config_set('http_model', 'gpt-4o-mini');
 
-SELECT fractalsql_set('http_embed_url',   'https://api.openai.com/v1/embeddings');
-SELECT fractalsql_set('http_embed_model', 'text-embedding-3-small');
+SELECT fractal_config_set('http_embed_url',   'https://api.openai.com/v1/embeddings');
+SELECT fractal_config_set('http_embed_model', 'text-embedding-3-small');
 ```
 
 ### AWS Bedrock
 Uses `AUTH_TYPE=aws-sigv4` via environment variables (see `docs/reasoning-setup.md`).
 
 ```sql
-SELECT fractalsql_set('http_url',       'https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions');
-SELECT fractalsql_set('http_embed_url', 'https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/embeddings');
-SELECT fractalsql_set('http_embed_model', 'amazon.titan-embed-text-v2:0');
+SELECT fractal_config_set('http_url',       'https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions');
+SELECT fractal_config_set('http_embed_url', 'https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/embeddings');
+SELECT fractal_config_set('http_embed_model', 'amazon.titan-embed-text-v2:0');
 ```
 
 ### Azure OpenAI
 Requires a **separate deployment resource** for the embedding model.
 
 ```sql
-SELECT fractalsql_set('http_url',       'https://<resource>.openai.azure.com/openai/deployments/<chat-deploy>/chat/completions?api-version=2024-02-01');
-SELECT fractalsql_set('http_embed_url', 'https://<resource>.openai.azure.com/openai/deployments/<embed-deploy>/embeddings?api-version=2024-02-01');
+SELECT fractal_config_set('http_url',       'https://<resource>.openai.azure.com/openai/deployments/<chat-deploy>/chat/completions?api-version=2024-02-01');
+SELECT fractal_config_set('http_embed_url', 'https://<resource>.openai.azure.com/openai/deployments/<embed-deploy>/embeddings?api-version=2024-02-01');
 ```
 
 ### Google Vertex AI
@@ -206,8 +206,8 @@ Point the embed path at the `openapi/v1/embeddings` surface of your project's
 region endpoint.
 
 ```sql
-SELECT fractalsql_set('http_embed_url',   'https://{LOCATION}-aiplatform.googleapis.com/v1/projects/{PROJECT}/locations/{LOCATION}/endpoints/openapi/embeddings');
-SELECT fractalsql_set('http_embed_model', 'text-embedding-005');
+SELECT fractal_config_set('http_embed_url',   'https://{LOCATION}-aiplatform.googleapis.com/v1/projects/{PROJECT}/locations/{LOCATION}/endpoints/openapi/embeddings');
+SELECT fractal_config_set('http_embed_model', 'text-embedding-005');
 ```
 
 ---

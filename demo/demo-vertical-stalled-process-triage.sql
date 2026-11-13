@@ -38,7 +38,7 @@
 --     the build_test kit gate greps for it.
 
 .print === 0. Sanity check: extension loaded? ===
-SELECT fractalsql_edition(), fractalsql_version();
+SELECT fractal_edition(), fractal_version();
 
 .print
 .print === 1. 36 items: segment, stage and item-health vector ===

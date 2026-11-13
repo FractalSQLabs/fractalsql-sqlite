@@ -6,7 +6,7 @@
 --
 -- No restart needed -- still in FSQL_REASONING_HTTP_RESPONSE_MODE=text
 -- from part 2. Review-only, no generate/explain/execute. Uses
--- whichever model fractalsql_get('http_model') returns in this
+-- whichever model fractal_config_get('http_model') returns in this
 -- session (re-apply the same load_fractalsql.sql snippet as parts
 -- 1-3), same as parts 1-3.
 --
@@ -30,7 +30,7 @@ CREATE TABLE spike_negative_control (
 );
 
 INSERT INTO spike_negative_control (model, sql_text) VALUES (
-    COALESCE(fractalsql_get('http_model'), '(model-unset)'),
+    COALESCE(fractal_config_get('http_model'), '(model-unset)'),
     'SELECT service, severity, COUNT(*) FROM demo_alerts GROUP BY service, severity;'
 );
 
@@ -46,7 +46,7 @@ Candidate SQL:
 ' || sql_text || '
 
 Does this candidate correctly implement the stated rule -- specifically, does it correctly EXCLUDE services with no critical-severity alerts, not just show all services grouped by severity? Answer PASS or FAIL on the first line, then explain briefly.'
-) WHERE model = COALESCE(fractalsql_get('http_model'), '(model-unset)');
+) WHERE model = COALESCE(fractal_config_get('http_model'), '(model-unset)');
 
 .print === Review of the WRONG candidate ===
 SELECT model, review FROM spike_negative_control;

@@ -42,7 +42,7 @@ cd "$(dirname "$0")/.."
 
 # Single-source-of-truth: derive from FSQL_SQLITE_VERSION_STR, same
 # pattern as package-darwin.sh, rather than a hardcoded copy that can
-# (and did) drift out of sync with what fractalsql_version() returns.
+# (and did) drift out of sync with what fractal_version() returns.
 VERSION="$(sed -n 's/^#define FSQL_SQLITE_VERSION_STR   "\(.*\)"$/\1/p' src/fsql_sqlite_internal.h)"
 [[ -n "${VERSION}" ]] || { echo "could not determine VERSION (FSQL_SQLITE_VERSION_STR not found in src/fsql_sqlite_internal.h)" >&2; exit 1; }
 ITERATION="1"
@@ -141,18 +141,18 @@ glibc (or musl) / libm / libdl / libpthread.
 Quick start:
   sqlite3 mydb.sqlite \\
       -cmd ".load ./fractalsql" \\
-      -cmd "SELECT fractalsql_edition();"      -- 'Community'
+      -cmd "SELECT fractal_edition();"      -- 'Community'
   sqlite3 mydb.sqlite \\
       -cmd ".load ./fractalsql" \\
-      -cmd "SELECT fractalsql_version();"      -- '${VERSION}'
+      -cmd "SELECT fractal_version();"      -- '${VERSION}'
 
 SQL surface (2.0):
-  fractalsql_edition()               TEXT
-  fractalsql_version()               TEXT
+  fractal_edition()               TEXT
+  fractal_version()               TEXT
   fractal_search(vector, query)      REAL  (cosine distance to SFS-refined query)
   fractal_search_explore(emb, query)        TEXT  (Scout-mode SFS aggregate)
   fractal_vector + 15 vector-math functions (canonical BLOB type)
-  fractalsql_set / fractalsql_get    per-connection configuration
+  fractal_config_set / fractal_config_get    per-connection configuration
   Sovereign tier (with fractalsql-reasoning-http configured):
     fractal_reason, fractal_text_to_sql, fractal_schema_context,
     fractal_embed, fractal_vectorizer_*, agent + telemetry surface,
@@ -285,7 +285,7 @@ fractalsql-sqlite Community installed at:
 Load with:
     sqlite3 mydb.sqlite \
         -cmd ".load /usr/local/lib/sqlite3/fractalsql" \
-        -cmd "SELECT fractalsql_edition();"
+        -cmd "SELECT fractal_edition();"
 
 EOF
 POSTIN

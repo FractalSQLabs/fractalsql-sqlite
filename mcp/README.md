@@ -92,8 +92,8 @@ deploy:
 - Need per-tenant isolation? Run one MCP server instance per tenant-scoped
   database file. That is the boundary SQLite itself offers; the plugin does
   not invent an in-engine mechanism that does not exist.
-- Run admin/config tools (`fractalsql_set_config`,
-  `fractalsql_configure_reasoning`) against a separately-scoped server
+- Run admin/config tools (`fractal_config_set`,
+  `fractal_configure_reasoning`) against a separately-scoped server
   instance from ordinary tool traffic; the server soft-warns once when they
   share a connection.
 - `auto_execute` defaults to false on the SQL-writing agents and requires an

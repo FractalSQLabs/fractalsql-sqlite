@@ -22,8 +22,8 @@ Or from the CLI:
 
     sqlite3 mydb.sqlite \
         -cmd ".load /usr/local/lib/sqlite3/fractalsql" \
-        -cmd "SELECT fractalsql_edition();"        -- 'Community'
-        -cmd "SELECT fractalsql_version();"        -- '2.0.6'
+        -cmd "SELECT fractal_edition();"        -- 'Community'
+        -cmd "SELECT fractal_version();"        -- '2.0.6'
 
 Example top-k query:
 

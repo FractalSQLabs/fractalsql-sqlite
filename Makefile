@@ -13,7 +13,7 @@
 #          make CORE_VARIANT=community-minimal-c   (degraded surface)
 # Install: sudo make install
 # Try it:  sqlite3 -cmd ".load ./fractalsql" \
-#              -cmd "SELECT fractalsql_edition();"
+#              -cmd "SELECT fractal_edition();"
 
 CC ?= cc
 
@@ -132,7 +132,7 @@ endif
 # the normal build. (clean doesn't remove src/*.gcda; build_test.sh
 # clears those itself at the start of a coverage run.)
 ifdef COVERAGE
-  CFLAGS  := $(CFLAGS) -O1 -g --coverage
+  CFLAGS  := $(CFLAGS) -O1 -g --coverage -fprofile-update=atomic
   LDFLAGS := $(LDFLAGS) --coverage
 endif
 

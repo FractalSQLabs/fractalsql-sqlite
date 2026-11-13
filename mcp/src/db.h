@@ -23,8 +23,8 @@ namespace fsqlmcp
     // The plugin's own version, and the engine surface version it was
     // built and tested against (version numbers track the engine).
     static const char* const kMcpPluginName       = "fractalsql-sqlite-mcp";
-    static const char* const kMcpPluginVersion    = "2.0.12";
-    static const char* const kEngineVersionExpect = "2.0.12";
+    static const char* const kMcpPluginVersion    = "2.0.13";
+    static const char* const kEngineVersionExpect = "2.0.13";
 
     using SqlValue = std::variant<std::nullptr_t, std::int64_t, double, std::string,
                                   std::vector<std::uint8_t>>;
@@ -288,7 +288,7 @@ namespace fsqlmcp
         {
             try
             {
-                exec( "SELECT fractalsql_set('agent_partial_reasoning_fail','on')" );
+                exec( "SELECT fractal_config_set('agent_partial_reasoning_fail','on')" );
             }
             catch( const std::exception& e )
             {
@@ -333,7 +333,7 @@ namespace fsqlmcp
         {
             try
             {
-                const SqlValue v = callScalar( "SELECT fractalsql_version()", {} );
+                const SqlValue v = callScalar( "SELECT fractal_version()", {} );
                 const auto t = asText( v );
                 if( t && *t != engineVersionExpected )
                 {
@@ -441,7 +441,7 @@ namespace fsqlmcp
                 // Dot-command lines carry no ';', so they share a chunk with
                 // whatever real statement follows; dropping the whole chunk
                 // would silently lose that statement (a .load-headed
-                // bootstrap snippet must still run its first fractalsql_set).
+                // bootstrap snippet must still run its first fractal_config_set).
                 // Walk only the leading dot LINES off the chunk instead.
                 std::size_t p = start;
                 while( p < s.size() && s[ p ] == '.' )

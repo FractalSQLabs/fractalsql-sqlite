@@ -44,7 +44,7 @@ start and nothing to enable by init: an SQLite extension is a file you
 ```bash
 sqlite3 :memory: \
   -cmd ".load ./dist/amd64/fractalsql" \
-  "SELECT fractalsql_edition(), fractalsql_version();"
+  "SELECT fractal_edition(), fractal_version();"
 ```
 
 You should see:
@@ -115,11 +115,11 @@ cloud). Configuration is per-connection — there are no global config keys — 
 way is the `load_fractalsql.sql` snippet (below) passed to every session:
 
 ```sql
-SELECT fractalsql_set('reasoning_plugin',
+SELECT fractal_config_set('reasoning_plugin',
                       '/usr/local/lib/sqlite3/fractalsql-reasoning-http.so');
-SELECT fractalsql_set('http_url',             'http://127.0.0.1:11434/v1/chat/completions');
-SELECT fractalsql_set('http_allow_plaintext', 'on');
-SELECT fractalsql_set('http_model',           'gpt-oss:20b');
+SELECT fractal_config_set('http_url',             'http://127.0.0.1:11434/v1/chat/completions');
+SELECT fractal_config_set('http_allow_plaintext', 'on');
+SELECT fractal_config_set('http_model',           'gpt-oss:20b');
 
 SELECT fractal_reason('Reply with exactly: FSQL_LIVE_OK') AS reply;
 ```
@@ -132,8 +132,8 @@ The embedder works the same way (it powers the vectorizer and any
 RAG-style agent):
 
 ```sql
-SELECT fractalsql_set('http_embed_url',   'http://127.0.0.1:11434/v1/embeddings');
-SELECT fractalsql_set('http_embed_model', 'nomic-embed-text');
+SELECT fractal_config_set('http_embed_url',   'http://127.0.0.1:11434/v1/embeddings');
+SELECT fractal_config_set('http_embed_model', 'nomic-embed-text');
 
 SELECT fractal_vector_dims(fractal_embed('hello world')) AS embed_dim;
 --  768
@@ -165,7 +165,7 @@ SELECT fractal_rag_agent(
 For the full walk of every primitive (search → reason, text-to-SQL,
 verticals), the demo scripts ship in `demo/` of the repository, already
 adapted to this integration's real syntax and function surface (`.load`,
-`fractalsql_set`, CSV/JSON-TEXT or `fractal_vector` BLOB vectors — not
+`fractal_config_set`, CSV/JSON-TEXT or `fractal_vector` BLOB vectors — not
 carried over unmodified from the original port) — run them directly, e.g. `sqlite3 -cmd ".load
 ./dist/amd64/fractalsql" ":memory:" ".read demo/demo-agents.sql"`.
 
@@ -210,7 +210,7 @@ never phones home: no telemetry, no usage reporting, all of it stays local
 to your box.
 
 Pass the snippet to every session — configuration is per-connection, so the
-snippet (a `.load` line plus the `fractalsql_set` calls) is the standard way
+snippet (a `.load` line plus the `fractal_config_set` calls) is the standard way
 to apply it:
 
 ```bash
@@ -261,7 +261,7 @@ sudo install -m0644 fractalsql-reasoning-http.so.sig /usr/local/lib/sqlite3/
 # then, per session: .load /usr/local/lib/sqlite3/fractalsql
 ```
 
-Reasoning provider configuration (the `fractalsql_set` lines `easy_install`
+Reasoning provider configuration (the `fractal_config_set` lines `easy_install`
 writes for you in Option A) is documented step by step in
 **[docs/reasoning-setup.md](reasoning-setup.md)**.
 

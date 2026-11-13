@@ -220,7 +220,7 @@ namespace fsqlmcp
             "fractal_agent_feedback_audit",
             "fractal_agent_recommend_diverse",
             "fractal_session_close",
-            "fractalsql_session_config_reset",
+            "fractal_config_reset",
             "fractal_lock_destructive",
             "fractal_store_vectors",
             "fractal_store_series",

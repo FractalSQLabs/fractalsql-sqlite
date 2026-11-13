@@ -283,11 +283,11 @@ static int fsqlv_embed(FsqlState *st, const char *text,
     *out_bytes = 0;
 
     /* Config is per-connection SQL state, so the hint below names
-     * fractalsql_set(). */
+     * fractal_config_set(). */
     if (!st->cfg.reasoning_plugin || !*st->cfg.reasoning_plugin) {
         fsqlv_set_err(err, err_cap,
                       "fractalsql: reasoning plugin not configured (set "
-                      "fractalsql_set('reasoning_plugin', '/absolute/path'))");
+                      "fractal_config_set('reasoning_plugin', '/absolute/path'))");
         return -1;
     }
     /* No fallback to the chat http_url: a chat model is not a
@@ -296,7 +296,7 @@ static int fsqlv_embed(FsqlState *st, const char *text,
     if (!st->cfg.http_embed_url || !*st->cfg.http_embed_url) {
         fsqlv_set_err(err, err_cap,
                       "fractal_embed: http_embed_url is not configured (set "
-                      "fractalsql_set('http_embed_url', "
+                      "fractal_config_set('http_embed_url', "
                       "'https://.../v1/embeddings'))");
         return -1;
     }
@@ -581,6 +581,65 @@ static int fsqlv_find_pk(const FsqlState *st, const char *src_ident,
     return 0;
 }
 
+/* Checks that the text and embedding columns exist in the source
+ * table, using the same PRAGMA table_info introspection the
+ * primary-key check uses (column names match the way SQLite matches
+ * them, case-insensitively). Returns 0 when both exist, -1 with a
+ * message in err naming the missing column and the table. */
+static int fsqlv_check_columns(const FsqlState *st, const char *src_ident,
+                               const char *tcol, const char *ecol,
+                               char *err, size_t err_cap) {
+    char qtbl[600];
+    if (fsqlv_quote_ident(qtbl, sizeof qtbl, src_ident, 1) != 0) {
+        fsqlv_set_err(err, err_cap, "fractalsql: invalid identifier");
+        return -1;
+    }
+
+    char sql[768];
+    if (fsqlv_pragma_table_info_sql(src_ident, qtbl, sql, sizeof sql,
+                                    err, err_cap) != 0) {
+        return -1;
+    }
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(st->db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        fsqlv_set_err(err, err_cap,
+                      "fractal_vectorizer_create: source table \"%s\" does "
+                      "not exist (%s)", src_ident, sqlite3_errmsg(st->db));
+        return -1;
+    }
+
+    int have_t = 0, have_e = 0;
+    int rc;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const char *name = (const char *)sqlite3_column_text(stmt, 1);
+        if (!name) continue;
+        if (!have_t && sqlite3_stricmp(name, tcol) == 0) have_t = 1;
+        if (!have_e && sqlite3_stricmp(name, ecol) == 0) have_e = 1;
+        if (have_t && have_e) break;
+    }
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
+        fsqlv_set_err(err, err_cap, "fractal_vectorizer_create: %s",
+                      sqlite3_errmsg(st->db));
+        return -1;
+    }
+
+    if (!have_t) {
+        fsqlv_set_err(err, err_cap,
+                      "fractal_vectorizer_create: column \"%s\" does not "
+                      "exist in table \"%s\"", tcol, src_ident);
+        return -1;
+    }
+    if (!have_e) {
+        fsqlv_set_err(err, err_cap,
+                      "fractal_vectorizer_create: column \"%s\" does not "
+                      "exist in table \"%s\"", ecol, src_ident);
+        return -1;
+    }
+    return 0;
+}
+
 /* A vectorizer's caller-supplied columns and their validated, quoted
  * forms, shared by the create path and the per-row queue processor
  * (the two buffers a dotted table name needs plus the two column
@@ -761,6 +820,15 @@ static void fsqlv_create_fn(sqlite3_context *ctx, int argc,
     }
     if (fsqlv_quote_ident(q.pk, sizeof q.pk, pk_col, 0) != 0) {
         sqlite3_result_error(ctx, "fractalsql: invalid identifier", -1);
+        return;
+    }
+
+    /* The text and embedding columns must exist in the source table:
+     * a vectorizer over a column that is not there can never process a
+     * row, so it is refused here rather than at queue time. */
+    if (fsqlv_check_columns(st, c.src, c.tcol, c.ecol,
+                            err, sizeof err) != 0) {
+        sqlite3_result_error(ctx, err, -1);
         return;
     }
 

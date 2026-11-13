@@ -151,9 +151,9 @@ namespace fsqlmcp
         t.back().idempotentHint = true;
 
         t.push_back( ToolSpec{ "fractal_diversify_set_params", "Discovery", ToolClass::Cheap,
-            { NullableNum("window_n", "Diversify window size."), NullableNum("stall_threshold", "Stall threshold."),
-              NullableNum("repulsion_sigma", "Repulsion sigma."), NullableNum("repulsion_weight", "Repulsion weight."),
-              NullableNum("max_shadows_considered", "Max shadows considered."), NullableNum("tail_buffer_cap", "Tail buffer cap.") },
+            { Int("window_n", false, "Diversify window size."), Num("stall_threshold", false, "Stall threshold."),
+              Num("repulsion_sigma", false, "Repulsion sigma."), Num("repulsion_weight", false, "Repulsion weight."),
+              Int("max_shadows_considered", false, "Max shadows considered."), Int("tail_buffer_cap", false, "Tail buffer cap.") },
             std::nullopt, false, false,
             [&db]( const Json& a, CallCtx& ) {
                 Json body = Json::object();

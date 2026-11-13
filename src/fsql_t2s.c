@@ -1300,7 +1300,7 @@ static void t2s_fn(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
     if (!st->cfg.reasoning_plugin || !*st->cfg.reasoning_plugin) {
         sqlite3_result_error(ctx,
             "fractalsql: reasoning plugin not configured (set "
-            "fractalsql_set('reasoning_plugin', '/absolute/path'))", -1);
+            "fractal_config_set('reasoning_plugin', '/absolute/path'))", -1);
         return;
     }
 

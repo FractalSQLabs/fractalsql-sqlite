@@ -11,7 +11,7 @@ anything on fire" gate to run after every build.
 
 The extension is loaded into a stdlib-sqlite3 connection
 (_t2s_common.connect_or_skip); the reasoning plugin and endpoint are
-configured per-connection with fractalsql_set(). That configuration
+configured per-connection with fractal_config_set(). That configuration
 takes effect IMMEDIATELY on the connection that set it -- and a
 reconnect would RESET it -- so every scenario configures the very
 connection it calls fractal_text_to_sql() on.

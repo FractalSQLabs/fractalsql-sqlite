@@ -17,10 +17,10 @@
 --
 -- Prerequisites: extension installed (sections 0-5 need nothing else).
 -- Section 6 calls fractal_reason() -- see ../docs/reasoning-setup.md
--- (per-connection fractalsql_set state, so re-apply your
+-- (per-connection fractal_config_set state, so re-apply your
 -- load_fractalsql.sql snippet with -init).
 --
--- Run (one invocation -- fractalsql_set state is per-connection):
+-- Run (one invocation -- fractal_config_set state is per-connection):
 --   sqlite3 -cmd ".load /usr/local/lib/sqlite3/fractalsql" ":memory:" \
 --     ".read demo/demo-vertical-sovereign-edge-ai.sql"
 --
@@ -47,7 +47,7 @@
 .timer on
 
 .print === 0. Sanity check: extension + edition loaded? ===
-SELECT fractalsql_edition(), fractalsql_version();
+SELECT fractal_edition(), fractal_version();
 
 -- ------------------------------------------------------------------
 -- 1. 50 edge-compute nodes with a 5-dim resource-capability vector:

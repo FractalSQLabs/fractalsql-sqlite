@@ -35,7 +35,7 @@ REM the output filename. release.yml passes it from the release tag.
 REM No env var means a plain local run (or install-test.yml's default):
 REM fall back to the version string the extension itself reports
 REM (FSQL_SQLITE_VERSION_STR in src\fsql_sqlite_internal.h, which
-REM fractalsql_version() returns), so the MSI never drifts from the
+REM fractal_version() returns), so the MSI never drifts from the
 REM DLL it wraps.
 if not "%MSI_VERSION%"=="" goto have_version
 REM findstr's space-separated args are OR'ed patterns; /C: is required
@@ -58,7 +58,7 @@ if not exist "dist\windows\README.txt" (
       echo After install, load the extension in any SQLite session:
       echo.
       echo     sqlite3 mydb.sqlite -cmd ".load fractalsql" ^
-          -cmd "SELECT fractalsql_edition();"
+          -cmd "SELECT fractal_edition();"
       echo.
       echo By default the installer prepends the install folder to
       echo the system PATH so `.load fractalsql` resolves without a

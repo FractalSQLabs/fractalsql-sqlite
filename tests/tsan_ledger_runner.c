@@ -122,7 +122,7 @@ open_ledger_conn(sqlite3 **out, char *err, size_t err_cap)
     sqlite3_exec(db, "PRAGMA busy_timeout=5000", NULL, NULL, NULL);
 
     snprintf(sql, sizeof sql,
-             "SELECT fractalsql_set('enterprise_lib', '%s')", g_ent_lib);
+             "SELECT fractal_config_set('enterprise_lib', '%s')", g_ent_lib);
     errmsg = NULL;
     if (sqlite3_exec(db, sql, NULL, NULL, &errmsg) != SQLITE_OK) {
         snprintf(err, err_cap, "enterprise_lib: %s",

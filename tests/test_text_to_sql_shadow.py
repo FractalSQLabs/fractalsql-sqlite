@@ -16,7 +16,7 @@ real built feature instead of a hand-rolled spike.
 
 SQLite port: stdlib sqlite3 via _t2s_common (no psycopg2, no DSN), the
 single-argument fractal_text_to_sql(question) surface, and
-per-connection fractalsql_set() configuration set on the very
+per-connection fractal_config_set() configuration set on the very
 connection that makes the call.
 
 Per-model outcomes:

@@ -72,7 +72,7 @@ and application code: no server-side language required.
 - **Analytics**: fractal/dimension primitives: `fractal_dimension_dfa`, `fractal_dimension_boxcount`, `fractal_optimize_portfolio`, and more.
 
 Plus SQLite-native plumbing: `fractal_vector` as a canonical BLOB type,
-`fractalsql_set()`/`fractalsql_get()` per-connection configuration, the background
+`fractal_config_set()`/`fractal_config_get()` per-connection configuration, the background
 `fractal_vectorizer` embedding pipeline, and the tamper-evident
 `fractal_ledger_*` audit surface. The full function-surface reference with
 runnable examples lives in [sql/fractalsql--1.0.sql](sql/fractalsql--1.0.sql).
@@ -118,7 +118,7 @@ for macOS (arm64/x86_64). `easy_install.sh` (Linux/macOS) and
 `easy_install.ps1` (Windows) wrap all of these behind one interactive
 wizard; no telemetry, everything stays local.
 
-Because configuration is per-connection (`fractalsql_set`, since SQLite has no
+Because configuration is per-connection (`fractal_config_set`, since SQLite has no
 GUCs to persist), the wizard writes a `load_fractalsql.sql` bootstrap
 snippet you pass to every session: `sqlite3 -init load_fractalsql.sql mydb.sqlite`.
 

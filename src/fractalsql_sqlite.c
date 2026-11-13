@@ -10,8 +10,8 @@
  * Entry point: `sqlite3_fractalsql_init` (matches `.load fractalsql`).
  *
  * Registered here (smoke + search surface):
- *   fractalsql_edition() -> TEXT      "Community"
- *   fractalsql_version() -> TEXT      "2.0.0"
+ *   fractal_edition() -> TEXT      "Community"
+ *   fractal_version() -> TEXT      "2.0.0"
  *   fractal_search(vector, query) -> DOUBLE
  *   fractal_search_explore(emb, query [, params]) -> TEXT (aggregate, Scout)
  * Remaining modules register from their own TUs (see
@@ -69,7 +69,7 @@ FsqlState *fsql_state_create(sqlite3 *db, char **pzErrMsg) {
     st->db = db;
 
     /* Start every connection from the documented defaults, so a session
-     * that never calls fractalsql_set() still gets them: the text-to-SQL
+     * that never calls fractal_config_set() still gets them: the text-to-SQL
      * attempt budget of 2 (a rejected candidate is regenerated once with
      * the rejection fed back), the "select" statement allowlist, and the
      * documented zero for the remaining numeric and boolean keys. */
@@ -86,7 +86,7 @@ FsqlState *fsql_state_create(sqlite3 *db, char **pzErrMsg) {
      * cfg->response_mode -- and re-asserts it after a T2S-tier load
      * that failed partway could otherwise leave that tier's forced
      * "code" value sitting in the process environment. Env-only by
-     * design (no fractalsql_set key), only ever set in the service
+     * design (no fractal_config_set key), only ever set in the service
      * environment, as docs/reasoning-setup.md documents. A new connection (new FsqlState) picks up a changed
      * value; a live one keeps the value it booted with. */
     {
@@ -592,12 +592,12 @@ int sqlite3_fractalsql_init(sqlite3 *db, char **pzErrMsg,
     /* Smoke surface. fractal_search owns the state (xDestroy); every
      * later registration passes NULL to avoid a double-free. */
     rc = sqlite3_create_function_v2(
-        db, "fractalsql_edition", 0, flags, NULL,
+        db, "fractal_edition", 0, flags, NULL,
         edition_fn, NULL, NULL, NULL);
     if (rc != SQLITE_OK) { fsql_state_destroy(st); return rc; }
 
     rc = sqlite3_create_function_v2(
-        db, "fractalsql_version", 0, flags, NULL,
+        db, "fractal_version", 0, flags, NULL,
         version_fn, NULL, NULL, NULL);
     if (rc != SQLITE_OK) { fsql_state_destroy(st); return rc; }
 

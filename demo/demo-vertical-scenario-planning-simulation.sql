@@ -51,7 +51,7 @@ SELECT 'SELECT fractal_vectorizer_drop(id) FROM fractal_vectorizers
 .timer on
 
 .print === 0. Sanity check: extension loaded? ===
-SELECT fractalsql_edition(), fractalsql_version();
+SELECT fractal_edition(), fractal_version();
 
 -- ------------------------------------------------------------------
 -- 1. 24 candidate scenarios in four clusters of six.  Coordinates are

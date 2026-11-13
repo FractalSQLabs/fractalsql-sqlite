@@ -48,7 +48,7 @@
 -- Prerequisites:
 --   1. The extension loaded (`.load <path to fractalsql>`).
 --   2. Reasoning configured for the cognition sections -- see
---      ../docs/reasoning-setup.md (per-connection fractalsql_set state,
+--      ../docs/reasoning-setup.md (per-connection fractal_config_set state,
 --      so re-apply your load_fractalsql.sql snippet with -init). Confirm:
 --        SELECT fractal_reason('reply with a short confirmation');
 -- Re-runnable: agents_demo_* tables are dropped and recreated at the top
@@ -60,7 +60,7 @@
 -- 0. Prerequisite check -- the surface (the agent tier compiles into the
 -- same DLL; its composite-blueprint sections below resolve against it).
 .print === 0. Surface check: base + agent tier ===
-SELECT fractalsql_edition(), fractalsql_version();
+SELECT fractal_edition(), fractal_version();
 
 -- 1. Setup: a drifting metric time series for one host.
 -- Same step-up shape as demo-vertical-agentic-ops-devops.sql: a baseline ~50 for

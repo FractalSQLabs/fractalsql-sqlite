@@ -121,7 +121,7 @@ namespace fsqlmcp
 
         t.push_back( ToolSpec{ "fractal_agent_allocate", "Agency", ToolClass::Expensive,
             { Vec("mu",true,"Expected returns."), Vec("cov",true,"Flattened 1-D row-major n x n covariance."),
-              Int("cardinality",true,"Max nonzero assets."), NullableStr("context","Optional JSON context.") },
+              Int("cardinality",true,"Max nonzero assets."), Str("context",false,"Optional JSON context.") },
             std::nullopt, false, false,
             [&db]( const Json& a, CallCtx& ) { return callAgent( db, "SELECT fractal_agent_allocate(?,?,?,?)",
                 { vectors::vectorParamToText( a.at("mu"), "mu" ), vectors::vectorParamToText( a.at("cov"), "cov" ),
@@ -136,7 +136,7 @@ namespace fsqlmcp
         t.push_back( ToolSpec{ "fractal_agent_rebalance_sibling", "Agency", ToolClass::Expensive,
             { Vec("mu",true,"Expected returns."), Vec("cov",true,"Flattened covariance."), Int("cardinality",true,"Max nonzero assets."),
               Str("alloc_table",true,"Allocation-snapshots table."), Str("alloc_emb_col",true,"Allocation embedding column."),
-              Vec("baseline_vec",true,"Baseline allocation vector."), NullableNum("seed","RNG seed."),
+              Vec("baseline_vec",true,"Baseline allocation vector."), Int("seed",false,"RNG seed."),
               Int("k",false,"Neighbors.",5), Str("id_col",false,"Row id column.","id"), Str("context",false,"Optional JSON context.","{}") },
             std::nullopt, false, false,
             [&db]( const Json& a, CallCtx& ) { return callAgent( db, "SELECT fractal_agent_rebalance_sibling(?,?,?,?,?,?,?,?,?,?)",
@@ -144,7 +144,7 @@ namespace fsqlmcp
                   a.at("cardinality").get<std::int64_t>(),
                   a.at("alloc_table").get<std::string>(), a.at("alloc_emb_col").get<std::string>(),
                   vectors::vectorParamToText( a.at("baseline_vec"), "baseline_vec" ),
-                  a.contains("seed") && !a.at("seed").is_null() ? SqlValue( a.at("seed").get<double>() ) : SqlValue( nullptr ),
+                  a.contains("seed") && !a.at("seed").is_null() ? SqlValue( static_cast<double>( a.at("seed").get<std::int64_t>() ) ) : SqlValue( nullptr ),
                   a.value( "k", 5 ), a.value( "id_col", std::string( "id" ) ),
                   a.value( "context", std::string( "{}" ) ) } ); } } );
         t.back().description = std::string( "Rebalance a portfolio and compare it to the nearest historical "
@@ -156,7 +156,7 @@ namespace fsqlmcp
         t.push_back( ToolSpec{ "fractal_agent_diverse_portfolios", "Agency", ToolClass::Expensive,
             { Vec("mu",true,"Expected returns."), Vec("cov",true,"Flattened covariance."), Int("cardinality",true,"Max nonzero assets."),
               Int("n_restarts",false,"Independent restarts.",8), Num("overlap_threshold",false,"Asset-overlap threshold.",0.15),
-              Num("quality_frac",false,"Quality fraction gate.",0.90), NullableNum("seed","RNG seed."),
+              Num("quality_frac",false,"Quality fraction gate.",0.90), Int("seed",false,"RNG seed."),
               Str("context",false,"Optional JSON context.","{}"),
               StrEnum("objective_mode",false,"'sharpe' or 'pareto'.","sharpe") },
             std::nullopt, false, false,
@@ -164,7 +164,7 @@ namespace fsqlmcp
                 { vectors::vectorParamToText( a.at("mu"), "mu" ), vectors::vectorParamToText( a.at("cov"), "cov" ),
                   a.at("cardinality").get<std::int64_t>(),
                   a.value( "n_restarts", 8 ), a.value( "overlap_threshold", 0.15 ), a.value( "quality_frac", 0.90 ),
-                  a.contains("seed") && !a.at("seed").is_null() ? SqlValue( a.at("seed").get<double>() ) : SqlValue( nullptr ),
+                  a.contains("seed") && !a.at("seed").is_null() ? SqlValue( static_cast<double>( a.at("seed").get<std::int64_t>() ) ) : SqlValue( nullptr ),
                   a.value( "context", std::string( "{}" ) ), a.value( "objective_mode", std::string( "sharpe" ) ) } ); } } );
         t.back().description = std::string( "Several structurally distinct good portfolios instead of one best "
             "estimate: multi-restart diverse-candidate optimizer (sharpe-threshold+overlap, or NSGA-II 'pareto' "
@@ -271,9 +271,9 @@ namespace fsqlmcp
 
         t.push_back( ToolSpec{ "fractal_agent_recall_hybrid", "Agency", ToolClass::Cheap,
             { Str("mem_table",true,"Memory table."), Str("vec_col",true,"Embedding column."), Vec("query_vec",true,"Query vector."),
-              NullableStr("filter_col","Metadata filter column."), NullableStr("filter_val","Metadata filter value."),
+              Str("filter_col",false,"Metadata filter column."), Str("filter_val",false,"Metadata filter value."),
               Int("k",false,"Neighbors.",5), Str("id_col",false,"Row id column.","id"),
-              NullableStr("content_col","Content column to return.") },
+              Str("content_col",false,"Content column to return.") },
             std::nullopt, false, true,
             [&db]( const Json& a, CallCtx& ) {
                 auto nstr = [&]( const char* k ) {
@@ -380,20 +380,21 @@ namespace fsqlmcp
             { Str("table_name",true,"Table with a single-column primary key."), Str("vector_col",true,"Embedding column."),
               Int("baseline_id",true,"Baseline row's primary key."),
               Int("forecast_steps",true,"Reserved for a future extrapolation step.") },
-            std::nullopt, false, false,
+            std::nullopt, false, true,
             [&db]( const Json& a, CallCtx& ) { return callAgent( db, "SELECT fractal_agent_trajectory_predict(?,?,?,?)",
                 { a.at("table_name").get<std::string>(), a.at("vector_col").get<std::string>(),
                   a.at("baseline_id").get<std::int64_t>(), a.at("forecast_steps").get<std::int64_t>() } ); } } );
         t.back().description = std::string( "Forecast state by matching the drift delta (current - baseline) "
             "against a table's own history. Returns {predicted_state_vector, projected_drift_delta, "
             "risk_threshold_exceeded}." );
+        t.back().idempotentHint = true;   // reads the table and forecasts; writes nothing
 
         // Read-only: pure computation over the caller's state_log; it writes
         // no table and calls no provider.
         t.push_back( ToolSpec{ "fractal_agent_detect_loop", "Agency", ToolClass::Cheap,
             { Str("agent_id",true,"Agent identifier."), Vec("state_log",true,"Row-major n_states*dim doubles."),
               Int("dim",true,"State dimension."), Int("n_bits",false,"SimHash bits.",64),
-              Num("seed",false,"SimHash seed.",42.0), Int("hamming_threshold",false,"Cycle-match Hamming tolerance.",0) },
+              Int("seed",false,"SimHash seed.",42.0), Int("hamming_threshold",false,"Cycle-match Hamming tolerance.",0) },
             std::nullopt, false, true,
             [&db]( const Json& a, CallCtx& ) { return callAgent( db, "SELECT fractal_agent_detect_loop(?,?,?,?,?,?)",
                 { a.at("agent_id").get<std::string>(), vectors::vectorParamToText( a.at("state_log"), "state_log" ),

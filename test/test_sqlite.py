@@ -4,8 +4,8 @@
 Exercises the three assertions every release must pass:
 
     1. The extension loads.
-    2. fractalsql_edition() returns 'Community'.
-       fractalsql_version() matches src/fsql_sqlite_internal.h's
+    2. fractal_edition() returns 'Community'.
+       fractal_version() matches src/fsql_sqlite_internal.h's
        FSQL_SQLITE_VERSION_STR.
     3. fractal_search(vector, query) returns a sensible distance
        ordering: the vector literally equal to the query scores a
@@ -53,7 +53,7 @@ def _expected_version() -> str:
     # Single-source-of-truth: derive from FSQL_SQLITE_VERSION_STR, same
     # pattern scripts/package.sh and scripts/package-darwin.sh use,
     # rather than a hardcoded copy that can (and did) drift out of
-    # sync with what fractalsql_version() actually returns.
+    # sync with what fractal_version() actually returns.
     import re
     header = Path(__file__).resolve().parent.parent / "src" / "fsql_sqlite_internal.h"
     text = header.read_text(encoding="utf-8")
@@ -110,13 +110,13 @@ def vec_to_csv(v) -> str:
 
 def run_checks(conn: sqlite3.Connection) -> None:
     # ----- Check 1: metadata ------------------------------------------------
-    edition = scalar(conn, "SELECT fractalsql_edition();")
+    edition = scalar(conn, "SELECT fractal_edition();")
     assert edition == EXPECTED_EDITION, (
-        f"fractalsql_edition(): expected {EXPECTED_EDITION!r}, got {edition!r}"
+        f"fractal_edition(): expected {EXPECTED_EDITION!r}, got {edition!r}"
     )
-    version = scalar(conn, "SELECT fractalsql_version();")
+    version = scalar(conn, "SELECT fractal_version();")
     assert version == EXPECTED_VERSION, (
-        f"fractalsql_version(): expected {EXPECTED_VERSION!r}, got {version!r}"
+        f"fractal_version(): expected {EXPECTED_VERSION!r}, got {version!r}"
     )
     print(f"[ok] metadata: edition={edition!r} version={version!r}")
 

@@ -32,7 +32,7 @@
 .timer off
 .once spike_candidate.sql
 SELECT 'EXPLAIN ' || sql_text FROM spike_candidates
- WHERE model = COALESCE(fractalsql_get('http_model'), '(model-unset)');
+ WHERE model = COALESCE(fractal_config_get('http_model'), '(model-unset)');
 
 .read spike_candidate.sql
 
@@ -47,7 +47,7 @@ BEGIN;
 .timer off
 .once spike_candidate.sql
 SELECT sql_text FROM spike_candidates
- WHERE model = COALESCE(fractalsql_get('http_model'), '(model-unset)');
+ WHERE model = COALESCE(fractal_config_get('http_model'), '(model-unset)');
 .read spike_candidate.sql
 .timer on
 ROLLBACK;
