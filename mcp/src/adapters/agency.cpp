@@ -320,27 +320,32 @@ namespace fsqlmcp
         t.push_back( ToolSpec{ "fractal_search_agent", "Agency", ToolClass::Expensive,
             { Str("query",true,"Natural-language query."), Str("table_name",true,"Table to search."),
               Str("vector_col",true,"Embedding column."), Int("pop_size",false,"Scout population size.",50),
-              Int("iterations",false,"Scout iterations.",15) },
+              Int("iterations",false,"Scout iterations.",15),
+              Str("meta_filter",false,"A JSON object of column: value pairs; only rows where every column equals its value are searched, e.g. {\"parent_id\": 7}.","{}") },
             std::nullopt, false, false,
-            [&db]( const Json& a, CallCtx& ) { return callAgent( db, "SELECT fractal_search_agent(?,?,?,?,?)",
+            [&db]( const Json& a, CallCtx& ) { return callAgent( db, "SELECT fractal_search_agent(?,?,?,?,?,?)",
                 { a.at("query").get<std::string>(), a.at("table_name").get<std::string>(),
                   a.at("vector_col").get<std::string>(), a.value( "pop_size", 50 ),
-                  a.value( "iterations", 15 ) } ); } } );
-        t.back().description = std::string( "End-to-end synthesis: embed a query -> Scout-search a table -> reason "
-            "over the matched rows' REAL content (never raw vectors). Returns {answer, source_doc_ids, "
-            "execution_time_ms}." ) + kReasoningAgent + kDataNote + kPartialNote;
+                  a.value( "iterations", 15 ), a.value( "meta_filter", std::string( "{}" ) ) } ); } } );
+        t.back().description = std::string( "End-to-end synthesis: embed a query -> find the nearest rows -> reason "
+            "over the matched rows' REAL content (never raw vectors). The rows come from a Scout search of the table, or from fractal_search "
+            "through an index when agent_use_index allows it. meta_filter limits the search to rows whose columns equal the given values. Returns "
+            "{answer, source_row_ids, used_index, context_cut:{cells,rows}, execution_time_ms}: source_row_ids are the real row ids, "
+            "best first, context_cut says how many text cells were cut to "
+            "agent_context_row_bytes and how many rows the size cap left out, and execution_time_ms is measured." ) + kReasoningAgent + kDataNote + kPartialNote;
         markReasoning( t.back() );
 
         t.push_back( ToolSpec{ "fractal_rag_agent", "Agency", ToolClass::Expensive,
             { Str("query",true,"Natural-language query."), Str("table_name",true,"Table to search."),
               Str("vector_col",true,"Embedding column."),
-              Str("meta_filter",false,"Reserved for a future metadata filter.","{}") },
+              Str("meta_filter",false,"A JSON object of column: value pairs; only rows where every column equals its value are searched, e.g. {\"parent_id\": 7}.","{}") },
             std::nullopt, false, false,
             [&db]( const Json& a, CallCtx& ) { return callAgent( db, "SELECT fractal_rag_agent(?,?,?,?)",
                 { a.at("query").get<std::string>(), a.at("table_name").get<std::string>(),
                   a.at("vector_col").get<std::string>(), a.value( "meta_filter", std::string( "{}" ) ) } ); } } );
-        t.back().description = std::string( "Lighter single-turn RAG sibling of fractal_search_agent: embed -> "
-            "Scout -> reason -> {answer} only." ) + kReasoningAgent + kDataNote + kPartialNote;
+        t.back().description = std::string( "Single-turn retrieve-and-answer: embed -> find the nearest rows (a Scout search, or fractal_search through an "
+            "index when agent_use_index allows it; meta_filter limits the rows searched) -> reason. Returns {answer, source_row_ids, used_index, "
+            "context_cut:{cells,rows}}." ) + kReasoningAgent + kDataNote + kPartialNote;
         markReasoning( t.back() );
 
         t.push_back( ToolSpec{ "fractal_sql_agent", "Agency", ToolClass::Expensive,

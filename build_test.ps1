@@ -19,7 +19,7 @@
       01  build              scripts\windows\build.bat (MSVC); falls back
                              to the prebuilt dist\windows\fractalsql.dll
                              when no cl/vcvars is resolvable
-      02  smoke              load + version + fractal_search convergence
+      02  smoke              load + version + fractal_sfs_converge convergence
       03  schema_context     PK / NOT NULL / FK introspection + auto-
                              discovery (no COMMENT analog -- SQLite
                              tables have no comments)
@@ -244,11 +244,45 @@ if (-not (Test-Path -LiteralPath $script:BTROOT)) {
     exit 1
 }
 
+# ---------------------------------------------------------------------------
+# One run at a time per machine. The fixture files under $BTROOT live at a
+# fixed path and a run removes them when it ends, so a second run overlapping
+# this one deletes this run's canned replies mid-gate -- and the mock plugin
+# answers a valid default when its reply file is gone, which reads like a
+# real answer. The lock is a file no other run may open; the handle is held
+# for the lifetime of the process, so it is released even on a kill. The name
+# is shared with the other hosts that use the same fixture files.
+# ---------------------------------------------------------------------------
+$script:LockFile = Join-Path $script:BTROOT 'fractalsql_bt.lock'
+# The lock file itself cannot be read while it is held (that is the point of
+# it), so the owner records who it is in a second, readable file: a refused
+# run can then say WHO to wait for instead of just that something holds it.
+$script:LockOwner = Join-Path $script:BTROOT 'fractalsql_bt.lock.owner'
+$script:LockHandle = $null
+function Acquire-RunLock {
+    for ($i = 0; $i -lt 20; $i++) {
+        try {
+            $script:LockHandle = [IO.File]::Open($script:LockFile, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+            try {
+                [IO.File]::WriteAllText($script:LockOwner,
+                    ("pid " + $PID + " started " + (Get-Date).ToString("yyyy-MM-dd HH:mm:ss") + " on " + $env:COMPUTERNAME))
+            }
+            catch { }
+            return $true
+        }
+        catch { Start-Sleep -Milliseconds 250 }
+    }
+    return $false
+}
+function Get-LockHolder {
+    try { return [IO.File]::ReadAllText($script:LockOwner).Trim() } catch { return '' }
+}
+
 $script:DEFAULT_GATES = @('01', '02', '03', '04', '05', '06', '07', '08', '09', '10',
                           '11', '12', '13', '14', '15', '16', '17', '18', '19', '20',
                           '22', '23', '24', '25', '26', '27', '28', '29', '30', '31',
                           '32', '35', '36', '37', '38', '39', '40', '41', '42', '43',
-                          '45')
+                          '45', '52', '53', '54', '55')
 $script:QUICK_GATES = @('01', '02')
 $script:FUZZ_GATES = @('21', '44')
 
@@ -329,6 +363,7 @@ $script:EvilTrig = Join-Path $script:BTROOT 'fractalsql_bt_evil_trigger_call.txt
 $script:RetryPrompt = Join-Path $script:BTROOT 'fractalsql_bt_retry_prompt.txt'
 $script:ThinkDump = Join-Path $script:BTROOT 'fractalsql_bt_think_dump.txt'
 $script:ReviewDump = Join-Path $script:BTROOT 'fractalsql_bt_review_env_dump.txt'
+$script:ReqDump = Join-Path $script:BTROOT 'fractalsql_bt_last_request.txt'
 # tests\windows\evil_nonterminating_plugin_win.c reads its trigger file
 # through a bare CWD-relative name; sqlite3.exe's CWD is the repo root, so
 # gate 05 mirrors the trigger file there too (cleaned up below).
@@ -339,10 +374,22 @@ function Invoke-Cleanup {
         cmd /c "rmdir /s /q $script:PlugDir" 2>$null | Out-Null
     }
     foreach ($f in @($script:SqlTxt, $script:EvilTrig, $script:RetryPrompt,
-                     $script:ThinkDump, $script:ReviewDump, $script:EvilTrigRepo,
+                     $script:ThinkDump, $script:ReviewDump, $script:ReqDump, $script:EvilTrigRepo,
                      (Join-Path $script:BTROOT 'fractalsql_bt_build_cmd.bat'))) {
         if ($f -and (Test-Path -LiteralPath $f)) { [IO.File]::Delete($f) }
     }
+    # The run lock: the owner file goes first (it is ours while we still hold
+    # the lock), then the handle is closed, then the lock file itself. The
+    # close has to come before the lock file's removal -- the handle was
+    # opened without FILE_SHARE_DELETE, so the file cannot be removed while
+    # it is open. A removal that fails because another run grabbed the lock
+    # in between is harmless: that run holds its own handle.
+    if ($script:LockOwner -and (Test-Path -LiteralPath $script:LockOwner)) { [IO.File]::Delete($script:LockOwner) }
+    if ($script:LockHandle) {
+        try { $script:LockHandle.Close() } catch { }
+        $script:LockHandle = $null
+    }
+    if ($script:LockFile -and (Test-Path -LiteralPath $script:LockFile)) { [IO.File]::Delete($script:LockFile) }
     Get-ChildItem -LiteralPath $script:BTROOT -Filter 'fractalsql_bt_*_plugin.*' `
         -ErrorAction SilentlyContinue |
         ForEach-Object { [IO.File]::Delete($_.FullName) }
@@ -404,7 +451,19 @@ function Find-Toolchain {
 # resolve_ext -- locate the built extension when gate 01 did not run
 # (single -Gate invocations, fuzz-only runs).
 function Resolve-Ext {
-    if ($script:Ext) { return $true }
+    if ($script:Ext) {
+        # An extension supplied with -Ext / FSQL_EXT: resolve it here too, so that a single
+        # gate run (-Gate 53 -Ext <path>) uses it instead of the stale dist\windows build.
+        if (-not $script:ExtAbs) {
+            $script:ExtAbs = if ([IO.Path]::IsPathRooted($script:Ext)) { $script:Ext }
+                             else { Join-Path $script:Here $script:Ext }
+            $script:ExtLoad = if ($script:ExtAbs.StartsWith($script:Here, [StringComparison]::OrdinalIgnoreCase)) {
+                $script:Ext
+            }
+            else { $script:ExtAbs }
+        }
+        return (Test-Path -LiteralPath $script:ExtAbs)
+    }
     $distSubdir = if ($Asan) { 'dist\windows-asan' } elseif ($Ubsan) { 'dist\windows-ubsan' } else { 'dist\windows' }
     $script:Ext = "$distSubdir\fractalsql.dll"
     $script:ExtAbs = Join-Path $script:Here "$distSubdir\fractalsql.dll"
@@ -569,7 +628,7 @@ function Compile-Plugins {
     $names = @('mock_reasoning_plugin', 'evil_lying_length_plugin',
                'evil_crash_plugin', 'retry_reasoning_plugin',
                'think_reasoning_plugin', 'mock_embed_plugin',
-               'evil_embed_plugin')
+               'evil_embed_plugin', 'embed_then_fail_plugin')
     foreach ($name in $names) {
         $log = Join-Path $script:PlugDir "$name.log"
         & $script:Cc -shared -fPIC -std=c99 -Iinclude "tests/$name.c" `
@@ -603,6 +662,7 @@ function Compile-Plugins {
     $script:Think = Join-Path $script:PlugDir 'think_reasoning_plugin.dll'
     $script:MockEmb = Join-Path $script:PlugDir 'mock_embed_plugin.dll'
     $script:EvilEmb = Join-Path $script:PlugDir 'evil_embed_plugin.dll'
+    $script:EmbFail = Join-Path $script:PlugDir 'embed_then_fail_plugin.dll'
     # The enterprise mock core: the fixture the ledger/audit gate loads
     # through fractal_config_set('enterprise_lib', ...) for a real write and
     # read-back path. FSQL_STATIC keeps the public header's import
@@ -631,7 +691,7 @@ function HavePlugin { param([string]$Path) Test-Path -LiteralPath $Path }
 function Skip-IfPySanitizerBlocked {
     param([string]$Label)
     if ($Asan -or $Ubsan) {
-        Skip "$Label (python load_extension() under -Asan/-Ubsan hits a known Windows harness issue)"
+        Skip "$Label (not run with -Asan/-Ubsan on Windows: Python cannot load the sanitized extension there, a known issue)"
         return $true
     }
     return $false
@@ -895,25 +955,25 @@ function Gate-01-Build {
 
 function Gate-02-Smoke {
     $ver = Sqlq 'SELECT fractal_version();'
-    if ($ver -eq '2.0.13') { Pass "02 smoke: version=$ver" }
-    else { Fail "02 smoke: version='$ver' (want 2.0.13)" }
-    # fractal_search convergence: self-distance ~0
-    $d = Sqlq "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');"
-    if ($d -eq '0.0' -or (PyAbsLt1e6 $d)) { Pass "02 smoke: fractal_search self-distance=$d" }
+    if ($ver -eq '2.0.14') { Pass "02 smoke: version=$ver" }
+    else { Fail "02 smoke: version='$ver' (want 2.0.14)" }
+    # fractal_sfs_converge convergence: self-distance ~0
+    $d = Sqlq "SELECT fractal_sfs_converge('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');"
+    if ($d -eq '0.0' -or (PyAbsLt1e6 $d)) { Pass "02 smoke: fractal_sfs_converge self-distance=$d" }
     else { Fail "02 smoke: self-distance='$d'" }
     # ...and a nontrivial one: query at a corpus corner converges to ~its twin
-    $d2 = Sqlq "SELECT fractal_search('0.1,0.2,-0.3,0.4','0.1,0.2,-0.3,0.4');"
-    if (PyAbsLt1e6 $d2) { Pass "02 smoke: fractal_search convergence=$d2" }
+    $d2 = Sqlq "SELECT fractal_sfs_converge('0.1,0.2,-0.3,0.4','0.1,0.2,-0.3,0.4');"
+    if (PyAbsLt1e6 $d2) { Pass "02 smoke: fractal_sfs_converge convergence=$d2" }
     else { Fail "02 smoke: convergence=$d2" }
     $ed = Sqlq 'SELECT fractal_edition();'
     if ($ed -eq 'Community') { Pass "02 smoke: edition=$ed" }
     else { Fail "02 smoke: edition='$ed'" }
-    # fractal_search_debug returns the FULL fsql_search_ptr result JSON
-    # (not just the best_point extraction fractal_search uses) -- assert
+    # fractal_sfs_converge_debug returns the FULL fsql_search_ptr result JSON
+    # (not just the best_point extraction fractal_sfs_converge uses) -- assert
     # the best_point key survives.
-    $dbg = Sqlq "SELECT fractal_search_debug('0.6,0.8,0.0,0.0');"
-    if ($dbg.Contains('best_point')) { Pass '02 smoke: fractal_search_debug has best_point' }
-    else { Fail "02 smoke: fractal_search_debug='$dbg'" }
+    $dbg = Sqlq "SELECT fractal_sfs_converge_debug('0.6,0.8,0.0,0.0');"
+    if ($dbg.Contains('best_point')) { Pass '02 smoke: fractal_sfs_converge_debug has best_point' }
+    else { Fail "02 smoke: fractal_sfs_converge_debug='$dbg'" }
 }
 
 function Gate-03-SchemaContext {
@@ -985,7 +1045,9 @@ function Gate-04-TextToSql {
                  "SELECT fractal_sql_agent('q', NULL, 1, 1);" `
                  "SELECT fractal_config_get('text_to_sql_max_attempts');" |
             ForEach-Object { "$_" }) -join "`n"
-    if ($gen -match '"execution_status":"execution_failed"' -and (($gen -split "`n")[-1]).Trim() -eq '1') {
+    # It is refused at validation now (the call is on the denylist: "changes state"); before the denylist it was refused at
+    # execution ("execution_failed"). Either way the configuration must be untouched.
+    if (($gen -match '"execution_status":"execution_failed"' -or $gen -match 'changes state') -and (($gen -split "`n")[-1]).Trim() -eq '1') {
         Pass '04 model-generated SQL cannot change configuration (auto_execute)'
     }
     else { Fail "04 model-generated SQL reached fractal_config_set: $gen" }
@@ -1302,7 +1364,7 @@ con.enable_load_extension(True)
 con.load_extension(ext)
 for i in range(iters):
     d = con.execute(
-        "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0')"
+        "SELECT fractal_sfs_converge('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0')"
     ).fetchone()[0]
     if abs(d) > 1e-6:
         raise SystemExit("worker %s iter %s: dist %r" % (wid, i, d))
@@ -1337,7 +1399,7 @@ n = con.execute("SELECT count(*) FROM bt_soak").fetchone()[0]
 expected = workers * iters
 assert n == expected, "expected %d soak rows, found %d" % (expected, n)
 r = con.execute(
-    "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0')"
+    "SELECT fractal_sfs_converge('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0')"
 ).fetchone()[0]
 assert abs(r) < 1e-6, "DB not responsive after soak: %r" % r
 assert bad == 0, "%d worker(s) failed" % bad
@@ -1721,7 +1783,7 @@ con.load_extension(ext)
 # fsql_parse_blob_vector refuses count > cap outright (4097 floats).
 blob = struct.pack("<4097f", *([0.1] * 4097))
 try:
-    con.execute("SELECT fractal_search(?, ?)", (blob, blob)).fetchone()
+    con.execute("SELECT fractal_sfs_converge(?, ?)", (blob, blob)).fetchone()
 except sqlite3.OperationalError as e:
     if "invalid vector" in str(e):
         print("OK: over-arena BLOB rejected: %s" % str(e)[:120])
@@ -1752,12 +1814,12 @@ function Gate-19-SfsBounds {
         if ($LASTEXITCODE -eq 0) { Pass '19 sfs_bounds: over-arena vector rejected' }
         else { Fail '19 sfs_bounds: over-arena vector accepted' }
     }
-    if (ExpectErr 'invalid vector' "SELECT fractal_search('','1.0');") {
+    if (ExpectErr 'invalid vector' "SELECT fractal_sfs_converge('','1.0');") {
         Pass '19 sfs_bounds: empty vector rejected'
     }
     else { Fail '19 sfs_bounds: empty vector accepted' }
     if (ExpectErr 'query dim mismatch with vector' `
-            "SELECT fractal_search('0.1,0.2','0.1,0.2,0.3');") {
+            "SELECT fractal_sfs_converge('0.1,0.2','0.1,0.2,0.3');") {
         Pass '19 sfs_bounds: query/vector dim mismatch rejected'
     }
     else { Fail '19 sfs_bounds: dim mismatch accepted' }
@@ -2213,6 +2275,26 @@ print(','.join('%s,%s'%(i,i+1) for i in range(n-1)))" 2>$null)
         Pass '22 v2_functions: periodogram returns the peak lists'
     }
     else { Fail "22 v2_functions: periodogram: $r" }
+    # the document is exactly {"freqs": [...], "power": [...]}, the two lists the same length
+    $r = Sqlq "SELECT (SELECT group_concat(key) FROM json_each(fractal_periodogram('$s32', 3))) || '|' || (json_array_length(fractal_periodogram('$s32', 3), '`$.freqs') = json_array_length(fractal_periodogram('$s32', 3), '`$.power'));"
+    if (($r -split "`n" | Select-Object -Last 1).Trim() -eq 'freqs,power|1') {
+        Pass '22 v2_functions: periodogram document has exactly the keys freqs and power, with lists of the same length'
+    }
+    else { Fail "22 v2_functions: periodogram document shape, got: $r" }
+    # fractal_chunk_text: the same chunks on every FractalSQL host
+    $ck = @(
+        @{ n = 'fixed, size 4, overlap 1'; w = '[{"no":0,"start":0,"end":4,"text":"abcd"},{"no":1,"start":3,"end":7,"text":"defg"},{"no":2,"start":6,"end":10,"text":"ghij"}]'; q = "SELECT fractal_chunk_text('abcdefghij', 4, 1, 'fixed');" },
+        @{ n = 'sentence packing, a long sentence split with overlap'; w = '[{"no":0,"start":0,"end":19,"text":"One. Two sentences!"},{"no":1,"start":20,"end":39,"text":"Is this three? Yes."},{"no":2,"start":41,"end":71,"text":"Four is a long one that keeps "},{"no":3,"start":66,"end":90,"text":"eeps on going and going."}]'; q = "SELECT fractal_chunk_text('One. Two sentences! Is this three? Yes.  Four is a long one that keeps on going and going.', 30, 5, 'sentence');" },
+        @{ n = 'empty text is an empty array'; w = '[]'; q = "SELECT fractal_chunk_text('', 10, 0);" },
+        @{ n = 'a paragraph break needs two line feeds'; w = '[{"no":0,"start":0,"end":13,"text":"one\ntwo\nthree"}]'; q = "SELECT fractal_chunk_text('one'||char(10)||'two'||char(10)||'three', 100, 0);" }
+    )
+    foreach ($c in $ck) {
+        $r = Sqlq $c.q
+        if (($r -split "`n" | Select-Object -Last 1).Trim() -eq $c.w) { Pass ("22 v2_functions: chunk_text " + $c.n) }
+        else { Fail ("22 v2_functions: chunk_text " + $c.n + ": expected " + $c.w + ", got " + $r) }
+    }
+    $r = Sqlq "SELECT fractal_chunk_text('x', 5, 5);"
+    if ($r.Contains('overlap must be 0..size-1')) { Pass '22 v2_functions: chunk_text refuses an overlap of size or more' } else { Fail "22 v2_functions: chunk_text overlap: $r" }
     # spectrogram_entropy: a period-4 tone (low entropy) vs an LCG noise
     # series (high entropy), built in SQL so no data file is needed.
     # Frame count = floor((128-32)/16)+1 = 7.
@@ -2352,9 +2434,9 @@ print(','.join('%s,%s'%(i,i+1) for i in range(n-1)))" 2>$null)
         @('spectrogram window', "SELECT fractal_spectrogram_entropy('2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2',{N},8);", 8),
         @('change_point window', "SELECT fractal_change_point_detect('1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0', {N}, 1.0);", 10),
         @('optimize_subset k', "SELECT fractal_optimize_subset('10,9,8,7,6,5,4,3,2,1','1,1,1,1,1,1,1,1,1,1',{N});", 5),
-        @('search_debug iterations', "SELECT fractal_search_debug('1.0,0.0,0.0',{N},50,2);", 30),
-        @('search_debug population', "SELECT fractal_search_debug('1.0,0.0,0.0',30,{N},2);", 50),
-        @('search_debug diffusion', "SELECT fractal_search_debug('1.0,0.0,0.0',30,50,{N});", 2),
+        @('search_debug iterations', "SELECT fractal_sfs_converge_debug('1.0,0.0,0.0',{N},50,2);", 30),
+        @('search_debug population', "SELECT fractal_sfs_converge_debug('1.0,0.0,0.0',30,{N},2);", 50),
+        @('search_debug diffusion', "SELECT fractal_sfs_converge_debug('1.0,0.0,0.0',30,50,{N});", 2),
         @('state_fingerprint n_bits', "SELECT length(fractal_state_fingerprint('1.0,0.0,0.0', {N}));", 64)
     )
     $wrapBad = @()
@@ -2407,12 +2489,12 @@ print(','.join('%s,%s'%(i,i+1) for i in range(n-1)))" 2>$null)
     }
     else { Fail '22 v2_functions: boxcount accepted a non-finite coordinate' }
     $bigDim = (@('0.5') * 1000) -join ','
-    if (ExpectErr 'search too large' "SELECT fractal_search_debug('$bigDim',1000,1000,8);") {
+    if (ExpectErr 'search too large' "SELECT fractal_sfs_converge_debug('$bigDim',1000,1000,8);") {
         Pass '22 v2_functions: search_debug refuses iterations x population x diffusion x dim past the work bound'
     }
     else { Fail '22 v2_functions: search_debug accepted a search past the work bound' }
-    if ((ExpectErr 'population_size 1 out of range [2, 10000]' "SELECT fractal_search_debug('1.0,0.0,0.0',30,1,2);") -and
-        (ExpectErr 'population_size 10001 out of range [2, 10000]' "SELECT fractal_search_debug('1.0,0.0,0.0',30,10001,2);")) {
+    if ((ExpectErr 'population_size 1 out of range [2, 10000]' "SELECT fractal_sfs_converge_debug('1.0,0.0,0.0',30,1,2);") -and
+        (ExpectErr 'population_size 10001 out of range [2, 10000]' "SELECT fractal_sfs_converge_debug('1.0,0.0,0.0',30,10001,2);")) {
         Pass '22 v2_functions: search_debug reports the core''s population range (2..10000)'
     }
     else { Fail '22 v2_functions: search_debug population range is not the core''s' }
@@ -2474,7 +2556,7 @@ function Gate-23-Agents {
     }
     Agent 'search_agent embeds→scouts→synthesizes' `
         "SELECT fractal_search_agent('cosine metrics','bt_agent_docs','emb');"
-    if ($script:LastAgentOut.Contains('"answer"') -and $script:LastAgentOut.Contains('"source_doc_ids"')) {
+    if ($script:LastAgentOut.Contains('"answer"') -and $script:LastAgentOut.Contains('"source_row_ids"')) {
         Pass '23 search_agent returns the composite JSON'
     }
     else { Fail "23 search_agent JSON: $($script:LastAgentOut)" }
@@ -2666,6 +2748,33 @@ def connect():
     con.execute("PRAGMA busy_timeout=5000")
     con.execute("SELECT fractal_config_set('enterprise_lib', ?)", (absw,))
     return con
+
+# With the mock core (no real library available) only what a mock can answer is run: concurrent connections calling the gated
+# ledger functions without error, and the chain staying valid. The real core adds the QTL blobs, the fill-to-cap and churn phases
+# and the MAC tamper-evidence phase below.
+if os.environ.get("FSQL_BT_ENT_MOCK") == "1":
+    errors = []
+    def mworker(w):
+        try:
+            c = connect()
+            c.execute("SELECT fractal_diversify_enable()")
+            for i in range(20):
+                c.execute("SELECT fractal_feedback_report(?, 'positive')", (w * 100 + i,))
+                c.execute("SELECT fractal_ledger_flush()")
+                c.execute("SELECT fractal_ledger_load()")
+                c.execute("SELECT fractal_ledger_truth_count()").fetchone()
+            c.close()
+        except Exception as e:
+            errors.append("worker %d: %s" % (w, e))
+    threads = [threading.Thread(target=mworker, args=(w,)) for w in range(1, 9)]
+    for th in threads: th.start()
+    for th in threads: th.join()
+    check("mock core: 8 concurrent connections x 20 feedback/flush/load/count cycles without error", not errors, str(errors[:3]))
+    vc = connect()
+    rep = json.loads(vc.execute("SELECT fractal_ledger_verify()").fetchone()[0])
+    check("mock core: the chain still verifies", rep.get("ok") is True, str(rep))
+    vc.close()
+    sys.exit(1 if failed else 0)
 
 # ---- Phase A: fill-to-cap (64 truth + 64 shadow = 128) + 10 churn
 # cycles. Truth/Shadow each cap at 64 (the core-level cap PG's own gate
@@ -2860,9 +2969,12 @@ function Gate-25-EnterpriseStress {
     $found = Get-ChildItem -Path 'include/windows-x86_64' `
         -Filter '*fractalsql-enterprise-sovereign-c.dll' -ErrorAction SilentlyContinue |
         Select-Object -First 1 -ExpandProperty FullName
+    # The real core when one is vendored in include/ (or named by FSQL_ENTERPRISE_LIB), otherwise the mock core.
+    $mockFlag = '0'
+    if (-not $found -and $env:FSQL_ENTERPRISE_LIB -and (Test-Path -LiteralPath $env:FSQL_ENTERPRISE_LIB)) { $found = $env:FSQL_ENTERPRISE_LIB }
     if (-not $found) {
-        Skip '25 enterprise_stress (no enterprise core vendored in include/)'
-        return
+        if (HavePlugin $script:MockEnt) { $found = $script:MockEnt; $mockFlag = '1' }
+        else { Fail '25 enterprise_stress: no enterprise core vendored and the mock core did not build'; return }
     }
     if (-not $script:Py) {
         Skip '25 enterprise_stress driver (no python3 sqlite3 stdlib)'
@@ -2871,6 +2983,7 @@ function Gate-25-EnterpriseStress {
     if (Skip-IfPySanitizerBlocked '25 enterprise_stress driver') { return }
     Write-PyGate25 (Join-Path $script:PlugDir 'py_gate25.py')
     $env:FSQL_BT_ENT_LIB = $found
+    $env:FSQL_BT_ENT_MOCK = $mockFlag
     # Signature verification is mandatory by default (fsql_enterprise.c);
     # a dev drop is typically unsigned and this gate tests ledger
     # behavior, not the signature gate, so opt out the way a dev would.
@@ -2879,7 +2992,10 @@ function Gate-25-EnterpriseStress {
     Remove-Item Env:\FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE -ErrorAction SilentlyContinue
     $rc = $LASTEXITCODE
     Remove-Item Env:\FSQL_BT_ENT_LIB -ErrorAction SilentlyContinue
-    if ($rc -eq 0) {
+    Remove-Item Env:\FSQL_BT_ENT_MOCK -ErrorAction SilentlyContinue
+    if ($rc -eq 0 -and $mockFlag -eq '1') {
+        Pass '25 enterprise_stress: concurrency and chain validity through the mock core (the real core adds fill-to-cap, churn and MAC tamper-evidence)'
+    } elseif ($rc -eq 0) {
         Pass '25 enterprise_stress: fill-to-cap+churn, concurrency, MAC tamper-evidence (see driver OK lines above)'
     } else {
         Fail '25 enterprise_stress: see driver output above'
@@ -3050,6 +3166,13 @@ function Gate-28-ReviewIsolation {
 # run end-to-end against the real primitives they compose, with a
 # canary proving the reasoning step actually ran.
 function Gate-29-DomainAgents {
+    # the settings table in the reasoning-setup guide names every configuration key this build defines
+    $dcPy = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $dcPy) { $dcPy = Get-Command python3 -ErrorAction SilentlyContinue }
+    if ($dcPy) {
+        $dcOut = (& $dcPy.Source -I (Join-Path $script:Here 'test\check_config_docs.py') $script:Here 2>&1 | Out-String).Trim()
+        if ($LASTEXITCODE -eq 0) { Pass ("29 domain_agents: " + ($dcOut -replace '^check_config_docs: ', '')) } else { Fail ("29 domain_agents: " + ($dcOut -replace '^check_config_docs: ', '')) }
+    } else { Skip "29 domain_agents: the settings-table check needs python" }
     $null = Sqlq @'
     CREATE TABLE bt_da_logs(metric REAL, ts INTEGER, host TEXT);
     INSERT INTO bt_da_logs (metric, ts, host)
@@ -3087,6 +3210,15 @@ function Gate-29-DomainAgents {
         Fail "29 domain_agents: expected the reasoning canary in triage_summary, got: $r1b"
     }
 
+    # The reasoning plugin tells the model to answer ONLY from the context JSON it is handed, so an agent must put its
+    # computed findings in that context, not only in the prompt. The mock plugin records the last request it received.
+    $rq = if (Test-Path -LiteralPath $script:ReqDump) { [IO.File]::ReadAllText($script:ReqDump) } else { '' }
+    if ($rq.Contains('"agent":"fractal_agent_anomaly_triage"') -and $rq.Contains('"findings":"Triage this anomaly: drift score ') -and $rq.Contains('"table":"bt_da_logs"')) {
+        Pass '29 domain_agents: anomaly_triage hands the model its findings in the context JSON (not only the prompt)'
+    } else {
+        Fail "29 domain_agents: expected agent/findings/table in the reasoning context, got: $rq"
+    }
+
     $r2 = Sqlq "SELECT fractal_agent_anomaly_triage('bt_da_logs','metric','ts','host','no-such-host',32);"
     if ($r2.Contains('no rows in')) {
         Pass '29 domain_agents: anomaly_triage raises a clean ERROR when the filter matches no rows'
@@ -3104,6 +3236,17 @@ function Gate-29-DomainAgents {
     } else {
         Fail "29 domain_agents: expected mem_id 1 and 3 only (not 2), got: $r3"
     }
+    # the same call through an index (agent_use_index): the cohort becomes the ids set and the answer is the same rows
+    Sqlq "SELECT fractal_index_create('bt_da_mem','emb','{`"vector_format`":`"FP32`",`"name`":`"bt_da_mem_ix`"}');" | Out-Null
+    $r3i = Sqlq "SELECT fractal_config_set('agent_use_index','on');" "SELECT fractal_agent_recall_hybrid('bt_da_mem','emb','1.0,0.0,0.0','kind','a',5,'id','body');"
+    if ((($r3i -split "`n") | Select-Object -Last 1).Trim() -eq $r3.Trim()) {
+        Pass '29 domain_agents: recall_hybrid with agent_use_index on returns exactly the rows the cohort scan returns'
+    } else { Fail "29 domain_agents: recall_hybrid through the index differs: $r3i vs $r3" }
+    # agent_use_index takes off, on or auto; anything else is refused; the auto row threshold is a key
+    $r = Sqlq "SELECT fractal_config_set('agent_use_index','auto'); SELECT fractal_config_get('agent_use_index'), fractal_config_get('agent_index_min_rows');"
+    if ($r.Contains('auto|10000')) { Pass '29 domain_agents: agent_use_index accepts auto and agent_index_min_rows defaults to 10000' } else { Fail "29 domain_agents: agent_use_index auto, got: $r" }
+    $r = Sqlq "SELECT fractal_config_set('agent_use_index','sometimes');"
+    if ($r.Contains('must be one of: off, on, auto')) { Pass '29 domain_agents: agent_use_index refuses a value that is not off, on or auto' } else { Fail "29 domain_agents: agent_use_index sometimes: $r" }
 
     # --- 3: fractal_agent_regime_triage (array-in + dfa/drift + reason) -
     $rnd = [System.Random]::new(7)
@@ -3886,7 +4029,7 @@ function Gate-41-DbProbe {
     $lines = @(
         '@echo off',
         "call `"$vcvars64`" >nul 2>&1",
-        "cl.exe /nologo /std:c++17 /utf-8 /EHsc /MT /O1 /Zi /DFSQL_MCP_VERSION=`"\`"2.0.13\`"`" ^",
+        "cl.exe /nologo /std:c++17 /utf-8 /EHsc /MT /O1 /Zi /DFSQL_MCP_VERSION=`"\`"2.0.14\`"`" ^",
         "  /I `"$mcpDir\vendor`" /I `"$mcpDir\src`" /I `"$sqliteDir`" /I `"$opensslDir\include`" ^",
         "  `"$mcpDir\tests\db_probe.cpp`" `"$mcpDir\src\errors.cpp`" `"$mcpDir\src\logging.cpp`" `"$sqliteDir\sqlite3.c`" ^",
         "  /Fo`"$outDir\\`" /Fe`"$bin`" ^",
@@ -3970,6 +4113,10 @@ function Gate-Title { param([string]$G)
         '27' { 'think' }             '28' { 'review_isolation' }
         '29' { 'domain_agents' }     '30' { 'feature_store' }
         '31' { 'ledger_chain' }
+        '52' { 'audit_regress' }
+        '53' { 'precision' }
+        '54' { 'index' }
+        '55' { 'ledger_v2' }
         '32' { 'enterprise_signature_real' }
         '35' { 'ed25519' }           '36' { 'extract_population' }
         '37' { 'mcp_smoke' }         '38' { 'mcp_https' }
@@ -4135,6 +4282,48 @@ function Gate-43-Kits {
     }
 }
 
+# Gate 52: security regressions reachable from SQL (test/audit_regress.py). The driver compiles the mock reasoning plugin with a
+# POSIX `cc` and loads the extension through Python's sqlite3 module, so on Windows it is skipped, as gates 46-51 are (they have no
+# Windows counterpart). The behaviour it asserts is in the shared C sources, so the Linux and macOS runs cover it.
+function Gate-52-AuditRegress {
+    Skip '52 audit_regress (not run on Windows: it needs a POSIX compiler and a Python driver, so it runs on Linux and macOS)'
+}
+
+# 53 precision / 54 index: the python-driven gates (test\test_precision.py, test\test_index.py). They load the extension through Python's sqlite3
+# module with an absolute path and need no network or plugin. NOT yet run on Windows (the same sources are asserted on Linux and macOS).
+function Run-PyDriver { param([string]$Num, [string]$Name, [string]$Script, [string]$PassMarker)
+    $drv = Join-Path $script:Here "test\$Script"
+    if (-not (Test-Path -LiteralPath $drv)) { Skip "$Num $Name (test\$Script not present)"; return }
+    if (-not $script:Py) { Skip "$Num $Name (no python3 on PATH)"; return }
+    if ($Asan -or $Ubsan) { Skip "$Num $Name (not run with -Asan/-Ubsan on Windows: Python cannot load the sanitized extension there, a known issue)"; return }
+    if (-not (Resolve-Ext)) { Fail "$Num ${Name}: no extension found (run gate 01 first)"; return }
+    $out = & $script:Py -I $drv $script:ExtAbs 2>&1 | Out-String
+    if ($out -match [regex]::Escape($PassMarker)) {
+        Pass "$Num ${Name}: $(([regex]::Matches($out, '\[PASS\]')).Count) checks"
+    }
+    else {
+        ($out -split "`n" | Where-Object { $_ -match 'FAIL|Traceback|Error' } | Select-Object -First 12) | ForEach-Object { Write-Host "    $_" }
+        Fail "$Num ${Name}: see the output above"
+    }
+}
+
+function Gate-53-Precision { Run-PyDriver '53' 'precision' 'test_precision.py' 'test_precision: PASS' }
+function Gate-54-Index     { Run-PyDriver '54' 'index' 'test_index.py' 'test_index: PASS' }
+function Gate-55-LedgerV2 {
+    # QTL v2 through the real enterprise core library when FSQL_ENTERPRISE_LIB names it (an absolute path to the .dll); otherwise the mock
+    # core, with the checks a mock can answer.
+    $ent55 = $env:FSQL_ENTERPRISE_LIB; $kind55 = 'real'
+    if (-not $ent55 -or -not (Test-Path -LiteralPath $ent55)) { $ent55 = $null; $kind55 = 'mock' }
+    if (-not $script:Py) { Skip '55 ledger_v2 (no python3 on PATH)'; return }
+    if (-not (Resolve-Ext)) { Fail '55 ledger_v2: no extension found (run gate 01 first)'; return }
+    $env:FSQL_MOCK_ENTERPRISE_LIB = $script:MockEnt
+    $out = & $script:Py -I (Join-Path $script:Here 'test\test_ledger_roundtrip.py') $script:ExtAbs $ent55 2>&1 | Out-String
+    Remove-Item Env:\FSQL_MOCK_ENTERPRISE_LIB -ErrorAction SilentlyContinue
+    if ($out -match 'test_ledger_roundtrip: PASS' -and $kind55 -eq 'real') { Pass '55 ledger_v2: QTL v2 through the real enterprise core' }
+    elseif ($out -match 'test_ledger_roundtrip: PASS') { Pass '55 ledger_v2: flush, load, chain and retention through the mock core; the real library adds QTL v2' }
+    else { Fail '55 ledger_v2: see the output' ; Write-Host $out }
+}
+
 function Invoke-Gate { param([string]$G)
     switch ($G) {
         '01' { Gate-01-Build }             '02' { Gate-02-Smoke }
@@ -4161,6 +4350,10 @@ function Invoke-Gate { param([string]$G)
         '41' { Gate-41-DbProbe }                  '42' { Gate-42-ConcurrencyProbe }
         '43' { Gate-43-Kits }
         '45' { Gate-45-McpConformance }
+        '52' { Gate-52-AuditRegress }
+        '53' { Gate-53-Precision }
+        '54' { Gate-54-Index }
+        '55' { Gate-55-LedgerV2 }
     }
 }
 
@@ -4196,7 +4389,7 @@ function Gate-37-McpSmoke {
         return
     }
     if ($Asan -or $Ubsan) {
-        Skip '37 mcp_smoke (python load_extension() under -Asan/-Ubsan hits a known Windows harness issue)'
+        Skip '37 mcp_smoke (not run with -Asan/-Ubsan on Windows: Python cannot load the sanitized extension there, a known issue)'
         return
     }
 
@@ -4271,7 +4464,7 @@ function Gate-37-McpSmoke {
     & $script:Py -u (Join-Path $script:Here 'mcp\tests\mcp_smoke_client.py') 2>&1 |
         ForEach-Object { Write-Host "    $_" }
     if ($LASTEXITCODE -eq 0) {
-        Pass '37 mcp_smoke: full MCP session (initialize, 82-tool catalog, discovery/cognition/agency round trips, enterprise clean-error path, $/cancel, resources+prompts)'
+        Pass '37 mcp_smoke: full MCP session (initialize, 87-tool catalog, discovery/cognition/agency round trips, enterprise clean-error path, $/cancel, resources+prompts)'
     }
     else {
         Fail "37 mcp_smoke: client driver exited $LASTEXITCODE"
@@ -4701,6 +4894,17 @@ if ($Gate) {
 elseif ($Quick) { $mode = 'quick'; $gates = $script:QUICK_GATES }
 elseif ($Fuzz)  { $mode = 'fuzz';  $gates = $script:FUZZ_GATES }
 else            { $gates = $script:DEFAULT_GATES }
+
+# The fixture files under $BTROOT are shared by every run of this host (and
+# of the hosts that use the same mock plugin), so only one run may have them
+# at a time. Taken before anything reads or writes them.
+if (-not (Acquire-RunLock)) {
+    $who = Get-LockHolder
+    Write-Host "another build_test run is holding $($script:LockFile) -- the fixture files under $($script:BTROOT)"
+    Write-Host "are shared, so only one run at a time; wait for the other run to finish."
+    if ($who) { Write-Host "held by $who" }
+    exit 1
+}
 
 Find-Toolchain
 $script:PlugDir = Join-Path $script:BTROOT "fractalsql_bt_$PID"

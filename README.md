@@ -62,11 +62,13 @@ Depending on your role, you'll want to start in different places:
 ---
 
 ## 🧩 What's in the box
-
+<p align="center">
+  <img src="docs/fractalsql-sqlite-architecture.jpg" alt="FractalSQL for SQLite diagram" width="900">
+</p>
 Four tiers of SQL-callable primitives, composable into agents with plain SQL
 and application code: no server-side language required.
 
-- **Discovery**: diverse, mode-collapse-free retrieval: `fractal_search` (Sniper), `fractal_search_explore` (Scout).
+- **Discovery**: diverse, mode-collapse-free retrieval: `fractal_sfs_converge` (Sniper), `fractal_search_explore` (Scout), and the indexed `fractal_search` (nearest rows of a table, through the native IVF index built with `fractal_index_create`, with every distance still exact).
 - **Cognition**: in-process LLM integration: `fractal_reason` (Bedrock, Azure OpenAI, Vertex, Ollama), `fractal_embed`, `fractal_text_to_sql`.
 - **Agency**: self-correcting routines: the search/sql agents, plan/trajectory/loop-detection helpers; see the [Agent Recipes](docs/api-agency.md).
 - **Analytics**: fractal/dimension primitives: `fractal_dimension_dfa`, `fractal_dimension_boxcount`, `fractal_optimize_portfolio`, and more.
@@ -78,7 +80,7 @@ Plus SQLite-native plumbing: `fractal_vector` as a canonical BLOB type,
 runnable examples lives in [sql/fractalsql--1.0.sql](sql/fractalsql--1.0.sql).
 
 Everything above ships as a ready-made tool surface too: the bundled
-`fractalsql-sqlite-mcp` MCP server turns the function catalog into 82 typed
+`fractalsql-sqlite-mcp` MCP server turns the function catalog into 89 typed
 tools (the same engine-filtered surface every release verifies against committed
 integrity locks). It speaks standard MCP over stdio or HTTP, so it drops into
 any client or framework that does the same -- Claude Desktop, Cursor, Windsurf,
@@ -137,9 +139,11 @@ including what the ledger can and can't prove.
 
 ## 📊 Compatibility & License
 
-| SQLite | Linux | Windows | macOS |
-| --- | :---: | :---: | :---: |
-| 3.25+ | ✓ | ✓ | ✓ |
+| SQLite | Linux amd64 | Linux arm64 | Linux musl | Windows x64 | macOS |
+| --- | :---: | :---: | :---: | :---: | :---: |
+| 3.25+ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+Linux musl (Alpine) covers amd64 and arm64. macOS builds cover Apple Silicon and Intel.
 
 Any SQLite host that permits `sqlite3_load_extension`: the `sqlite3` CLI,
 Python's `sqlite3` module (`conn.enable_load_extension`), better-sqlite3,

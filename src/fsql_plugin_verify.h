@@ -92,7 +92,7 @@ static int fsql_plugin_gate(const char *path, char *err, size_t err_cap) {
         return -1;
     }
     size_t n = fread(sig, 1, sizeof sig, f);
-    int extra = fgetc(f);
+    int extra = ferror(f) ? 0 : fgetc(f);   /* indeterminate position after a read error */
     fclose(f);
     if (n != sizeof sig || extra != EOF ||
         !fsql_ed25519_verify_detached(sig, bytes, (size_t)len, FSQL_PLUGIN_SIGNING_PUBKEY)) {

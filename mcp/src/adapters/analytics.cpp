@@ -63,6 +63,20 @@ namespace fsqlmcp
         t.back().description = "DFA's complement: localizes WHERE a series' mean and/or variance shifted, via a "
             "sliding two-sample test over adjacent windows. Returns {'indices':[...]}, ascending, up to max_points.";
 
+        t.push_back( ToolSpec{ "fractal_chunk_text", "Analytics", ToolClass::Cheap,
+            { Str("text", true, "The text to split."), Int("size", true, "Largest chunk, in characters (1..100000)."),
+              Int("overlap", true, "Characters shared by neighbouring pieces of a split span (0..size-1)."),
+              Str("mode", false, "fixed | paragraph | sentence.", "paragraph") },
+            std::nullopt, false, true,
+            [&db]( const Json& a, CallCtx& ) { return Json{ { "chunks", parseJsonStrict( db.callScalar(
+                "SELECT fractal_chunk_text(?, ?, ?, ?)",
+                { a.at("text").get<std::string>(), a.at("size").get<std::int64_t>(), a.at("overlap").get<std::int64_t>(),
+                  a.value( "mode", std::string( "paragraph" ) ) } ) ) } }; } } );
+        t.back().description = "Splits text into chunks of at most size characters: a list of {no, start, end, text} with character offsets "
+            "(end exclusive). mode paragraph (default) packs whole paragraphs, sentence packs whole sentences, fixed cuts every size - overlap "
+            "characters; a paragraph or sentence longer than size is cut like a fixed span, sharing overlap characters. The result is the same on "
+            "every FractalSQL host. Pure and read-only.";
+
         t.push_back( ToolSpec{ "fractal_periodogram", "Analytics", ToolClass::Cheap,
             { Vec("series", true, "Time-ordered series (>= 4 points)."), Int("max_peaks", false, "Top peaks to return.", 8) },
             std::nullopt, false, true,

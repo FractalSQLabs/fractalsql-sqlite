@@ -23,13 +23,18 @@ FractalSQL ships in two editions, each unlocking more of the four capability tie
 
 ## 🔍 Tier 1: Discovery
 
-The foundation of FractalSQL is the **Stochastic Fractal Search (SFS)** engine, which treats vector search as a continuous optimization problem rather than an index lookup like standard HNSW or IVFFlat.
+FractalSQL has two ways to find rows. The **Stochastic Fractal Search (SFS)** engine treats the problem as continuous optimization and powers `fractal_sfs_converge` and the diverse **Scout** discovery; the **IVF index** (`fractal_index_create` and the indexed `fractal_search`) gives fast, verified nearest-neighbour search over a table, like an index lookup in standard HNSW or IVFFlat, with exact distances and a recall you can measure.
 
-### Sniper Search (`fractal_search`)
-Pure SFS convergence to the single best point minimizing cosine distance to a query over a unit box. It is a "precision" tool for finding the absolute global minimum. A per-row scalar: `fractal_search(vector_column, 'query-as-CSV')` in an `ORDER BY ... LIMIT k`.
+### Indexed Search (`fractal_search`, `fractal_index_*`)
+_Also in this section: `fractal_index_ensure(table, column)` leaves the index fit to use in one call; `agent_use_index` takes `off`, `on` or `auto`; the retrieval agents take a `meta_filter` and return real row ids; and the vectorizer can chunk long text (`chunk_size`)._
+
+`fractal_index_create(table, column [, options])` builds an IVF index (INT8 / INT4 codes on a PCA basis, or FP16 / FP32) and stores it in the database; `fractal_search(table, column, query, k)` probes a few cells and **verifies** every candidate against the stored vectors, so distances are exact cosine distances. The build calibrates the default `nprobe` to a target recall, rows added later are scanned exactly until `fractal_index_refresh` folds them in without retraining, and `fractal_index_info` reports staleness, whether the index was actually used, a `status` (`ready`, `stale`, `degraded`, `empty` or `orphaned`) and plain-language `advice` (for example "refresh: 60 rows were added since the build"). `fractal_index_list()` is the catalog of every index, and the `ids` option restricts a search to a set of rowids (index plus filter in one call). Without an index the same call falls back to the exact scan; the nearest-row agents can use an index too (`agent_use_index`, off by default).
+
+### Sniper Search  (`fractal_sfs_converge`)
+SFS convergence toward a query direction over a unit box: because the objective is the cosine to the query itself, the optimum is the query direction rescaled into the box, so it returns a *direction to aim for*, not a retrieval result (use `fractal_search` for that). A demonstration and diagnostic of the SFS engine. A per-row scalar: `fractal_sfs_converge(vector_column, 'query-as-CSV')` in an `ORDER BY ... LIMIT k`.
 
 ### Scout Discovery (`fractal_search_explore`)
-Scans a stored corpus and returns a diverse population of results: an SFS population search blended with **Maximal Marginal Relevance (MMR)** re-ranking, so the results cover the data's distinct basins of attraction instead of the "mode collapse" common in top-K search. An aggregate here — `SELECT fractal_search_explore(emb, 'query') FROM corpus` — folding the population into one JSON result (rather than returning one row per matched vector, as a set-returning function would).
+Scans a stored corpus and returns a diverse population of results: a brute-force relevance scan blended with **Maximal Marginal Relevance (MMR)** re-ranking (`mmr_lambda` is honoured), so the results cover the data's distinct basins of attraction instead of the "mode collapse" common in top-K search. An aggregate here — `SELECT fractal_search_explore(emb, 'query') FROM corpus` — folding the population into one JSON result (rather than returning one row per matched vector, as a set-returning function would).
 
 ### Table-Backed Telemetry (`fractal_search_telemetry`)
 A deterministic primitive that returns the $K$ nearest real table rows to a query. This is the ground-truth layer used by all higher-order agentic functions.
@@ -73,7 +78,7 @@ The Agency tier composes the Discovery and Cognition primitives into autonomous 
 | `fractal_agent_rebalance_sibling` | optimizer + trajectory search → reasoning rationale | ✓ |
 | `fractal_agent_diverse_portfolios` (enterprise) | multimodal optimizer → reasoning tradeoff summary | ✓ |
 | `fractal_agent_route_task` | nearest-capability search + budget accounting → reasoning rationale | ✓ |
-| `fractal_agent_schedule_workload` | `fractal_search_debug` refine + nearest node → reasoning rationale | ✓ |
+| `fractal_agent_schedule_workload` | `fractal_sfs_converge_debug` refine + nearest node → reasoning rationale | ✓ |
 | `fractal_agent_outlier_intercept` | distance-to-bad-state safety barrier → reasoning justification | ✓ |
 | `fractal_agent_patient_deterioration_triage` | cohort search + trajectory drift → reasoning triage | ✓ |
 | `fractal_agent_data_analyst` | NL → SQL → reasoning analysis (SQL runs only with an explicit `auto_execute`) | ✓ |
@@ -156,7 +161,7 @@ Storing vectors as the canonical `fractal_vector` BLOB (u16 dim LE + u16 reserve
 (Detailed argument tables, defaults, and ranges are available in the **[Detailed API Reference](api-discovery.md)**.)
 
 **Discovery**
-- `fractal_search(vector, query)`: Sniper Mode convergence. $\rightarrow$ **[api-discovery.md](api-discovery.md)**
+- `fractal_sfs_converge(vector, query)`: Sniper Mode convergence. $\rightarrow$ **[api-discovery.md](api-discovery.md)**
 - `fractal_search_explore(emb, query, params?)`: Scout Mode diverse exploration (aggregate). $\rightarrow$ **[api-discovery.md](api-discovery.md)**
 - `fractal_search_telemetry(table, col, query, k)`: Ground-truth row retrieval. $\rightarrow$ **[api-discovery.md](api-discovery.md)**
 

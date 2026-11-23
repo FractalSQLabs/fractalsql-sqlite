@@ -208,6 +208,8 @@ SELECT fractal_dimension_dfa('[' || (SELECT group_concat(s) FROM walk) || ']')
 -- the real heading-series DFA exponent, plus a real rationale
 -- (plugin-gated: the clean hint is the expected output without one).
 .print --- track_anomaly composition (trajectory + heading DFA) ---
+DROP TABLE IF EXISTS temp.last_scan;
+CREATE TEMP TABLE last_scan AS
 WITH tr AS (SELECT fractal_search_trajectory(
                     'vmd_vessels', 'current',
                     (SELECT baseline FROM vmd_vessels WHERE id = 7),
@@ -225,7 +227,9 @@ SELECT (SELECT v.id FROM tr, json_each(tr.tj) je
         ORDER BY json_extract(je.value, '$.distance') LIMIT 1) AS trajectory_distance,
        fractal_dimension_dfa('[' || (SELECT group_concat(s) FROM walk) || ']')
            AS dfa_exponent;
-SELECT fractal_reason('one-line track-anomaly read for this vessel');
+SELECT * FROM temp.last_scan;
+SELECT fractal_reason('one-line track-anomaly read for this vessel',
+    json_object('scan', (SELECT json_group_array(json_object('nearest_fleet_id', nearest_fleet_id, 'trajectory_distance', trajectory_distance, 'dfa_exponent', dfa_exponent)) FROM temp.last_scan)));
 
 -- ------------------------------------------------------------------
 -- 5. Reasoning: the "does vessel 7's track need attention?" narrative

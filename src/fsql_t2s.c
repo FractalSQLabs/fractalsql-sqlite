@@ -89,6 +89,7 @@
 #include <string.h>
 
 #include "fsql_sqlite_internal.h"
+#include "fsql_verdict.h"
 
 SQLITE_EXTENSION_INIT3
 
@@ -706,6 +707,36 @@ static int stmt_isexplain(sqlite3_stmt *stmt) {
  * `reason` suitable for feeding straight back into the next GENERATE
  * retry. */
 
+/* The state-changing extension functions generated SQL may not call (matched on the name the engine resolved, so quoting,
+ * comments and case cannot dodge it), and load_extension. */
+static const char *const t2s_denied_fn_prefixes[] = {
+    "fractal_audit_log", "fractal_ledger_", "fractal_lock_destructive", "fractal_vectorizer_", "fractal_store_",
+    "fractal_diversify_", "fractal_feedback_report", "fractal_isolate_background", "fractal_agent_feedback_audit",
+    "fractal_agent_recommend_diverse", "fractal_agent_data_analyst", "fractal_config_set", "fractal_set_actor", "fractal_sql_agent",
+    "load_extension", NULL
+};
+
+static int t2s_deny_authorizer(void *ud, int action, const char *a1, const char *a2, const char *a3, const char *a4) {
+    (void)a1; (void)a3; (void)a4;
+    if (action == SQLITE_FUNCTION && a2) {
+        for (int k = 0; t2s_denied_fn_prefixes[k]; k++)
+            if (sqlite3_strnicmp(a2, t2s_denied_fn_prefixes[k], (int)strlen(t2s_denied_fn_prefixes[k])) == 0) {
+                ((FsqlT2sDeny *)ud)->denied = t2s_denied_fn_prefixes[k];
+                return SQLITE_DENY;
+            }
+    }
+    return SQLITE_OK;
+}
+
+void fsql_t2s_deny_begin(sqlite3 *db, FsqlT2sDeny *deny) {
+    deny->denied = NULL;
+    sqlite3_set_authorizer(db, t2s_deny_authorizer, deny);
+}
+
+void fsql_t2s_deny_end(sqlite3 *db) {
+    sqlite3_set_authorizer(db, NULL, NULL);
+}
+
 /* Parse-only walk of `sql`'s statement chain (preparing a statement
  * never executes it, so this is safe for every first keyword that got
  * past the pre-check above). Stops after the second statement or the
@@ -721,12 +752,19 @@ static int t2s_walk_statements(sqlite3 *db, const char *sql,
     for (;;) {
         sqlite3_stmt *s = NULL;
         const char *next = tail;
+        FsqlT2sDeny deny;
+        fsql_t2s_deny_begin(db, &deny);
         int rc = sqlite3_prepare_v2(db, tail, -1, &s, &next);
+        fsql_t2s_deny_end(db);
         if (rc != SQLITE_OK) {
             sqlite3_finalize(s);
             sqlite3_finalize(first);
-            set_err(reason, rcap, "SQL does not parse: %s",
-                    sqlite3_errmsg(db));
+            if (deny.denied)
+                set_err(reason, rcap, "statement calls %s...(), a function that changes state or reaches outside "
+                        "the database, which generated SQL may not do", deny.denied);
+            else
+                set_err(reason, rcap, "SQL does not parse: %s",
+                        sqlite3_errmsg(db));
             return -1;
         }
         if (!s) {   /* trailing whitespace/comments: nothing left */
@@ -901,7 +939,7 @@ static int t2s_review(FsqlState *st, const char *question,
 static int critique_pass(const char *critique) {
     const char *p = critique ? critique : "";
     while (*p && isspace((unsigned char)*p)) p++;
-    return ascii_prefix_ieq(p, "PASS");
+    return fsql_verdict_is_pass(p);
 }
 
 /* ------------------------------------------------------------------ */

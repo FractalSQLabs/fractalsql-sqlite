@@ -2,40 +2,29 @@
 --
 -- FractalSQL reasoning response modes: text | code | json.
 --
--- Unlike demo.sql, this is NOT meant to be run start-to-finish in one
--- `.read` pass. FSQL_REASONING_HTTP_RESPONSE_MODE is an env-var-only
--- setting read once when the reasoning plugin initializes -- switching
--- modes on an already-running install needs an OS-level environment
--- variable change plus a restart of the HOST PROCESS (the sqlite3 CLI
--- or your application -- in SQLite the plugin runs in-process, so
--- there is no separate server to restart; a new sqlite3 session does
--- NOT pick up the variable unless its environment changed). See
--- "Switching modes on an already-running install" in
--- ../docs/reasoning-setup.md for the exact commands on your platform
--- (Windows/Linux/macOS all differ here).
+-- The mode is the per-connection config key http_response_mode, so one
+-- pass through this file shows all three: each section sets the key and
+-- then runs its query. The FSQL_REASONING_HTTP_RESPONSE_MODE environment
+-- variable of the host process is only the starting value a new
+-- connection reads. See "Response Modes" in ../docs/reasoning-setup.md.
 --
 -- Prerequisites:
 --   1. Run demo.sql first -- this reuses its demo_alerts table.
 --   2. Reasoning already configured per ../docs/reasoning-setup.md
---      (per-connection fractal_config_set state, so re-apply your
---      load_fractalsql.sql snippet with -init for each section run).
+--      (per-connection fractal_config_set state, applied by your
+--      load_fractalsql.sql snippet with -init).
 --
--- Workflow for each section below:
---   1. Set FSQL_REASONING_HTTP_RESPONSE_MODE to that section's mode.
---   2. Restart the host process that loads the extension.
---   3. Run ONLY that section's query -- not the whole file at once.
---      e.g.:  sqlite3 mydb.sqlite -cmd ".load /usr/local/lib/sqlite3/fractalsql" \
---              ".read demo/response-modes.sql"
---      (select the section by running it from a copy, or feed it with
---      a here-doc / a second .read of a one-statement file.)
+-- Run it with:  sqlite3 mydb.sqlite -init load_fractalsql.sql ".read demo/response-modes.sql"
 
 .timer on
 
 -- ============================================================
--- MODE: text (the default -- nothing to configure or restart for)
+-- MODE: text (the default)
 -- ============================================================
 -- Raw model output, unchanged. This is what demo.sql and every other
 -- example in the docs already use.
+
+SELECT fractal_config_set('http_response_mode', 'text');
 
 SELECT fractal_reason(
     'summarize what happened in demo_alerts in one sentence',
@@ -47,19 +36,21 @@ SELECT fractal_reason(
 );
 
 -- ============================================================
--- MODE: code   (FSQL_REASONING_HTTP_RESPONSE_MODE=code, then restart)
+-- MODE: code
 -- ============================================================
 -- The plugin auto-appends an instruction telling the model to answer
 -- with a single fenced code block, then strips the fence markers on
 -- extraction. Expect back a bare SQL statement -- no "Here's a query
 -- that does that:" preamble, no explanation, no visible ``` markers.
 
+SELECT fractal_config_set('http_response_mode', 'code');
+
 SELECT fractal_reason(
     'write a SQLite query that selects all rows from demo_alerts where severity is critical'
 );
 
 -- ============================================================
--- MODE: json   (FSQL_REASONING_HTTP_RESPONSE_MODE=json, then restart)
+-- MODE: json
 -- ============================================================
 -- Same fenced-block extraction as code mode, plus a structural
 -- validity check (balanced braces/brackets) on the plugin side before
@@ -69,8 +60,13 @@ SELECT fractal_reason(
 -- here instead of silently accepting bad output (json() raises on
 -- malformed input).
 
+SELECT fractal_config_set('http_response_mode', 'json');
+
 SELECT json(fractal_reason(
     'return a JSON object with keys critical_count, warning_count, and info_count summarizing the severities present',
     (SELECT json_group_array(json_object('severity', severity))
        FROM (SELECT severity FROM demo_alerts))
 )) AS parsed_json;
+
+-- Back to the default for anything run after this.
+SELECT fractal_config_set('http_response_mode', '');

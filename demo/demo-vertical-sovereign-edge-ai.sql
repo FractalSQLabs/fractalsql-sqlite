@@ -123,19 +123,21 @@ SELECT fractal_dimension_boxcount(
 .print === 3. Sniper Search: ideal node profile for a GPU-inference workload ===
 
 -- Blueprint (raw primitives): refine the workload vector with
--- fractal_search_debug (the "sniper search" in the abstract space,
+-- fractal_sfs_converge_debug (the "sniper search" in the abstract space,
 -- with documented [iterations, population, diffusion] options), then
 -- map the refined profile to a REAL node with
 -- fractal_search_telemetry. The schedule_workload composition below
 -- folds both steps together and reasons (plugin-gated).
-.print --- sniper: refine the ideal node profile (fractal_search_debug) ---
-SELECT json_extract(fractal_search_debug('[0.3,0.6,0.9,0.2,0.0]', 50),
+.print --- sniper: refine the ideal node profile (fractal_sfs_converge_debug) ---
+SELECT json_extract(fractal_sfs_converge_debug('[0.3,0.6,0.9,0.2,0.0]', 50),
                     '$.best_fit')   AS best_fit,
-       json_extract(fractal_search_debug('[0.3,0.6,0.9,0.2,0.0]', 50),
+       json_extract(fractal_sfs_converge_debug('[0.3,0.6,0.9,0.2,0.0]', 50),
                     '$.best_point') AS refined_profile;
 
 .print --- schedule_workload composition: nearest REAL node (telemetry) ---
-WITH sj AS (SELECT fractal_search_debug('[0.3,0.6,0.9,0.2,0.0]', 50) AS dj),
+DROP TABLE IF EXISTS temp.last_scan;
+CREATE TEMP TABLE last_scan AS
+WITH sj AS (SELECT fractal_sfs_converge_debug('[0.3,0.6,0.9,0.2,0.0]', 50) AS dj),
      bp AS (SELECT json_extract(dj, '$.best_point') AS refined FROM sj),
      tj AS (SELECT fractal_search_telemetry('vse_nodes', 'capability',
                     (SELECT refined FROM bp), 5) AS rj)
@@ -146,7 +148,9 @@ SELECT n.id  AS assigned_node,
 FROM tj, json_each(tj.rj) je
 JOIN vse_nodes n ON n.rowid = json_extract(je.value, '$.doc_id')
 ORDER BY json_extract(je.value, '$.distance');
-SELECT fractal_reason('placement rationale for the nearest edge node to this refined workload profile');
+SELECT * FROM temp.last_scan;
+SELECT fractal_reason('placement rationale for the nearest edge node to this refined workload profile',
+    json_object('scan', (SELECT json_group_array(json_object('assigned_node', assigned_node, 'node_name', node_name, 'distance', distance, 'confidence', confidence)) FROM temp.last_scan)));
 
 -- ------------------------------------------------------------------
 -- 4. Scout Discovery: a diverse representative sample of the fleet's

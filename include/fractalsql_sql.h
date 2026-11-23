@@ -447,6 +447,16 @@ FSQL_API int fsql_ledger_reset_hard(fsql_ctx *ctx);
 FSQL_API int fsql_ledger_truth_count(const fsql_ctx *ctx,  size_t *out);
 FSQL_API int fsql_ledger_shadow_count(const fsql_ctx *ctx, size_t *out);
 
+/* Retention policy (enterprise tier). FADE (0, default): fsql_ledger_compact decays Shadow weights by x0.9 and the
+ * lowest-significance entry is evicted at the cap. EXACT (1): no decay and no eviction; fsql_feedback_report refuses a
+ * NEW handle at the cap with FSQL_ELEDGER_FULL (a handle already recorded still accepts more weight). The mode is
+ * stored in the QTL v2 header by fsql_ledger_flush and adopted by fsql_ledger_load. fsql_ledger_load REPLACES the
+ * in-memory Truth and Shadow ledgers. */
+#define FSQL_LEDGER_RETENTION_FADE  0
+#define FSQL_LEDGER_RETENTION_EXACT 1
+FSQL_API int fsql_ledger_set_retention(fsql_ctx *ctx, int mode);
+FSQL_API int fsql_ledger_get_retention(const fsql_ctx *ctx, int *out_mode);
+
 /* ----- CISO auditability --------------------------------------- */
 
 /* Unpack a QTL BLOB into human-readable JSON.
@@ -953,6 +963,15 @@ FSQL_API int fsql_morphological_complexity(const double *points, size_t n_points
  * (fsql_search_ptr) widen float->double themselves at the boundary,
  * same as they already do today for a float8[] column.
  *
+ * Precision contract: dot, l2_sq, l2, norm, cosine_distance,
+ * cosine_similarity and normalize accumulate in double, in fixed
+ * sequential order, with no fused multiply-add and no vectorised
+ * reduction, and round ONCE to float32 at the end. The result is
+ * therefore bit-identical to (float) of the exact double computation
+ * on every platform (verified on amd64, arm64, ppc64le, s390x). Inputs
+ * and outputs stay float32; stored vectors are never normalised by
+ * these functions.
+ *
  * Convention: on a degenerate zero-norm input to cosine_distance/
  * cosine_similarity, returns distance=1.0f / similarity=0.0f rather
  * than NaN -- deliberate, so a Postgres float8 result column never has
@@ -1052,6 +1071,100 @@ FSQL_API int fsql_limit_get(fsql_limit_t which, uint64_t *value,
 /* Sets a limit. 0 restores the default. A value above the ceiling is refused
  * with FSQL_ERR_INVALID and nothing changes. */
 FSQL_API int fsql_limit_set(fsql_limit_t which, uint64_t value);
+
+/* ------------------------------------------------------------------------------------------------------------------
+ * IVF index maths (sovereign and enterprise tiers; plain C, no I/O).
+ *
+ * The core only does the maths; the HOST owns storage. A host builds an index in two passes over its table (a sample
+ * pass through fsql_ivf_trainer_add, then fsql_ivf_trainer_finish returns a model blob; then an encode pass through
+ * fsql_ivf_encode gives each row its cell and its code), stores the model blob and the per-cell (row id, code) payloads
+ * wherever it keeps data, loads cells back into a resident fsql_ivf_index and asks fsql_ivf_search for candidates. The
+ * host then verifies the shortlist (fetches the rows, drops deleted ones, exact distances with fsql_vector_*, tie-break on
+ * the row id): this API never returns an unverified distance as a final answer.
+ *
+ * Vectors are float32 and are L2-normalised internally (cosine == L2 ordering). All arithmetic is IEEE double in a fixed
+ * order with no contraction, so a model blob and every code are byte-identical on every platform for the same input and
+ * feed order. Row ids are caller-chosen int64 values (a stable primary key; the index never interprets them).
+ * Formats: INT8 and INT4 are residual codes on a PCA basis (pca_dim 0 = dim/4, clamped to [8, dim]; they need dim <= 4096),
+ * FP16 and FP32 store the normalised vector. nlist 0 = sqrt(rows) clamped to [1, 4096].
+ * A trainer is single-threaded. A resident index is read-only for searches; set_cell must not run concurrently with them.
+ * Errors: FSQL_ERR_INVALID, FSQL_ERR_OOM, FSQL_ESTORAGE_INTEGRITY (a model blob that fails validation).
+ * ------------------------------------------------------------------------------------------------------------------ */
+#define FSQL_IVF_FMT_INT8 0
+#define FSQL_IVF_FMT_INT4 1
+#define FSQL_IVF_FMT_FP16 2
+#define FSQL_IVF_FMT_FP32 3
+
+typedef struct fsql_ivf_trainer fsql_ivf_trainer;
+typedef struct fsql_ivf_model   fsql_ivf_model;
+typedef struct fsql_ivf_index   fsql_ivf_index;
+
+typedef struct fsql_ivf_options {
+    uint32_t struct_size;     /* sizeof(fsql_ivf_options_t) */
+    uint32_t dim;             /* 1 .. 8192 */
+    uint32_t format;          /* FSQL_IVF_FMT_* */
+    uint32_t nlist;           /* 0 = sqrt(rows), at most 4096 and at most the sample size */
+    uint32_t pca_dim;         /* INT8/INT4 only; 0 = dim/4 clamped to [8, dim] */
+    uint32_t kmeans_iters;    /* 0 = 6 */
+    uint32_t sample;          /* training sample rows; 0 = 50000 */
+    uint32_t reserved;        /* must be 0 */
+    uint64_t seed;            /* 0 = 1 */
+} fsql_ivf_options_t;
+
+typedef struct fsql_ivf_info {
+    uint32_t dim, format, nlist, pca_dim, code_bytes, format_version;
+    double   scale;
+    uint64_t seed, rows_trained;
+} fsql_ivf_info_t;
+
+typedef struct fsql_ivf_stats {
+    uint64_t rows_scanned;
+    uint32_t cells_probed;
+    uint32_t cells_missing;   /* probed cells the host never loaded (the index "actually used" check) */
+} fsql_ivf_stats_t;
+
+/* Trainer: feed the sample pass in the table's id order (the reservoir is deterministic for a given feed order). */
+FSQL_API fsql_ivf_trainer *fsql_ivf_trainer_new(const fsql_ivf_options_t *opt, int *rc_out);
+FSQL_API int  fsql_ivf_trainer_add(fsql_ivf_trainer *t, const float *vecs, size_t count);   /* count x dim floats */
+FSQL_API int  fsql_ivf_trainer_finish(fsql_ivf_trainer *t, uint8_t **model_out, size_t *model_len_out);
+FSQL_API void fsql_ivf_trainer_free(fsql_ivf_trainer *t);
+
+/* Model blob (centroids, PCA basis, scale; little-endian, versioned, checksummed). Free a returned blob with fsql_ivf_free. */
+FSQL_API fsql_ivf_model *fsql_ivf_model_load(const uint8_t *blob, size_t len, int *rc_out);
+FSQL_API void fsql_ivf_model_free(fsql_ivf_model *m);
+FSQL_API int  fsql_ivf_model_info(const fsql_ivf_model *m, fsql_ivf_info_t *out);
+FSQL_API void fsql_ivf_free(void *p);
+
+/* Encode pass: the cell for a vector and its code (info.code_bytes bytes into code_out). */
+FSQL_API int fsql_ivf_encode(const fsql_ivf_model *m, const float *vec, uint32_t *cell_out, uint8_t *code_out);
+FSQL_API int fsql_ivf_normalize(const float *in, size_t dim, float *out);
+
+/* Resident index. The model must outlive the index. set_cell copies; n = 0 marks the cell loaded and empty. */
+FSQL_API fsql_ivf_index *fsql_ivf_index_new(const fsql_ivf_model *m);
+FSQL_API void     fsql_ivf_index_free(fsql_ivf_index *x);
+FSQL_API int      fsql_ivf_index_set_cell(fsql_ivf_index *x, uint32_t cell, const int64_t *ids, const uint8_t *codes, size_t n);
+FSQL_API int      fsql_ivf_index_cell_rows(const fsql_ivf_index *x, uint32_t cell, uint64_t *n_out);
+FSQL_API uint64_t fsql_ivf_index_rows(const fsql_ivf_index *x);
+
+/* The cells a search would probe (cells_out holds min(nprobe, nlist) entries), so a host can load them lazily. */
+FSQL_API int fsql_ivf_probe_cells(const fsql_ivf_model *m, const float *query, uint32_t nprobe, uint32_t *cells_out, uint32_t *n_out);
+
+/* Candidates: up to `shortlist` (row id, approximate distance 1-cos) sorted by distance then id. The distances are
+ * approximate for INT8/INT4/FP16: verify them. ids_out and dist_out each hold `shortlist` entries. */
+FSQL_API int fsql_ivf_search(const fsql_ivf_index *x, const float *query, uint32_t nprobe, uint32_t shortlist,
+                             int64_t *ids_out, double *dist_out, size_t *n_out, fsql_ivf_stats_t *stats_out);
+
+/* Recall estimation. fsql_ivf_sample_rows picks `count` distinct row positions in [0, n_rows) deterministically;
+ * fsql_ivf_exact_topk is brute force over an already-normalised corpus (use_self skips the row whose id is self_id);
+ * fsql_ivf_estimate_recall compares candidates with that truth (truth is nq x k ids) at each nprobe and returns the smallest
+ * nprobe whose 95% lower bound reaches `target` (rc 0), or the largest one with rc 1 when none does. */
+FSQL_API int fsql_ivf_sample_rows(uint64_t n_rows, uint32_t count, uint64_t seed, uint64_t *out);
+FSQL_API int fsql_ivf_exact_topk(const float *corpus_n, const int64_t *ids, size_t n, size_t dim, const float *query_n,
+                                 int64_t self_id, int use_self, uint32_t k, int64_t *out_ids, size_t *n_out);
+FSQL_API int fsql_ivf_estimate_recall(const fsql_ivf_index *x, const float *queries, const int64_t *self_ids,
+                                      const int64_t *truth, size_t nq, uint32_t k, const uint32_t *nprobes, size_t nnp,
+                                      uint32_t shortlist, double target, double *mean_out, double *se_out, double *lo_out,
+                                      double *scanned_out, uint32_t *recommended_out);
 
 #ifdef __cplusplus
 }  /* extern "C" */

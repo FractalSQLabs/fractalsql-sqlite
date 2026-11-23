@@ -21,6 +21,7 @@
 #include "fsql_vector.h"
 
 SQLITE_EXTENSION_INIT3
+#include "fsql_precision.h"
 
 /* snprintf's return value is how many bytes WOULD have been written given
  * enough room, not how many actually were -- using it to advance a cursor
@@ -246,28 +247,25 @@ static void fv_binary_real_fn(sqlite3_context *ctx, int argc,
         return;
     }
 
-    float out = 0.0f;
-    sqlite3_destructor_type unused = SQLITE_TRANSIENT; (void)unused;
-
-    /* Dispatch on the registered user-data tag. */
+    /* Dispatch on the registered user-data tag. One double-accumulating implementation; the result
+     * stays double, so the SQL-visible value is not rounded to float32 on the way out. */
     int op = (int)(intptr_t)sqlite3_user_data(ctx);
-    int rc = FSQL_ERR_INVALID;
+    double out = 0.0;
+    int rc = FSQL_OK;
     switch (op) {
-    case 1: rc = fsql_vector_l2(pa, pb, (size_t)da, &out);          break;
-    case 2: rc = fsql_vector_l2_sq(pa, pb, (size_t)da, &out);       break;
-    case 3: rc = fsql_vector_cosine_distance(pa, pb, (size_t)da, &out); break;
-    case 4: rc = fsql_vector_cosine_similarity(pa, pb, (size_t)da, &out); break;
-    case 5: rc = fsql_vector_dot(pa, pb, (size_t)da, &out);
-            if (rc == FSQL_OK) out = -out;   /* negative inner product */
-            break;
-    default: break;
+    case 1: out = fsqlp_l2_f(pa, pb, (size_t)da);                break;
+    case 2: out = fsqlp_l2_sq_f(pa, pb, (size_t)da);             break;
+    case 3: out = fsqlp_cosine_distance_f(pa, pb, (size_t)da);   break;
+    case 4: out = fsqlp_cosine_similarity_f(pa, pb, (size_t)da); break;
+    case 5: out = -fsqlp_dot_f(pa, pb, (size_t)da);              break;   /* negative inner product */
+    default: rc = FSQL_ERR_INVALID; break;
     }
     free(pa); free(pb);
     if (rc != FSQL_OK) {
         sqlite3_result_error(ctx, "fractalsql: vector op failed", -1);
         return;
     }
-    sqlite3_result_double(ctx, (double)out);
+    sqlite3_result_double(ctx, out);
 }
 
 /* Binary vector-result operators (add/sub). */
@@ -338,14 +336,9 @@ static void fv_norm_fn(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
         sqlite3_result_error(ctx, "fractalsql: malformed vector", -1);
         return;
     }
-    float out = 0.0f;
-    int rc = fsql_vector_norm(pa, (size_t)da, &out);
+    double out = fsqlp_norm_f(pa, (size_t)da);
     free(pa);
-    if (rc != FSQL_OK) {
-        sqlite3_result_error(ctx, "fractalsql: vector op failed", -1);
-        return;
-    }
-    sqlite3_result_double(ctx, (double)out);
+    sqlite3_result_double(ctx, out);
 }
 
 /* fractal_vector_normalize(vec) -> canonical BLOB. */
@@ -362,7 +355,11 @@ static void fv_normalize_fn(sqlite3_context *ctx, int argc,
     }
     float *out = (float *)malloc((size_t)da * sizeof(float));
     if (!out) { free(pa); sqlite3_result_error_nomem(ctx); return; }
-    int rc = fsql_vector_normalize(pa, (size_t)da, out);
+    int rc = FSQL_OK;
+    {   /* double norm, one rounding to float32 per component (same contract as the core's fsql_vector_normalize) */
+        double nn = fsqlp_norm_f(pa, (size_t)da);
+        for (int i = 0; i < da; i++) out[i] = (nn == 0.0) ? 0.0f : (float)((double)pa[i] / nn);
+    }
     free(pa);
     if (rc != FSQL_OK) { free(out);
         sqlite3_result_error(ctx, "fractalsql: vector op failed", -1); return; }

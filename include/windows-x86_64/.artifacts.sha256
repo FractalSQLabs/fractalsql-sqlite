@@ -1,8 +1,8 @@
-e481aed5bde40ab182a97d0564ddb783f4429e586785157fd576c8a3f1eab126  ./fractalsql-community-minimal-c.dll
-35d2a55a2907dfd36d03e6e638fbc74e31319035be61562b52e0078439a2fd98  ./fractalsql-community-minimal-c-import.lib
-2873fb22c215d3d71f842a2db4628b017d1fde524fa358c26cf3c49c3108c002  ./fractalsql-community-minimal-c.lib
-bfb407d353c3b9274330dd2c7c7ce10156a8e02621d0e7bd83587390bb33c947  ./fractalsql-community-sovereign-c.dll
-2411b9ea253adb5dac65db3f7c87f04c41b7293e2bb387ea90779b6d2796504b  ./fractalsql-community-sovereign-c-import.lib
-3e52dbf16bb1530d53fa39fbe647e3fc61323591230d3fa94b4473adf605a274  ./fractalsql-community-sovereign-c.lib
-2955d00a94b116c5d78189b1028210ef3261111205f58c22cec3c1dd64cbd1e2  ./fractalsql-reasoning-http.dll
-8bf99d0cd200be355cdd8d3d988148ee0b5ea20351571f4c485246edb89135cd  ./fractalsql-reasoning-http.dll.sig
+114970ed18199ae1fbd335532cbd8fead28ad00810a9b99ef55e5fa34268fa30  ./fractalsql-community-minimal-c.dll
+bf392f4984595091c712480b0b76f9471e38d5f7b9546d890ee28871c6a42bf4  ./fractalsql-community-minimal-c-import.lib
+e4b3e862c3c78a91a0a7ba34be2744f870c1d8d23f2ee28a14b94d2e53004f70  ./fractalsql-community-minimal-c.lib
+38c3c7bf5bad79bf0a589526810f7c7679b67a53d61a4bbae948016aeff27802  ./fractalsql-community-sovereign-c.dll
+e9ad5c092ecde799c18bf0889b1ffd9d558b72af836f88c11b008b93ce499fb7  ./fractalsql-community-sovereign-c-import.lib
+2de3dc03d261ba4782590f3208a13442b479084967216a7557e8ef4b9e9c8e55  ./fractalsql-community-sovereign-c.lib
+8bd0406af2b5bc6210a902cfef7d20b0f6d45dd39bd91641703842d73340fb0b  ./fractalsql-reasoning-http.dll
+55204e15626871a58a72b47d1939b9e1113eb1b37654d2b4ba77dd9a4bdce8b3  ./fractalsql-reasoning-http.dll.sig

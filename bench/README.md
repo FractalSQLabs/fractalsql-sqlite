@@ -183,3 +183,35 @@ absolute value.
 --search-queries   queries to average for the latency sub-benchmark
                    (default 10)
 ```
+
+## IVF index head-to-head (`index_head_to_head.py`)
+
+`index_head_to_head.py` compares the indexed `fractal_search` (built with `fractal_index_create`, one run per `vector_format`) against the
+exact scan (`fractal_search_telemetry`, the ground truth) and, when the `sqlite_vec` module is importable, sqlite-vec's exact `vec0`. For each
+contestant it prints recall@10 against the exact top-10, median latency per query, rows scanned (below the row count proves the index was used),
+and for each index its bytes per row, build time and the nprobe calibrated at build time. The distances an index returns are exact (every
+candidate is verified against the stored vector), so recall is the only quality metric.
+
+```bash
+python3 bench/index_head_to_head.py --n 20000 --dim 128
+python3 bench/index_head_to_head.py --embeddings embeddings.npy      # real unit-length embeddings, generated at test time, never committed
+```
+
+On isotropic synthetic clusters the default `pca_dim` (dim/4) is lossy and INT8/INT4 recall falls short of FP16/FP32 (the build-time calibration
+reports this); real text embeddings concentrate their energy and recover full-width recall. This script is the speed/recall benchmark;
+`head_to_head.py` above stays the diversity benchmark (Scout against sqlite-vec).
+
+## Precision agreement (`precision_agreement.py`)
+
+`precision_agreement.py` checks the precision contract of the SQL vector functions: cosine / L2 / dot / norm accumulate in double in a fixed order
+and are returned as doubles. For random unit vectors (and optionally real embeddings) at 128, 768 and 1536 dimensions it reports top-10
+agreement with a float64 reference, the maximum absolute and relative error, and the share of results that are bit-identical to the sequential
+double reference (1.0000 expected).
+
+```bash
+python3 bench/precision_agreement.py
+```
+
+## Scale sweep (`scale_sweep.sh`)
+
+`bench/scale_sweep.sh [db-path]` regenerates `bench_vectors` at a range of small-to-medium corpus sizes and runs `head_to_head.py` on both the JSON text column and the `fractal_vector` column, printing one line per size so you can see where the latency and recall curves cross.

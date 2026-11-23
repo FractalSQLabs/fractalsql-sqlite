@@ -19,14 +19,20 @@
  *   http_think                           str
  *   http_think_provider                  str
  *   http_native_url                      str
+ *   http_response_mode                   str (the response mode the chat model is asked for; the environment value is the default)
  *   http_num_ctx                         int 0..1048576
  *   text_to_sql_max_attempts             int 1..10 (dflt 2)
+ *   ledger_retention                     enum fade|exact (dflt fade; enterprise ledger)
  *   text_to_sql_allowed_statements       enum
  *   text_to_sql_use_review               bool
  *   enterprise_lib                       path*
  *   enterprise_ledger_key                str*
  *   enterprise_require_signature         bool
  *   agent_partial_reasoning_fail         bool
+ *   agent_use_index                      off|on|auto (dflt off; route_task / outlier_intercept / schedule_workload search through fractal_index; auto: only a ready, calibrated index on a table of at least agent_index_min_rows)
+ *   ledger_max_rows                      int (dflt 10000000, or FSQL_LEDGER_MAX_ROWS when set; 0 = unbounded; appends past it are refused)
+ *   agent_index_min_rows                 int (dflt 10000; the smallest table an agent in auto mode sends through an index)
+ *   agent_context_row_bytes              int (dflt 8192; a text cell longer than this is cut, and marked, in the context the retrieval agents give the model; 0 = no cut)
  *
  *   * = path-type keys get extra validation at set time: they must be
  *   absolute with no traversal segments (mirroring fsql_load_reasoning's
@@ -62,7 +68,7 @@ SQLITE_EXTENSION_INIT3
 /* Key table                                                           */
 /* ------------------------------------------------------------------ */
 
-typedef enum { CFG_STR, CFG_PATH, CFG_INT, CFG_BOOL, CFG_ENUM } CfgType;
+typedef enum { CFG_STR, CFG_PATH, CFG_INT, CFG_BOOL, CFG_ENUM, CFG_TRI } CfgType;   /* CFG_TRI: off | on | auto (the boolean spellings also work) */
 
 typedef struct {
     const char *key;        /* without the "fractalsql." prefix      */
@@ -89,15 +95,21 @@ static const CfgDef CFG_TABLE[] = {
     { "http_think",              CFG_STR,  NULL, NULL, 0, 0, NULL, NULL },
     { "http_think_provider",     CFG_STR,  NULL, NULL, 0, 0, NULL, NULL },
     { "http_native_url",         CFG_PATH, NULL, NULL, 0, 0, NULL, NULL },
+    { "http_response_mode",      CFG_STR,  NULL, NULL, 0, 0, NULL, NULL },
     { "http_num_ctx",            CFG_INT,  NULL, NULL, 0, 1048576, "0", NULL },
     { "text_to_sql_max_attempts",CFG_INT,  NULL, NULL, 1, 10, "2",  NULL },
     { "text_to_sql_allowed_statements", CFG_ENUM, NULL, NULL, 0, 0,
       "select", "select|select_insert_update" },
     { "text_to_sql_use_review",  CFG_BOOL, NULL, NULL, 0, 0, "0",  NULL },
+    { "ledger_retention",        CFG_ENUM, NULL, NULL, 0, 0, "fade", "fade|exact" },
     { "enterprise_lib",          CFG_PATH, NULL, NULL, 0, 0, NULL, NULL },
     { "enterprise_ledger_key",   CFG_STR,  NULL, NULL, 0, 0, NULL, NULL },
     { "enterprise_require_signature", CFG_BOOL, NULL, NULL, 0, 0, "0", NULL },
     { "agent_partial_reasoning_fail", CFG_BOOL, NULL, NULL, 0, 0, "0", NULL },
+    { "agent_use_index",         CFG_TRI,  NULL, NULL, 0, 0, "0", NULL },
+    { "ledger_max_rows",         CFG_INT,  NULL, NULL, 0, 2000000000, "10000000", NULL },
+    { "agent_index_min_rows",    CFG_INT,  NULL, NULL, 0, 2000000, "10000", NULL },
+    { "agent_context_row_bytes", CFG_INT,  NULL, NULL, 0, 1048576, "8192", NULL },
 };
 #define CFG_N (sizeof(CFG_TABLE) / sizeof(CFG_TABLE[0]))
 
@@ -130,8 +142,10 @@ static char **cfg_str_slot(FsqlState *st, const CfgDef *d) {
     if (strcmp(d->key, "http_think") == 0)              return &st->cfg.http_think;
     if (strcmp(d->key, "http_think_provider") == 0)     return &st->cfg.http_think_provider;
     if (strcmp(d->key, "http_native_url") == 0)         return &st->cfg.http_native_url;
+    if (strcmp(d->key, "http_response_mode") == 0)      return &st->cfg.response_mode;
     if (strcmp(d->key, "text_to_sql_allowed_statements") == 0)
         return &st->cfg.t2s_allowed_statements;
+    if (strcmp(d->key, "ledger_retention") == 0)        return &st->cfg.ledger_retention;
     if (strcmp(d->key, "enterprise_lib") == 0)          return &st->cfg.enterprise_lib;
     if (strcmp(d->key, "enterprise_ledger_key") == 0)   return &st->cfg.enterprise_ledger_key;
     return NULL;
@@ -153,8 +167,10 @@ static const char *cfg_str_value(const FsqlState *st, const CfgDef *d) {
     if (strcmp(d->key, "http_think") == 0)              return st->cfg.http_think;
     if (strcmp(d->key, "http_think_provider") == 0)     return st->cfg.http_think_provider;
     if (strcmp(d->key, "http_native_url") == 0)         return st->cfg.http_native_url;
+    if (strcmp(d->key, "http_response_mode") == 0)      return st->cfg.response_mode;
     if (strcmp(d->key, "text_to_sql_allowed_statements") == 0)
         return st->cfg.t2s_allowed_statements;
+    if (strcmp(d->key, "ledger_retention") == 0)        return st->cfg.ledger_retention;
     if (strcmp(d->key, "enterprise_lib") == 0)          return st->cfg.enterprise_lib;
     if (strcmp(d->key, "enterprise_ledger_key") == 0)   return st->cfg.enterprise_ledger_key;
     return NULL;
@@ -170,6 +186,14 @@ static int *cfg_int_slot(FsqlState *st, const CfgDef *d) {
         return &st->cfg.enterprise_require_signature;
     if (strcmp(d->key, "agent_partial_reasoning_fail") == 0)
         return &st->cfg.agent_partial_reasoning_fail;
+    if (strcmp(d->key, "agent_use_index") == 0)
+        return &st->cfg.agent_use_index;
+    if (strcmp(d->key, "ledger_max_rows") == 0)
+        return &st->cfg.ledger_max_rows;
+    if (strcmp(d->key, "agent_index_min_rows") == 0)
+        return &st->cfg.agent_index_min_rows;
+    if (strcmp(d->key, "agent_context_row_bytes") == 0)
+        return &st->cfg.agent_context_row_bytes;
     return NULL;
 }
 
@@ -216,6 +240,7 @@ static int cfg_set_str_or_path(FsqlState *st, const CfgDef *d,
     if (!value || !*value) {
         /* Empty string resets to unset. */
         char **slot = cfg_str_slot(st, d);
+        if (!slot) { if (err) snprintf(err, err_cap, "unknown config key"); return -1; }
         free(*slot); *slot = NULL;
         return 0;
     }
@@ -241,6 +266,11 @@ static int cfg_set_str_or_path(FsqlState *st, const CfgDef *d,
         return -1;
     }
     char **slot = cfg_str_slot(st, d);
+    if (!slot) {
+        free(copy);
+        if (err) snprintf(err, err_cap, "unknown config key");
+        return -1;
+    }
     free(*slot);
     *slot = copy;
     return 0;
@@ -262,7 +292,9 @@ static int cfg_set_int(FsqlState *st, const CfgDef *d, const char *value,
             "'%s' must be %d..%d", bare, d->int_min, d->int_max);
         return -1;
     }
-    *cfg_int_slot(st, d) = (int)v;
+    int *islot = cfg_int_slot(st, d);
+    if (!islot) { if (err) snprintf(err, err_cap, "unknown config key"); return -1; }
+    *islot = (int)v;
     return 0;
 }
 
@@ -282,7 +314,31 @@ static int cfg_set_bool(FsqlState *st, const CfgDef *d, const char *value,
             "'%s' expects true/false/on/off/1/0", bare);
         return -1;
     }
-    *cfg_int_slot(st, d) = v;
+    int *islot = cfg_int_slot(st, d);
+    if (!islot) { if (err) snprintf(err, err_cap, "unknown config key"); return -1; }
+    *islot = v;
+    return 0;
+}
+
+/* CFG_TRI setter: off | on | auto; the boolean spellings are accepted too (true/yes/1 = on, false/no/0/"" = off).
+ * Stored as 0 / 1 / 2. Returns 0, or -1 with err filled. */
+static int cfg_set_tri(FsqlState *st, const CfgDef *d, const char *value,
+                       const char *bare, char *err, size_t err_cap) {
+    int v;
+    if (!value) v = 0;
+    else if (!strcmp(value, "auto")) v = 2;
+    else if (!strcmp(value, "true") || !strcmp(value, "on") ||
+             !strcmp(value, "1") || !strcmp(value, "yes")) v = 1;
+    else if (!strcmp(value, "false") || !strcmp(value, "off") ||
+             !strcmp(value, "0") || !strcmp(value, "no") ||
+             !strcmp(value, "")) v = 0;
+    else {
+        if (err) snprintf(err, err_cap, "'%s' must be one of: off, on, auto", bare);
+        return -1;
+    }
+    int *islot = cfg_int_slot(st, d);
+    if (!islot) { if (err) snprintf(err, err_cap, "unknown config key"); return -1; }
+    *islot = v;
     return 0;
 }
 
@@ -309,6 +365,11 @@ static int cfg_set_enum(FsqlState *st, const CfgDef *d, const char *value,
         return -1;
     }
     char **slot = cfg_str_slot(st, d);
+    if (!slot) {
+        free(copy);
+        if (err) snprintf(err, err_cap, "unknown config key");
+        return -1;
+    }
     free(*slot);
     *slot = copy;
     return 0;
@@ -345,8 +406,17 @@ int fsql_config_set(FsqlState *st, const char *name,
         return cfg_set_int(st, d, value, bare, err, err_cap);
     case CFG_BOOL:
         return cfg_set_bool(st, d, value, bare, err, err_cap);
-    case CFG_ENUM:
-        return cfg_set_enum(st, d, value, bare, err, err_cap);
+    case CFG_TRI:
+        return cfg_set_tri(st, d, value, bare, err, err_cap);
+    case CFG_ENUM: {
+        int rc = cfg_set_enum(st, d, value, bare, err, err_cap);
+        /* The retention mode lives in the core's context: once the enterprise library is loaded a change takes effect
+         * at once (before that, fsql_enterprise_ensure applies it when it loads). */
+        if (rc == 0 && strcmp(bare, "ledger_retention") == 0 && st->ent_loaded &&
+            fsql_enterprise_apply_retention(st, err, err_cap) != 0)
+            return -1;
+        return rc;
+    }
     }
     return -1;
 }
@@ -354,7 +424,7 @@ int fsql_config_set(FsqlState *st, const char *name,
 const char *fsql_config_get(const FsqlState *st, const char *name) {
     const CfgDef *d = cfg_lookup(name);
     if (!d) return NULL;
-    if (d->type == CFG_INT || d->type == CFG_BOOL) {
+    if (d->type == CFG_INT || d->type == CFG_BOOL || d->type == CFG_TRI) {
         /* int values are read via the same function's TEXT formatting
          * in the SQL wrapper below; direct pointer access only. */
         return NULL;
@@ -377,6 +447,10 @@ void fsql_config_apply_defaults(FsqlState *st) {
         const CfgDef *d = &CFG_TABLE[i];
         if (!d->dflt) continue;
         (void)fsql_config_set(st, d->key, d->dflt, err, sizeof err);
+    }
+    {   /* the environment variable that was the only control before the key existed: it is the initial value */
+        const char *e = getenv("FSQL_LEDGER_MAX_ROWS");
+        if (e && *e) (void)fsql_config_set(st, "ledger_max_rows", e, err, sizeof err);
     }
 }
 
@@ -410,6 +484,22 @@ static void fs_set_fn(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
     sqlite3_result_text(ctx, "ok", -1, SQLITE_STATIC);
 }
 
+/* fractal_config_keys() -> TEXT: a JSON array of {name, type, session_overridable} for every key, so a caller can discover the knobs instead of
+ * hard-coding them. Every key here is set per connection (fractal_config_set), so session_overridable is true. type is string, path, int, bool or
+ * enum (agent_use_index is an enum: off, on, auto). */
+static void fs_keys_fn(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    (void)argc; (void)argv;
+    static const char *const names[] = { "string", "path", "int", "bool", "enum", "enum" };
+    sqlite3_str *o = sqlite3_str_new(NULL);
+    sqlite3_str_appendall(o, "[");
+    for (size_t i = 0; i < CFG_N; i++)
+        sqlite3_str_appendf(o, "%s{\"name\":\"%s\",\"type\":\"%s\",\"session_overridable\":true}", i ? "," : "", CFG_TABLE[i].key, names[CFG_TABLE[i].type]);
+    sqlite3_str_appendall(o, "]");
+    char *res = sqlite3_str_finish(o);
+    if (!res) { sqlite3_result_error_nomem(ctx); return; }
+    sqlite3_result_text(ctx, res, -1, sqlite3_free);
+}
+
 /* fractal_config_get(name TEXT) -> TEXT (NULL if unset / numeric keys). */
 static void fs_get_fn(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
     (void)argc;
@@ -425,12 +515,27 @@ static void fs_get_fn(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
         sqlite3_result_error(ctx, "fractal_config_get: unknown config key", -1);
         return;
     }
+    if (d->type == CFG_TRI) {
+        int *islot = cfg_int_slot(st, d);
+        if (!islot) { sqlite3_result_null(ctx); return; }
+        sqlite3_result_text(ctx, *islot == 2 ? "auto" : *islot == 1 ? "on" : "off", -1, SQLITE_STATIC);
+        return;
+    }
     if (d->type == CFG_INT || d->type == CFG_BOOL) {
-        sqlite3_result_int(ctx, *cfg_int_slot(st, d));
+        int *islot = cfg_int_slot(st, d);
+        if (!islot) { sqlite3_result_null(ctx); return; }
+        sqlite3_result_int(ctx, *islot);
+        return;
+    }
+    /* Secrets are write-only through SQL: the bearer token and the ledger HMAC
+     * key must not be readable by any statement, whether it comes from the caller,
+     * a view in a shared database file, or generated SQL. */
+    if (strcmp(d->key, "http_token") == 0 || strcmp(d->key, "enterprise_ledger_key") == 0) {
+        sqlite3_result_null(ctx);
         return;
     }
     char **slot = cfg_str_slot(st, d);
-    if (!*slot) { sqlite3_result_null(ctx); return; }
+    if (!slot || !*slot) { sqlite3_result_null(ctx); return; }
     sqlite3_result_text(ctx, *slot, -1, SQLITE_TRANSIENT);
 }
 
@@ -440,7 +545,10 @@ static void fs_get_fn(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
 
 int fsql_config_register(sqlite3 *db, FsqlState *st) {
     (void)st;
-    const int flags = SQLITE_UTF8 | SQLITE_INNOCUOUS;  /* stateful: NOT deterministic */
+    /* The getter reads connection state that includes endpoints and paths, so it
+     * is DIRECTONLY like the setter: INNOCUOUS would let a view in a database
+     * file call it even with trusted_schema off. */
+    const int flags = SQLITE_UTF8 | SQLITE_DIRECTONLY;  /* stateful: NOT deterministic */
     /* The setter changes which library and endpoints the extension loads and
      * calls, so it is DIRECTONLY: SQL stored in a database file (a trigger,
      * view or generated column) must not be able to run it. */
@@ -452,5 +560,9 @@ int fsql_config_register(sqlite3 *db, FsqlState *st) {
     rc = sqlite3_create_function_v2(
         db, "fractal_config_get", 1, flags, st,
         fs_get_fn, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = sqlite3_create_function_v2(
+        db, "fractal_config_keys", 0, flags, st,
+        fs_keys_fn, NULL, NULL, NULL);
     return rc;
 }

@@ -146,7 +146,7 @@ SELECT fractal_diversify_disable();
 
 -- ------------------------------------------------------------------
 -- 3. fractal_search_telemetry: real top-k rows (doc_id + distance) --
--- the primitive fractal_search_explore/fractal_search don't provide on their
+-- the primitive fractal_search_explore/fractal_sfs_converge don't provide on their
 -- own (see that function's own doc comment).
 -- ------------------------------------------------------------------
 .print
@@ -164,14 +164,14 @@ ORDER BY json_extract(je.value, '$.distance');
 -- feedback on a result, and confirm the session picks it up.
 --
 -- fractal_diversify_enable()'s own doc comment scopes this to
--- "fractal_search results" specifically -- fractal_search_telemetry's
+-- "fractal_sfs_converge results" specifically -- fractal_search_telemetry's
 -- top_k (and hybrid_clinical_search/search_trajectory/cross_modal_
 -- search, which all share it) is deliberately a literal, ground-truth
 -- "k nearest REAL rows to this query" list, not repulsion-adjusted --
 -- that's what makes it trustworthy for the doc_id/distance pairs the
 -- rest of this demo joins back to real catalog rows. Repulsion state
 -- from fractal_isolate_background is real (see the diagnostics below),
--- but today it only steers fractal_search()'s own single converged
+-- but today it only steers fractal_sfs_converge()'s own single converged
 -- point in the abstract [-1,1]^dim space, not this table-backed top-k
 -- list -- so re-running the SAME fractal_search_telemetry query below
 -- correctly returns the SAME top result, not a different one.

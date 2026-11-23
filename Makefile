@@ -63,7 +63,11 @@ else
   SOVEREIGN_DEFINE :=
 endif
 
+# -ffp-contract=off -fno-tree-vectorize: the precision contract. Every distance accumulates in double in a fixed sequential
+# order; a fused multiply-add (aarch64, ppc64le) or a vectorised reduction would change the last bits, and results must be
+# bit-identical on every architecture (precision plan R3, the same flags the core builds vector.c with).
 CFLAGS = -std=c11 -O3 -fPIC \
+         -ffp-contract=off -fno-tree-vectorize \
          -ffunction-sections -fdata-sections \
          -Wall -Wextra \
          $(SOVEREIGN_DEFINE) \
@@ -144,7 +148,7 @@ TARGET = fractalsql.so
 # On a minimal build the sovereign names then surface as SQLite
 # "no such function" errors; the smoke surface (edition/version/search)
 # is unaffected. See the TU map in src/fsql_sqlite_internal.h.
-SOVEREIGN_SRCS := src/fsql_reasoning.c src/fsql_t2s.c \
+SOVEREIGN_SRCS := src/fsql_reasoning.c src/fsql_t2s.c src/fsql_index.c \
                   src/fsql_vectorizer.c src/fsql_agents.c \
                   src/fsql_domain_agents.c \
                   src/fsql_ledger.c src/fsql_sovereign.c

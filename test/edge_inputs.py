@@ -17,7 +17,7 @@ Configurations (each a full pass over the catalog):
 Then a short pass with the mock plugin set to misbehave (rc / empty / garbage), driving the agents, text_to_sql and the vectorizer
 through their outage and bad-reply handling.
 
-Env: FSQL_EXT (the extension; default ./fractalsql.so), SQLITE3, EDGE_CONFIGS=configured,bare,fail (default all), EDGE_MAX_OVERLOADS
+Env: FSQL_EXT (the extension; default ./fractalsql.so), SQLITE3, EDGE_CONFIGS=configured,bare,fail,real (default: the first three, and real when FSQL_ENTERPRISE_LIB names a library), EDGE_MAX_OVERLOADS
 (debug), EDGE_ENT=<mock enterprise variant>, plus any process environment to run the whole matrix under (FSQL_AUDIT_REDACT, ...).
 Exit status is nonzero when any function crashed."""
 import os, re, shutil, subprocess, sys, tempfile, time
@@ -29,7 +29,11 @@ SQLITE3 = os.environ.get("SQLITE3") or shutil.which("sqlite3")
 EXT = os.path.abspath(os.environ.get("FSQL_EXT") or os.path.join(ROOT, "fractalsql.so"))
 if not SQLITE3 or not os.path.exists(EXT):
     print("  FAIL need the sqlite3 shell and the built extension (FSQL_EXT)"); sys.exit(1)
-CONFIGS = os.environ.get("EDGE_CONFIGS", "configured,bare,fail").split(",")
+# The real enterprise library (FSQL_ENTERPRISE_LIB, an absolute path), when one is supplied, adds a fourth configuration: the same matrix with the
+# real core behind the ledger, audit and optimizer functions instead of the mock (whose flush and verify answer far less than the real ones).
+REAL_LIB = os.environ.get("FSQL_ENTERPRISE_LIB") or ""
+REAL_LIB = os.path.abspath(REAL_LIB) if REAL_LIB and os.path.isfile(REAL_LIB) else ""
+CONFIGS = os.environ.get("EDGE_CONFIGS", "configured,bare,fail" + (",real" if REAL_LIB else "")).split(",")
 MAXO = int(os.environ.get("EDGE_MAX_OVERLOADS", "0") or 0)
 WORKERS = int(os.environ.get("EDGE_WORKERS", "4"))
 BAD = re.compile(r"Segmentation fault|Aborted|AddressSanitizer|UndefinedBehavior|runtime error:|Sanitizer|double free|corrupted|"
@@ -59,7 +63,15 @@ POOL = ["NULL", "''", "' '", "'{'", "'[]'", "'{\"a\":'", "'it''s'", "'x;DROP TAB
         "printf('%.*c', 5000, 'x')", "'üñï'", "'-1'", "'1e400'", "0", "-1", "1", "2147483647", "-2147483648", "100000",
         "9223372036854775807", "0.0", "-1.0", "1e308", "-1e308", "1e999", "-1e999", "'nan'", "'[nan]'", "'[1e999]'",
         "'[0.1,0.2'", "'0.1,0.2,0.3'", "'[0.1,0.2,0.3,0.4,0.5]'", "'[]'", "x''", "x'FF'", "x'0001'", "zeroblob(3000)",
-        "'[' || replace(hex(zeroblob(2000)), '00', '1,') || '1]'", "'1,2,3,4,5,6'", "'[[1,2],[3,4]]'", "'{\"population_size\":5,\"iterations\":3}'"]
+        "'[' || replace(hex(zeroblob(2000)), '00', '1,') || '1]'", "'1,2,3,4,5,6'", "'[[1,2],[3,4]]'", "'{\"population_size\":5,\"iterations\":3}'",
+        # float32 BLOB vectors: one valid element, NaN, +Inf, all-ones bits, an odd length past 4, and a multiple of 4 past the 4 MiB input cap
+        "x'0000803f'", "x'0000c07f'", "x'0000807f'", "x'ffffffff'", "zeroblob(7)", "zeroblob(4194308)",
+        # JSON strings carrying every escape (\b \f \n \r \t \/ \" \\ \u00e9, a surrogate pair) and bad ones (a lone surrogate, a short \u, an unknown escape, a trailing backslash)
+        "'{\"a\":\"\\b\\f\\n\\r\\t\\/\\\"\\\\\\u00e9\\ud83d\\ude00\"}'", "'{\"a\":\"\\ud83d\"}'", "'{\"a\":\"\\u12\"}'",
+        "'{\"a\":\"\\q\"}'", "'{\"a\":\"x\\'", "'[\"\\n\\t\"]'",
+        # text that is not valid UTF-8, one defect each: a lone continuation, an overlong, a UTF-16 surrogate, past U+10FFFF, below U+10000 as 4 bytes, truncated
+        "CAST(x'80' AS TEXT)", "CAST(x'c0af' AS TEXT)", "CAST(x'e08080' AS TEXT)", "CAST(x'eda080' AS TEXT)", "CAST(x'f4908080' AS TEXT)",
+        "CAST(x'f0808080' AS TEXT)", "CAST(x'f09f98' AS TEXT)", "CAST(x'f09f9880' AS TEXT)", "CAST(x'ff' AS TEXT)"]
 # functions that are slow with a large integer argument or that must not run for real from a sweep
 SKIP = re.compile(r"^fractal_(ledger_reset_hard|ledger_reset_soft|lock_destructive)$")
 
@@ -114,10 +126,10 @@ def sweep(label, depth, only=None, env_extra=None, fail_mode=None):
     if MAXO: names = names[:MAXO]
     env = dict(env_extra or {})
     pre = [PRELUDE]
-    if label == "configured":
+    if label in ("configured", "real"):
         if "mock_reasoning_plugin" in MOCKS: pre.append("SELECT fractal_config_set('reasoning_plugin', '%s');" % MOCKS["mock_reasoning_plugin"])
         ent = os.environ.get("EDGE_ENT")
-        lib = MOCKS.get(ent or "mock_enterprise_core")
+        lib = REAL_LIB if label == "real" else MOCKS.get(ent or "mock_enterprise_core")
         if lib: env["FRACTALSQL_ENTERPRISE_LIB"] = lib
     elif label == "fail" and "mock_reasoning_plugin" in MOCKS:
         pre.append("SELECT fractal_config_set('reasoning_plugin', '%s');" % MOCKS["mock_reasoning_plugin"])
@@ -155,6 +167,8 @@ total_stmts = fails = 0
 AGENTISH = lambda n: re.search(r"agent|reason|embed|vectorizer|text_to_sql|explore|hybrid|rag|plan_|cross_modal|detect_loop|schema_context", n)
 if "configured" in CONFIGS:
     t, f = sweep("configured", "full"); total_stmts += t; fails += f
+if "real" in CONFIGS and REAL_LIB:
+    t, f = sweep("real", "full"); total_stmts += t; fails += f
 if "bare" in CONFIGS:
     t, f = sweep("bare", "bare"); total_stmts += t; fails += f
 if "fail" in CONFIGS:

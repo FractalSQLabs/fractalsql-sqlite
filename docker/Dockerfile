@@ -124,7 +124,7 @@ RUN case "${CORE_VARIANT}" in \
         *)           echo "" > /sovereign.txt; \
                      printf '%s\n' \
                          src/fsql_reasoning.c src/fsql_t2s.c \
-                         src/fsql_vectorizer.c src/fsql_agents.c \
+                         src/fsql_vectorizer.c src/fsql_agents.c src/fsql_index.c \
                          src/fsql_domain_agents.c \
                          src/fsql_ledger.c src/fsql_sovereign.c \
                      > /src-exclude.txt ;; \
@@ -183,9 +183,9 @@ cur = conn.cursor()
 assert cur.execute("SELECT fractal_edition()").fetchone()[0] == "Community"
 ver = cur.execute("SELECT fractal_version()").fetchone()[0]
 assert ver.count(".") == 2, ver
-d = cur.execute("SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0')").fetchone()[0]
+d = cur.execute("SELECT fractal_sfs_converge('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0')").fetchone()[0]
 assert abs(d) < 1e-6, d
-print("smoke OK: Community %s, self-search dist=%r" % (ver, d))
+print("smoke OK: Community %s, self-convergence dist=%r" % (ver, d))
 EOF
 
 # MCP server (mcp/fractalsql-sqlite-mcp) — built here, against this

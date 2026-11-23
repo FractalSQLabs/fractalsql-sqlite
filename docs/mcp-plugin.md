@@ -119,7 +119,7 @@ Sanity check without a database: `fractalsql-sqlite-mcp --version` and
 | `FSQL_MCP_ALLOWED_ORIGINS` | no | Comma-separated browser origins allowed to make cross-origin requests. A request with an `Origin` header that is not on the list is refused with `403`; a request with no `Origin` header is not a browser request and is served. |
 | `FSQL_MCP_PROTOCOL_ERA` | no | `dual` (default) serves both protocol eras; `modern` serves the modern era only and refuses the legacy handshake. See [Protocol versions](#protocol-versions). |
 | `FSQL_MCP_SESSION_TTL_SECS` | no | How long a session-state handle stays valid (default 3600). |
-| `FSQL_MCP_MAX_SESSIONS` | no | How many session-state handles one deployment may hold at once (default 64). |
+| `FSQL_MCP_MAX_SESSIONS` | no | How many session-state handles one deployment may hold at once (default 64). A stateful call that names no context, made once the cap is reached, is refused with `503`. |
 | `FSQL_MCP_ALLOW_AUTO_EXECUTE` | no | `off` (default) refuses `auto_execute` on the two tools that take it, whatever the caller asks for; `on` lets a model ask for it. See [Safety](#safety). |
 | `FSQL_MCP_CONFIG_WRITES` | no | `off`, `safe` (default) or `all`: whether the config-writing admin tools may write, and which keys. `safe` allows only the model names and the think mode; every other key, and every key this build does not know about, is refused. |
 | `FSQL_MCP_ALLOW_MISSING_LOCKS` | no | `true` starts the server when the schema lock or the safety lock is absent. Off by default: without the locks the tool surface is unverified, and the server refuses to start. |
@@ -163,7 +163,7 @@ by default. One setting turns it off:
 | --- | --- | --- |
 | `FSQL_REASONING_REQUIRE_SIGNATURE` | no | `1` (the default) requires a valid signature. Set it to `0` to load a plugin that has no `.sig` (one warning goes to stderr), for example a plugin you built yourself. A `.sig` that is present but does not verify is always refused. |
 
-Requests whose JSON nests deeper than 128 levels are rejected with a parse error, and an HTTP request with ambiguous framing (a repeated or non-numeric `Content-Length`, or an unsupported `Transfer-Encoding`) is refused with `400`.
+Requests whose JSON nests deeper than 128 levels are rejected with a parse error, and an HTTP request with ambiguous framing (a repeated or non-numeric `Content-Length`, an unsupported `Transfer-Encoding`, or a repeated `Host`, `Authorization`, `Origin`, `Content-Type` or `Mcp-*` header) is refused with `400`.
 
 Reasoning/embedding provider config (chat URL, models, etc.) stays
 where the engine's own docs put it: per-connection `fractal_config_set`
@@ -247,18 +247,18 @@ matrix even when the patch version moves.
 
 ## Tool catalog
 
-82 tools, grouped the same way the API docs group them. Optional
+94 tools, grouped the same way the API docs group them. Optional
 arguments carry their documented defaults in each tool's schema; vector
 arguments are plain JSON arrays of numbers at the MCP boundary and are
 converted to the engine's CSV/JSON TEXT convention for you. Tool names
 are the SQL function names, unprefixed.
 
-### Discovery (14)
+### Discovery (23)
 
 | Tool | Purpose |
 | --- | --- |
-| `fractal_search` | Sniper-mode SFS convergence to the single best point (per-row scalar here; tuning knobs fixed; use `fractal_search_debug` for the tunable trace). |
-| `fractal_search_debug` | Same convergence with a full trajectory trace (`best_point`/`best_fit` per generation, particle paths). |
+| `fractal_sfs_converge` | Sniper-mode SFS convergence to the single best point (per-row scalar here; tuning knobs fixed; use `fractal_sfs_converge_debug` for the tunable trace). |
+| `fractal_sfs_converge_debug` | Same convergence with a full trajectory trace (`best_point`/`best_fit` per generation, particle paths). |
 | `fractal_search_explore` | Scout-mode DIVERSE population search (SFS + MMR): the anti-mode-collapse primitive, run with no model needed. |
 | `fractal_search_telemetry` | Ground-truth K-nearest table rows by exact cosine distance; `doc_id` is the real `rowid` locator, `scan_pos` is the feedback handle. |
 | `fractal_hybrid_clinical_search` | The same, cohort-restricted: pass an explicit JSON array of rowids to restrict the scan before ranking. |
@@ -268,6 +268,15 @@ are the SQL function names, unprefixed.
 | `fractal_detect_collapse` | Current diversity quotient (D_q); null when nothing has searched yet. |
 | `fractal_explain_result` | Session Diversify diagnostics `{dq, diversify_enabled, overhead_p99_us}`. |
 | `fractal_feedback_report` / `fractal_isolate_background` | Report dwell/positive/negative engagement on a prior result by its `scan_pos` handle. |
+| `fractal_search` | Indexed K-nearest table rows: probes the fractal_index on (table, column) and verifies every candidate against the stored vectors, so every distance it returns is exact. Falls back to an exact scan when the table has no index. Does not apply Diversify repulsion. |
+| `fractal_index_create` | Builds the IVF index over a table's embedding column and stores it in the database; samples rows to calibrate the default nprobe to the target recall. |
+| `fractal_index_rebuild` | Full re-cluster from the table's current rows with the options the index was created with, as a new generation switched in atomically. |
+| `fractal_index_drop` | Deletes the index's stored cells and metadata; the table and its vectors are untouched. |
+| `fractal_index_info` | The index's format, dimension, cells, rows indexed against now, the delta and stale flags, the calibrated nprobe and the last search's statistics, plus a `status` (ready, stale, degraded, empty or orphaned) and a plain-language `advice` list. |
+| `fractal_index_list` | The catalog: one entry per index with its table, column, format, rows, stale flag, status and generation. |
+| `fractal_index_refresh` | Folds the rows added since the build into the index's cells (a new generation, no retraining). |
+| `fractal_index_ensure` | One call that leaves the index on a table and column fit to use: builds it when missing, folds in a few added rows, rebuilds after large changes, and otherwise changes nothing. For a setup script or a scheduled job. |
+| `fractal_index_candidates` | The rowids a Scout pass should look at (the nearest cells, a few representatives from the others, and the rows newer than the index): a shortlist, not an answer. |
 
 ### Cognition (4)
 
@@ -293,7 +302,7 @@ Each agent is one JSON document back: the real computed numbers plus the LLM's r
 | `fractal_agent_rebalance_sibling` | Optimizer + nearest-historical-allocation trajectory search → LLM rationale |
 | `fractal_agent_diverse_portfolios` | Multi-restart diverse candidates (`sharpe`/`pareto`) → one LLM tradeoff summary. **Enterprise tier.** |
 | `fractal_agent_route_task` | Nearest-capability search + token-budget accounting → LLM rationale |
-| `fractal_agent_schedule_workload` | `fractal_search` refinement + nearest-node lookup → LLM rationale |
+| `fractal_agent_schedule_workload` | `fractal_sfs_converge` refinement + nearest-node lookup → LLM rationale |
 | `fractal_agent_outlier_intercept` | Distance-to-known-bad-state barrier (`cosine`/`l2`) → LLM justification |
 | `fractal_agent_patient_deterioration_triage` | Caller-built cohort search + baseline→current drift → LLM triage |
 | `fractal_agent_data_analyst` | NL question → SQL → LLM analysis (the horizontal catch-all). **Nothing runs unless you pass `auto_execute: true`** — otherwise the statement comes back in `generated_sql` and `result_json`/`analysis` stay null. |
@@ -319,18 +328,18 @@ covered (there the reasoning call *is* the result), and an unconfigured
 
 | Agent | Returns |
 | --- | --- |
-| `fractal_search_agent` | `{answer, source_doc_ids, execution_time_ms}`: embed → Scout → reason over the matched rows' real content |
+| `fractal_search_agent` | `{answer, source_row_ids, execution_time_ms}`: embed → Scout → reason over the matched rows' real content |
 | `fractal_rag_agent` | `{answer}`: the lighter single-turn RAG sibling |
 | `fractal_sql_agent` | `{generated_sql, execution_status, retry_count, result_json}`: `auto_execute` **defaults to false and is never defaulted to true** (see [Safety](#safety)) |
 | `fractal_agent_plan_explore` | One JSON document of MCTS-style branches `{branch_id, plan_trajectory, confidence_score}` |
 | `fractal_agent_trajectory_predict` | `{predicted_state_vector, projected_drift_delta, risk_threshold_exceeded}` |
 | `fractal_agent_detect_loop` | `{agent_id, dfa_exponent, is_loop_detected[, cycle_len, at_index]}`: SimHash + Brent + DFA drift |
 
-### Analytics (23)
+### Analytics (24)
 
 Fractal dimensions (`fractal_dimension_dfa` / `_boxcount` / `_drift`),
 time-series and topology (`fractal_change_point_detect`,
-`fractal_periodogram`, `fractal_spectrogram_entropy`,
+`fractal_periodogram`, `fractal_spectrogram_entropy`, `fractal_chunk_text` (split text into chunks, for embedding),
 `fractal_tda_persistence_diagram`),
 fingerprinting (`fractal_state_fingerprint`, `fractal_cycle_detect`),
 vector math (`fractal_vector_lp_distance`,
@@ -364,22 +373,23 @@ loaded. The write-path tools (`_flush`, `_compact`, `_reset_soft`,
 `_reset_hard`) carry MCP `destructiveHint` annotations: a client UI
 that honors them will prompt a human first, which is intended behavior.
 
-### Vectorizer (5)
+### Vectorizer (6)
 
 `fractal_vectorizer_create` / `_pause` / `_resume` / `_drop` /
-`_process_queue`: the pull-based embedding sync; you drive the queue
+`_process_queue` and the read-only `_status`: the pull-based embedding sync; you drive the queue
 on your own schedule (no background worker in any engine, by design).
-`fractal_vectorizer_status` is exposed as a Resource instead (below).
+`fractal_vectorizer_status` returns one row per vectorizer (state, queue counts, last error); the same data is the Resource `fractalsql://vectorizer/status` (below).
 **Per-connection caveat:** the registry/queue are TEMP objects scoped to
 the MCP server's dedicated session connection (see [Per-connection, not
 global](#per-connection-not-global)).
 
-### Admin (4)
+### Admin (5)
 
 | Tool | Purpose |
 | --- | --- |
 | `fractal_version` | `fractal_version()` + `fractal_edition()`: the one-line "is it alive" check. |
 | `fractal_config_set` / `fractal_config_get` | Thin wrappers over the engine's own `fractal_config_set` / `fractal_config_get` per-connection surface. `destructiveHint`-flagged (a repointed `http_url` silently redirects every later reasoning call; old/new values of whatever changed are logged). Secrets are **never read back**. |
+| `fractal_config_keys` | Every config key the engine knows, as `{name, type, session_overridable}`: string, path, int, bool or enum (`agent_use_index` is an enum: off, on, auto). |
 | `fractal_configure_reasoning` | One unified config tool shaped identically across the engine plugins (`provider_url`, `embed_url`, `model`, `embed_model`, `allow_plaintext`, `think_mode`), adapter-translated here into `fractal_config_set` calls: in effect immediately, nothing to reload. **Never touches the provider token or any enterprise key.** |
 
 ## Resources
@@ -664,7 +674,7 @@ given its own tool allowlist:
 {
   "tokens": [
     { "name": "analyst", "sha256": "<hex sha256 of that client's token>",
-      "tools": ["fractal_search", "fractal_agent_data_analyst"],
+      "tools": ["fractal_sfs_converge", "fractal_agent_data_analyst"],
       "expires": "2027-01-31T00:00:00Z" },
     { "name": "batch", "sha256": "<hex sha256>", "tools": "*" }
   ]
@@ -687,11 +697,12 @@ What the server does with a request that arrives at the JSON-RPC path:
 | No token, or a token that matches nothing | `401` with `WWW-Authenticate: Bearer realm="fractalsql-mcp"` |
 | A token that has expired | `401` with `WWW-Authenticate: Bearer realm="fractalsql-mcp", error="invalid_token"` |
 | A token in the query string instead of the `Authorization` header | `401` — a query string lands in proxy logs and access logs, so it is not accepted |
-| A browser `Origin` header that is not on `FSQL_MCP_ALLOWED_ORIGINS` | `403`, checked **before** the token, so an unapproved origin never reaches the credential check |
+| A browser `Origin` header that is not on `FSQL_MCP_ALLOWED_ORIGINS` | `403`, checked **before** the token, so an unapproved origin never reaches the credential check; a loopback origin is `localhost`, `[::1]` or a literal address in `127.0.0.0/8` — a name that merely begins with `127.` is not one |
 | A chunked request body | `411` — send a `Content-Length` instead |
 | A declared `Content-Length` over 32 MB | `413` |
 | A repeated `Content-Length`, or both `Content-Length` and `Transfer-Encoding` | `400` — the framing is ambiguous and is never resolved in favor of one reading |
-| `GET /healthz` and `GET /readyz` | served without a token |
+| A repeated `Host`, `Authorization`, `Origin`, `Content-Type` or `Mcp-*` header | `400` — two values for a header the server acts on are never resolved in favour of one |
+| `GET /healthz` and `GET /readyz` | served without a token; `/readyz` runs its engine probe at most once every 5 seconds and answers the cached result in between |
 
 Repeated failed authentications are slowed down (the wait grows with the
 number of consecutive failures, capped at two seconds), so a stolen-token

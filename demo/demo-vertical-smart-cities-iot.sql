@@ -145,6 +145,8 @@ SELECT group_concat(printf('%.6f', x), ',') AS series FROM gs;
 -- expected output without one). The coverage boxcount above stays raw
 -- (boxcount-only, no drift/reason step of its own).
 .print --- network_coverage_alert composition (morphology + drift + reason) ---
+DROP TABLE IF EXISTS temp.last_scan;
+CREATE TEMP TABLE last_scan AS
 WITH mx AS (SELECT fractal_morphological_complexity(
                     (SELECT group_concat(pos, ',') FROM vsc_sensors),
                     2) AS mj),
@@ -156,7 +158,9 @@ SELECT json_extract(mx.mj, '$.dimension')   AS morph_dimension,
        json_extract(dr.dj, '$.drift') < -0.5
            OR json_extract(dr.dj, '$.drift') > 0.5 AS drift_detected
 FROM mx, dr;
-SELECT fractal_reason('city-ops alert rationale over this sensor-grid coverage complexity and air-quality drift reading');
+SELECT * FROM temp.last_scan;
+SELECT fractal_reason('city-ops alert rationale over this sensor-grid coverage complexity and air-quality drift reading',
+    json_object('scan', (SELECT json_group_array(json_object('morph_dimension', morph_dimension, 'lacunarity', lacunarity, 'drift', drift, 'drift_detected', drift_detected)) FROM temp.last_scan)));
 
 -- ------------------------------------------------------------------
 -- 3. fractal_dimension_dfa / fractal_dimension_drift: the air-quality

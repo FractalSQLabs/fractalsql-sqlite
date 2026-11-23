@@ -88,6 +88,13 @@ int fsql_enterprise_ensure(FsqlState *st, char *err, size_t err_cap) {
     return 1;
 }
 
+/* Also replaces fsql_enterprise.c: fsql_config_set() calls it when the ledger_retention key changes. The fake core has no retention
+ * setting, so there is nothing to apply. */
+int fsql_enterprise_apply_retention(FsqlState *st, char *err, size_t err_cap) {
+    (void)st; (void)err; (void)err_cap;
+    return 0;
+}
+
 /* ------------------------------------------------------------------ helpers */
 static sqlite3 *db;
 
@@ -451,6 +458,21 @@ static void test_anchor(const char *mode) {
     CHECK(ok("SELECT fractal_ledger_verify(2)") && has("\"ok\":true"), "the anchored chain verifies");
 }
 
+/* the config key ledger_max_rows: the cap is read live, so it can be set and changed from SQL */
+static void test_cap_key(void) {
+    int refused = 0, accepted = 0;
+    CHECK(ok("SELECT fractal_config_set('ledger_max_rows','2')"), "ledger_max_rows is a config key");
+    fresh("");
+    CHECK(ok("SELECT fractal_config_set('ledger_max_rows','2')"), "...set to 2");
+    for (int i = 0; i < 5; i++) { if (Q("SELECT fractal_audit_log('t','{\"i\":1}')")) accepted++; else if (has("chain is full")) refused++; }
+    CHECK(accepted == 2 && refused == 3, "with ledger_max_rows = 2 the third append is refused");
+    CHECK(ok("SELECT fractal_config_set('ledger_max_rows','0')"), "...set to 0 (unbounded)");
+    CHECK(Q("SELECT fractal_audit_log('t','{\"i\":1}')"), "...appends are accepted again");
+    CHECK(!Q("SELECT fractal_config_set('ledger_max_rows','abc')"), "a value that is not a number is refused");
+    CHECK(!Q("SELECT fractal_config_set('ledger_max_rows','-1')"), "a negative value is refused");
+    CHECK(ok("SELECT fractal_config_get('ledger_max_rows')") && !strcmp(val, "0"), "fractal_config_get reads the value back");
+}
+
 int main(int argc, char **argv) {
     const char *mode = argc > 1 ? argv[1] : "default";
     open_db(":memory:");
@@ -459,6 +481,7 @@ int main(int argc, char **argv) {
         test_flush_load(); test_tamper(); test_core_codes(); test_vfs_direct(); test_reset(); test_latch(); test_audit(); test_verify();
     } else if (!strcmp(mode, "cap")) test_cap(1);
     else if (!strcmp(mode, "badcap") || !strcmp(mode, "nocap")) test_cap(0);
+    else if (!strcmp(mode, "capkey")) test_cap_key();
     else if (!strncmp(mode, "anchor", 6)) test_anchor(mode);
     else { printf("unknown mode %s\n", mode); return 2; }
     sqlite3_close(db);

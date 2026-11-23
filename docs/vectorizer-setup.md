@@ -71,6 +71,26 @@ SELECT * FROM fractal_vectorizer_status WHERE vectorizer_id = 1;
 
 ---
 
+## Chunking long text
+
+A document longer than the embedding model's context cannot be embedded whole. Give the vectorizer a `chunk_size` and it splits the text for you:
+
+```sql
+SELECT fractal_vectorizer_create('docs', 'body', 'embedding',
+    '{"chunk_size": 800, "chunk_overlap": 100, "chunk_mode": "paragraph"}');
+```
+
+| Option | Meaning |
+| --- | --- |
+| `chunk_size` | Largest chunk, in characters (1 to 100000). Giving it turns chunking on. |
+| `chunk_overlap` | Characters shared by neighbouring pieces when a paragraph or sentence has to be cut (0 to `chunk_size - 1`, default 0). |
+| `chunk_mode` | `paragraph` (default), `sentence` or `fixed`: see `fractal_chunk_text` in [api-analytics.md](api-analytics.md). |
+| `chunk_table` | The chunk table's name (default `<source_table>_chunks`). |
+
+The chunks go into the chunk table, `(id, parent_id, chunk_no, chunk_text, <embedding_col>)`, with one row per chunk, and the **chunks** are what the vectorizer embeds: it is registered on the chunk table, with `chunk_text` as its text column. Rows already in the source table are chunked when you create the vectorizer. After that the chunks follow the source row: an insert adds its chunks, an update of the text column rechunks the row, and a delete removes them. Search the chunk table (`fractal_search`, `fractal_rag_agent` with a `meta_filter` such as `{"parent_id": 7}`) and use `parent_id` to get back to the document. Dropping the vectorizer stops the chunking and leaves the chunk table in place.
+
+As with every vectorizer here, the triggers belong to the connection that created it, so the connection that writes to the source table must have created the vectorizer.
+
 ## Storage: CSV TEXT vs the `fractal_vector` BLOB
 
 FractalSQL stores and searches embeddings in one of two column shapes:
@@ -111,6 +131,8 @@ functions):
 | `fractal_vector_l2_squared(a, b)` | same | Squared L2 distance (no `sqrt`, cheaper for ordering) |
 | `fractal_vector_cosine_similarity(a, b)` | same | Cosine *similarity* (1 − cosine distance) |
 | `fractal_vector_norm(a)` / `fractal_vector_normalize(a)` | same | L2 norm / unit vector |
+
+**Precision contract.** Every distance, norm and similarity accumulates in double in a fixed order and is returned as a double, so the same pair of vectors gives the same value from the vector functions, `fractal_search_telemetry` and `fractal_search`, on every platform (bit-identical). Stored vectors are never normalised on insert. Embedding models that return unit-length vectors (for example nomic-embed-text) make cosine and L2 rank identically.
 | `a + b`, `a - b`, `a * s` | `fractal_vector_add(a, b)` / `fractal_vector_sub(a, b)` / `fractal_vector_scale(v, s)` | Element-wise add / subtract / scalar-multiply |
 | `fractal_vector_lp_distance(a, b, p)` | same | Generalized $L_p$ distance, any $p > 0$ (for $0 < p < 1$ this is not a proper metric; use explicitly, never as a silent L2 substitute) |
 | — | `fractal_vector_quantize_int8(a)` | Symmetric int8 quantization, 4x compression, returns `{"scale":S,"codes":[..]}` as TEXT (JSON) |
@@ -251,7 +273,7 @@ Unlike traditional extensions that spawn background workers (which can be unstab
 
 ## Known Constraints & Roadmap
 
-- **Text Chunking**: Current version sends the full text of the column to the provider. For documents exceeding model context limits, we recommend pre-chunking into a separate "chunks" table.
+- **Text size**: without chunking the vectorizer sends the full text of the column to the provider, so a document longer than the model's context limit fails or is cut by the provider. Give the vectorizer a `chunk_size` (see "Chunking long text" above) to embed pieces instead. The size is in characters, not tokens.
 - **Spend Caps**: Rate capping is based on call count, not dollar cost.
 - **Automatic Retries**: Failed rows are not retried automatically; they must be reset to `pending` by the administrator.
 - **Backfill Batching**: Initial backfill for very large tables (millions of rows) happens in a single transaction.

@@ -4,7 +4,7 @@
 #
 # The demo container's one-liner MCP tool call:
 #
-#   docker compose exec demo /demo/mcp/call-tool.sh fractal_search \
+#   docker compose exec demo /demo/mcp/call-tool.sh fractal_sfs_converge \
 #       '{"vector":[0.1,0.9],"query":[0.6,0.8]}'
 #
 # Runs the PRODUCTION MCP server binary (the same one mcp/ builds) with
@@ -23,7 +23,7 @@
 set -eu
 
 DEMO=/demo/mcp
-DEMO_TOOLS=fractal_search,fractal_reason,fractal_agent_data_analyst,fractal_agent_diverse_portfolios
+DEMO_TOOLS=fractal_sfs_converge,fractal_reason,fractal_agent_data_analyst,fractal_agent_diverse_portfolios
 
 # Resolve the server binary: in-container path first (staged into
 # /usr/local/bin by the Dockerfile), then the repo-checkout build (the
@@ -68,7 +68,7 @@ fi
 
 if [ "$#" -lt 1 ]; then
     echo "usage: $0 <tool-name> ['{json args}']" >&2
-    echo "demo tools: fractal_search, fractal_reason, fractal_agent_data_analyst," >&2
+    echo "demo tools: fractal_sfs_converge, fractal_reason, fractal_agent_data_analyst," >&2
     echo "            fractal_agent_diverse_portfolios" >&2
     exit 2
 fi

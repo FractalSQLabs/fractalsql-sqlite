@@ -65,6 +65,36 @@
     <MajorUpgrade DowngradeErrorMessage="A newer version of FractalSQL is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
+    <!-- fractalsql-reasoning-http.dll (x64, see c_ReasoningHttpDll below)
+         is built with /MD, unlike fractalsql.dll's /MT: a deliberate
+         choice (avoids a cross-DLL free()/malloc() heap mismatch), but
+         it means this one DLL genuinely depends on VCRUNTIME140.dll at
+         load time, confirmed with `dumpbin /dependents`. Every other
+         listed dependency (WS2_32, CRYPT32, bcrypt, ADVAPI32, Secur32,
+         IPHLPAPI, KERNEL32 and the api-ms-win-crt-* set) is either a
+         core OS component or resolved by Windows 10+'s own Universal CRT;
+         VCRUNTIME140.dll comes from the separate VC++ 2015-2022
+         Redistributable, which is common but not guaranteed present on a
+         fresh or minimal Windows install. Without this check a missing
+         VCRUNTIME140.dll would surface later as a silent
+         reasoning-plugin load failure with no indication why; failing
+         loudly here, at install time, with the actual fix, is much
+         better. `Installed OR ...` is the standard WiX idiom so this
+         only gates a fresh install, not a repair/uninstall of an
+         already-installed product. -->
+    <?if $(sys.BUILDARCH) = "x64" ?>
+    <Property Id="VCRUNTIME140PRESENT">
+      <RegistrySearch Id="VCRedistX64Search"
+                       Root="HKLM"
+                       Key="SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
+                       Name="Installed"
+                       Type="raw" />
+    </Property>
+    <Condition Message="This installer requires the Microsoft Visual C++ 2015-2022 Redistributable (x64), which was not found on this system. Download and install it from https://aka.ms/vs/17/release/vc_redist.x64.exe, then run this installer again.">
+      <![CDATA[Installed OR VCRUNTIME140PRESENT]]>
+    </Condition>
+    <?endif ?>
+
     <!-- ADDTOPATH: checkbox on the FolderDlg (1 = add to %PATH%). -->
     <Property Id="ADDTOPATH" Value="1" />
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
@@ -192,6 +222,12 @@
                 KeyPath="yes" />
         </Component>
 
+        <Component Id="c_McpRun" Guid="5B7E2D94-1C38-4A6F-8E0B-3F9A4C6D1E72">
+          <File Id="mcp_run_txt"
+                Source="mcp/RUN.txt"
+                KeyPath="yes" />
+        </Component>
+
         <!-- MSI Long Filenames permit a leading dot; kept identical to
              the committed filename so a side-by-side diff against the
              repo (or the Linux packages) needs no translation. -->
@@ -223,6 +259,7 @@
       <ComponentGroupRef Id="CoreFiles" />
       <ComponentRef Id="c_McpServerExe" />
       <ComponentRef Id="c_McpReadme" />
+      <ComponentRef Id="c_McpRun" />
       <ComponentRef Id="c_McpSchemaLock" />
       <ComponentRef Id="c_McpSafetyLock" />
       <ComponentRef Id="c_McpManifest" />

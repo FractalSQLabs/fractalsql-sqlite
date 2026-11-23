@@ -20,7 +20,7 @@
 --   * random() is a signed 64-bit INTEGER: dividing by 2^63 maps it
 --     into [-1,1), and ABS(random()) % n bounds it to a range. Every
 --     seed expression below does one of the two.
---   * fractal_search_debug(query, iterations, population, diffusion)
+--   * fractal_sfs_converge_debug(query, iterations, population, diffusion)
 --     is the abstract-space form, returning one JSON document whose
 --     $.best_point key is the converged point.
 --   * Scout Discovery is the AGGREGATE fractal_search_explore(col,
@@ -59,7 +59,7 @@ WITH RECURSIVE g(i, v) AS (
       FROM g WHERE i < 8
 ),
 q AS (SELECT '[' || group_concat(v, ',') || ']' AS qj FROM g),
-dbg AS (SELECT qj, fractal_search_debug(qj, 50, 50, 2) AS d FROM q)
+dbg AS (SELECT qj, fractal_sfs_converge_debug(qj, 50, 50, 2) AS d FROM q)
 SELECT 8 AS dim,
        (SELECT sum(a.value * b.value)
           FROM json_each(json_extract(d, '$.best_point')) a
@@ -77,7 +77,7 @@ WITH RECURSIVE g(i, v) AS (
       FROM g WHERE i < 32
 ),
 q AS (SELECT '[' || group_concat(v, ',') || ']' AS qj FROM g),
-dbg AS (SELECT qj, fractal_search_debug(qj, 50, 50, 2) AS d FROM q)
+dbg AS (SELECT qj, fractal_sfs_converge_debug(qj, 50, 50, 2) AS d FROM q)
 SELECT 32 AS dim,
        (SELECT sum(a.value * b.value)
           FROM json_each(json_extract(d, '$.best_point')) a
@@ -95,7 +95,7 @@ WITH RECURSIVE g(i, v) AS (
       FROM g WHERE i < 128
 ),
 q AS (SELECT '[' || group_concat(v, ',') || ']' AS qj FROM g),
-dbg AS (SELECT qj, fractal_search_debug(qj, 50, 50, 2) AS d FROM q)
+dbg AS (SELECT qj, fractal_sfs_converge_debug(qj, 50, 50, 2) AS d FROM q)
 SELECT 128 AS dim,
        (SELECT sum(a.value * b.value)
           FROM json_each(json_extract(d, '$.best_point')) a
@@ -203,8 +203,8 @@ SELECT count(DISTINCT cluster_id) AS distinct_clusters_of_20
 -- Same query as naive top-K above (see that section's comment on why
 -- it's a fixed off-center point, not a literal corpus row).
 -- mmr_lambda 0.2 weights diversity more heavily than the 0.5 default.
--- On this small fixture the spread is several clusters of 20 (e.g.
--- 7-13) -- treat this section as measuring the GAP vs. naive top-K,
+-- On this small fixture Scout reaches nearly all of the 20 clusters (18-20
+-- across repeated runs) against 1-2 for naive top-K -- treat this section as measuring the GAP vs. naive top-K,
 -- not as a headline number; ../bench/ runs the real scale evaluation.
 .print
 .print --- Scout Discovery (fractal_search_explore aggregate, population_size=50) ---

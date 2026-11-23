@@ -223,6 +223,8 @@ SELECT fractal_dimension_drift((SELECT sj FROM s), 60) AS recent_60min_vs_histor
 -- drift_detected, real alphas, then a real reasoning pass (plugin-gated:
 -- the clean hint is the expected output without one).
 .print --- regime_triage composition (dfa + drift + reason) ---
+DROP TABLE IF EXISTS temp.last_scan;
+CREATE TEMP TABLE last_scan AS
 WITH s AS (SELECT '[' || group_concat(printf('%.4f', conn_rate) ORDER BY t) || ']' AS sj
              FROM vcy_conn_series),
 d AS (SELECT fractal_dimension_dfa((SELECT sj FROM s)) AS dfa,
@@ -232,13 +234,17 @@ SELECT d.dfa                                        AS dfa_exponent,
        json_extract(d.dj, '$.recent_alpha')         AS recent_alpha,
        json_extract(d.dj, '$.baseline_alpha')       AS baseline_alpha
 FROM d;
-SELECT fractal_reason('one-line regime triage for this host connection-rate series');
+SELECT * FROM temp.last_scan;
+SELECT fractal_reason('one-line regime triage for this host connection-rate series',
+    json_object('scan', (SELECT json_group_array(json_object('dfa_exponent', dfa_exponent, 'drift_detected', drift_detected, 'recent_alpha', recent_alpha, 'baseline_alpha', baseline_alpha)) FROM temp.last_scan)));
 
 -- Composition (2): the track-anomaly shape -- real nearest fleet host
 -- (fractal_search_trajectory over host 7's baseline->current, resolved
 -- through the rowid mapping), real trajectory_distance, real
 -- connection-rate DFA exponent.
 .print --- track_anomaly composition (trajectory + heading DFA) ---
+DROP TABLE IF EXISTS temp.last_scan;
+CREATE TEMP TABLE last_scan AS
 WITH tr AS (SELECT fractal_search_trajectory(
                     'vcy_hosts', 'current',
                     (SELECT baseline FROM vcy_hosts WHERE id = 7),
@@ -253,7 +259,9 @@ SELECT (SELECT h.id FROM tr, json_each(tr.tj) je
        (SELECT json_extract(je.value, '$.distance') FROM tr, json_each(tr.tj) je
         ORDER BY json_extract(je.value, '$.distance') LIMIT 1) AS trajectory_distance,
        fractal_dimension_dfa((SELECT sj FROM s)) AS dfa_exponent;
-SELECT fractal_reason('one-line track-anomaly read for this host');
+SELECT * FROM temp.last_scan;
+SELECT fractal_reason('one-line track-anomaly read for this host',
+    json_object('scan', (SELECT json_group_array(json_object('nearest_fleet_id', nearest_fleet_id, 'trajectory_distance', trajectory_distance, 'dfa_exponent', dfa_exponent)) FROM temp.last_scan)));
 
 -- ------------------------------------------------------------------
 -- 6. fractal_periodogram: host 7's connection-rate series (same series

@@ -4,7 +4,8 @@
 -- dimension enforcement, the vectorizer writing into a guarded
 -- fractal_vector column, fractal_search_trajectory's BLOB reads, a
 -- storage comparison against the same vectors in CSV-TEXT form, and
--- the L_p-distance / int8+binary quantization surface (Section 7).
+-- the L_p-distance / int8+binary quantization surface (Section 7), and
+-- the precision contract (Section 8).
 -- See ../docs/vectorizer-setup.md's "Storage" section for the full
 -- writeup this demo walks through interactively.
 --
@@ -224,6 +225,37 @@ WHERE a.id = 1 AND b.id = 2;
 .print candidates cheaply, then an exact fractal_vector_l2_distance
 .print re-rank scores only the survivors. See docs/api-analytics.md's
 .print "Vector Math and Quantization" section.)
+
+.print
+.print === Section 8: Precision contract (one implementation, bit-identical scores) ===
+.print Every distance accumulates in double in a fixed order and is returned as a
+.print double (no rounding to float32 on the way out). The vector function, the
+.print telemetry scan, and the exact fallback of the indexed fractal_search all use
+.print the same arithmetic, so the same pair gives the SAME number everywhere.
+DROP TABLE IF EXISTS prec_demo;
+CREATE TABLE prec_demo(id INTEGER PRIMARY KEY, embedding BLOB);
+INSERT INTO prec_demo VALUES
+    (1, fractal_vector_from_text('0.12,0.98,-0.33,0.51')),
+    (2, fractal_vector_from_text('0.80,0.10,0.45,-0.22')),
+    (3, fractal_vector_from_text('-0.40,0.66,0.15,0.90'));
+
+-- Three entry points, one value per row: the three columns match to the last bit.
+SELECT p.id,
+       fractal_vector_cosine_distance(p.embedding, fractal_vector_from_text('0.3,0.7,0.1,0.5')) AS vector_fn,
+       json_extract(j.value, '$.distance')                                                  AS telemetry,
+       (SELECT json_extract(s.value, '$.distance')
+          FROM json_each(fractal_search('prec_demo','embedding', fractal_vector_from_text('0.3,0.7,0.1,0.5'), 3,
+                                        '{"use_index":false}')) s
+         WHERE json_extract(s.value, '$.doc_id') = p.id)                                      AS exact_fallback
+  FROM prec_demo p,
+       json_each(fractal_search_telemetry('prec_demo','embedding', fractal_vector_from_text('0.3,0.7,0.1,0.5'), 3)) j
+ WHERE json_extract(j.value, '$.doc_id') = p.id
+ ORDER BY p.id;
+
+.print A float32 vector survives a text round trip bit for bit (1 = identical):
+SELECT fractal_vector_from_text(fractal_vector_to_json(embedding)) = embedding AS round_trips_exactly
+  FROM prec_demo ORDER BY id;
+DROP TABLE prec_demo;
 
 .print
 .print ================================================================

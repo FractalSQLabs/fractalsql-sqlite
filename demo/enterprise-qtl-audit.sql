@@ -77,19 +77,21 @@ SELECT fractal_ledger_flush();
 SELECT fractal_ledger_truth_count() AS truth_count, fractal_ledger_shadow_count() AS shadow_count;
 
 .print --- Phase B: audit (decode the just-flushed blob into its CISO event log) ---
--- One {"epoch","doc_id","signal"} object per ledger entry, sorted by doc_id.
--- This is the round-trip: in-memory -> QTL blob -> persisted table -> decoded
--- audit log.
+-- One object per ledger entry, sorted by doc_id: {"epoch","doc_id","signal"} plus
+-- the entry's exact "weight" (and, for a Shadow, the "lambda" and "sigma" it was
+-- recorded with: QTL v2). A handle that received both a positive and a negative
+-- report appears twice. This is the round-trip: in-memory -> QTL blob ->
+-- persisted table -> decoded audit log.
 SELECT fractal_audit_unpack(payload) AS audit_log
   FROM fractalsql_ledger WHERE kind = 1 ORDER BY id DESC LIMIT 1;
 
-.print --- Phase C: load (rehydrate the in-memory ledgers from the persisted blob) ---
+.print --- Phase C: load (REPLACE the in-memory ledgers with the persisted blob: exact weights, lambda, sigma) ---
 SELECT fractal_ledger_load();
 
-.print --- Phase D: compact (defragment / re-pack the in-memory QTL representation) ---
+.print --- Phase D: compact (decay every Shadow weight by x0.9; Truth is untouched) ---
 SELECT fractal_ledger_compact();
 
-.print --- Phase E: reset_soft (clear Shadow, preserve Truth) ---
+.print --- Phase E: reset_soft (clear the Shadow ledger; Truth and the epoch are kept) ---
 SELECT fractal_ledger_reset_soft();
 SELECT fractal_ledger_truth_count() AS truth_count, fractal_ledger_shadow_count() AS shadow_count;
 

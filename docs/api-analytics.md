@@ -67,6 +67,30 @@ DFA's complement: localizes *where* a series' mean and/or variance shifted, inst
 **Return**: `{"indices":[..]}` — ascending boundary indices, up to `max_points`.
 Sliding two-sample test over adjacent windows of `window` samples; flags a boundary when the mean differs by more than `threshold` pooled-standard-deviation units or the variance ratio exceeds `threshold` squared. Requires at least `2 * window` points.
 
+### `fractal_chunk_text`
+**Split long text into chunks (pure, no model)**
+
+**Signature**: `fractal_chunk_text(text, size, overlap [, mode]) RETURNS TEXT (JSON)`
+
+Splits `text` into chunks of at most `size` characters and returns a JSON array of `{"no", "start", "end", "text"}`. `start` and `end` are character offsets into the original text (`end` is exclusive), and `text` is that slice. Characters are UTF-8 code points, not bytes. `size` is 1 to 100000, `overlap` is 0 to `size - 1`, and at most 100000 chunks are produced. A NULL text gives NULL; an empty or blank text gives `[]`.
+
+| `mode` | How the text is cut |
+| --- | --- |
+| `paragraph` (the default) | At paragraph breaks (a run of blanks that contains at least two line feeds). Whole paragraphs are packed into a chunk while it stays within `size`. |
+| `sentence` | After a run of `.`, `!` or `?` that is followed by whitespace or the end. Whole sentences are packed the same way; a paragraph break also ends a sentence. |
+| `fixed` | Every `size - overlap` characters, ignoring the text's structure. |
+
+A paragraph or sentence longer than `size` is cut like a fixed span, and neighbouring pieces share `overlap` characters. `overlap` applies only to such cuts and to `fixed`. The chunk keeps the separators between the units it packs. The size is in characters, not tokens: pick it a little under your embedding model's limit.
+
+```sql
+SELECT value ->> '$.no' AS no, value ->> '$.text' AS chunk
+FROM json_each(fractal_chunk_text('One. Two sentences! Is this three? Yes.', 20, 0, 'sentence'));
+```
+
+The same function, with the same output, is available on every FractalSQL host. The vectorizer uses it when you give it a `chunk_size` (see [vectorizer-setup.md](vectorizer-setup.md)).
+
+---
+
 ### `fractal_periodogram`
 **Classical Periodogram**
 Power at each positive Fourier frequency. Short series use a direct DFT; longer ones use an FFT (radix-2, or Bluestein's algorithm for other lengths), which agrees with the direct sum to floating-point rounding.
@@ -130,6 +154,8 @@ These two pair into tolerant "have I basically been in this state before" loop d
 ## Vector Math and Quantization
 
 Utilities over the `fractal_vector` BLOB type (see [vectorizer-setup.md](vectorizer-setup.md)). These accept any vector argument form `fractal_vector` accepts — the canonical packed float32 BLOB or CSV/JSON TEXT.
+
+Every distance in this section is computed by the one shared double-precision implementation, so the values agree to the last bit with the other SQL-visible distances and with every other FractalSQL host -- see the precision contract in [api-discovery.md](api-discovery.md).
 
 ### `fractal_vector_lp_distance`
 **Generalized $L_p$ Distance**

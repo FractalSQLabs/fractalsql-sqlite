@@ -47,7 +47,7 @@ fi
 if has edge; then
   say "edge inputs (default environment)"
   FSQL_EXT="$COVEXT" nice python3 -I test/edge_inputs.py 2>&1 | tail -3
-  for variant in "FSQL_AUDIT_REDACT=hash" "FSQL_AUDIT_REDACT=truncate" "FSQL_LEDGER_ANCHOR_LOG=stderr" "FSQL_LEDGER_ANCHOR_LOG=bogus"; do
+  for variant in "FSQL_AUDIT_REDACT=hash" "FSQL_AUDIT_REDACT=truncate" "FSQL_LEDGER_ANCHOR_LOG=stderr" "FSQL_LEDGER_ANCHOR_LOG=syslog" "FSQL_LEDGER_ANCHOR_LOG=bogus"; do
     say "edge inputs ($variant)"
     env "$variant" FSQL_EXT="$COVEXT" EDGE_CONFIGS=configured,fail nice python3 -I test/edge_inputs.py 2>&1 | tail -2
   done
@@ -55,7 +55,7 @@ fi
 
 if has edge; then
   say "refusals: enterprise library, reasoning plugin, configuration keys"
-  for d in enterprise_errors plugin_gate config_matrix t2s_matrix vectorizer_matrix sql_agent_matrix; do FSQL_EXT="$COVEXT" nice python3 -I "test/$d.py" 2>&1 | tail -3; done
+  for d in enterprise_errors plugin_gate config_matrix t2s_matrix vectorizer_matrix sql_agent_matrix unicode_matrix scripted_replies id_emission ledger_payloads; do FSQL_EXT="$COVEXT" nice python3 -I "test/$d.py" 2>&1 | tail -3; done
 fi
 
 if has mutate; then

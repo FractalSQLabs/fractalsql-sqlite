@@ -168,7 +168,8 @@ static ent_sig_result_t ent_check_signature(const char *lib_path) {
         /* Confirm the file is EXACTLY 64 bytes, not >=64 -- a longer
          * file silently truncated by fread would otherwise verify
          * against the wrong (partial) signature. */
-        int c = fgetc(f);
+        /* After a read error the stream position is indeterminate: do not touch it again. */
+        int c = ferror(f) ? 0 : fgetc(f);
         fclose(f);
         if (n != sizeof sig_bytes || c != EOF)
             return ENT_SIG_INVALID; /* wrong-sized .sig: corrupt/tampered, not "absent" */
@@ -224,10 +225,11 @@ static int ent_signature_gate(const char *lib, int require,
     }
     if (sig == ENT_SIG_MISSING && require) {
         if (err) snprintf(err, err_cap,
-            "fractalsql: no signature found for enterprise library "
-            "\"%s\" (expected \"%s.sig\"); place the .sig beside the "
-            "library, or set FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 to "
-            "load an unsigned library", lib, lib);
+            "fractalsql: no signature found for enterprise library: "
+            "place the .sig beside the library, or set "
+            "FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 to load an "
+            "unsigned library (library \"%s\", expected \"%s.sig\")",
+            lib, lib);   /* hint first: callers use small error buffers, so a long path may truncate the tail */
         return 0;
     }
     if (sig == ENT_SIG_IOERROR && require) {
@@ -313,6 +315,8 @@ static int ent_resolve_symbols(FsqlState *st, void *h,
 
     /* Optional symbols, tolerant-absence convention. Call sites check
      * for NULL and report the upgrade hint. */
+    st->ent.ledger_set_retention =
+        (fsql_ent_set_mode_fn)ent_dlsym(h, "fsql_ledger_set_retention");
     st->ent.optimize_portfolio_multimodal =
         (fsql_ent_portfolio_mm_fn)ent_dlsym(h, "fsql_optimize_portfolio_multimodal");
     st->ent.optimize_portfolio_multimodal_pareto =
@@ -370,5 +374,34 @@ int fsql_enterprise_ensure(FsqlState *st, char *err, size_t err_cap) {
 
     st->ent_handle = h;
     st->ent_loaded = 1;
+    /* The configured retention mode goes into the core's context now, so the first feedback of the session already
+     * follows it. A refusal (EXACT asked of a library that predates the modes) leaves the tier unloaded. */
+    if (fsql_enterprise_apply_retention(st, err, err_cap) != 0) {
+        st->ent_loaded = 0;
+        st->ent_handle = NULL;
+        ent_dlclose_failed(h);
+        memset(&st->ent, 0, sizeof st->ent);
+        return 0;
+    }
     return 1;
+}
+
+/* Applies cfg.ledger_retention to the core's context. "fade" is the core's default, so it needs no call (and a library
+ * that predates the modes is fine); "exact" needs the export, and a library without it is refused rather than run with
+ * the wrong retention. 0 = applied, -1 = refused (err filled). */
+int fsql_enterprise_apply_retention(FsqlState *st, char *err, size_t err_cap) {
+    const char *mode = st->cfg.ledger_retention;
+    const int want = (mode && strcmp(mode, "exact") == 0) ? FSQL_LEDGER_RETENTION_EXACT : FSQL_LEDGER_RETENTION_FADE;
+    if (!st->ent.ledger_set_retention) {
+        if (want == FSQL_LEDGER_RETENTION_FADE) return 0;
+        if (err) snprintf(err, err_cap,
+            "fractalsql: ledger_retention 'exact' needs a FractalSQL Enterprise library that exports "
+            "fsql_ledger_set_retention (upgrade the enterprise library)");
+        return -1;
+    }
+    if (st->ent.ledger_set_retention(st->ctx, want) != FSQL_OK) {
+        if (err) snprintf(err, err_cap, "fractalsql: the enterprise library refused the ledger retention mode");
+        return -1;
+    }
+    return 0;
 }
