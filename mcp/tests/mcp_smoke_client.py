@@ -130,12 +130,23 @@ EXPECTED_SAFETY = {
     "fractal_rag_agent": ("write", True),
     "fractal_reason": ("write", True),
     "fractal_schema_context": ("read", False),
+    "fractal_index_create": ("destructive", False),
+    "fractal_index_drop": ("destructive", False),
+    "fractal_index_info": ("read", False),
+    "fractal_index_list": ("read", False),
+    "fractal_index_ensure": ("destructive", False),
+    "fractal_index_candidates": ("read", False),
+    "fractal_chunk_text": ("read", False),
+    "fractal_config_keys": ("read", False),
+    "fractal_index_refresh": ("destructive", False),
+    "fractal_index_rebuild": ("destructive", False),
     "fractal_search": ("read", False),
     "fractal_search_agent": ("write", True),
-    "fractal_search_debug": ("read", False),
     "fractal_search_explore": ("read", False),
     "fractal_search_telemetry": ("read", False),
     "fractal_search_trajectory": ("read", False),
+    "fractal_sfs_converge": ("read", False),
+    "fractal_sfs_converge_debug": ("read", False),
     "fractal_spectrogram_entropy": ("read", False),
     "fractal_sql_agent": ("destructive", True),
     "fractal_state_fingerprint": ("read", False),
@@ -152,6 +163,7 @@ EXPECTED_SAFETY = {
     "fractal_vectorizer_pause": ("destructive", False),
     "fractal_vectorizer_process_queue": ("destructive", False),
     "fractal_vectorizer_resume": ("destructive", False),
+    "fractal_vectorizer_status": ("read", False),
     "fractal_configure_reasoning": ("destructive", False),
     "fractal_config_get": ("read", False),
     "fractal_version": ("read", False),
@@ -347,8 +359,8 @@ def main() -> int:  # noqa: ANN201
         # the accessibility invariant, mechanically
         send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         listed = recv()["result"]["tools"]
-        check("tools/list: the full engine-filtered catalog (82 tools)",
-              len(listed) == 82)
+        check("tools/list: the full engine-filtered catalog (94 tools)",
+              len(listed) == 94)
         anonymous = [t["name"] for t in listed
                      if not (t.get("description") or "").strip()
                      or "properties" not in t["inputSchema"]]
@@ -420,7 +432,7 @@ def main() -> int:  # noqa: ANN201
               and r["result"]["structuredContent"]["edition"] == "Community")
 
         # Discovery tier
-        r = call("fractal_search", {"vector": [0.1, 0.9], "query": [0.6, 0.8]})
+        r = call("fractal_sfs_converge", {"vector": [0.1, 0.9], "query": [0.6, 0.8]})
         check("Discovery: fractal_search returns a real cosine distance",
               isinstance(r["result"]["structuredContent"].get("value"), float))
         r = call("fractal_search_telemetry",
@@ -508,7 +520,7 @@ def main() -> int:  # noqa: ANN201
         # (distinct code path from the existing "explicit null" test) and
         # an OPTIONAL NULLABLE arg given explicit null (the p.nullable
         # true-branch, vs. simply leaving it out).
-        r = call("fractal_search", {"vector": [0.1, 0.9]})
+        r = call("fractal_sfs_converge", {"vector": [0.1, 0.9]})
         check("tool_registry.h: a required arg left out entirely is "
               "refused (distinct from an explicit null)",
               r is not None and r["result"].get("isError") is True
@@ -604,6 +616,79 @@ def main() -> int:  # noqa: ANN201
                   "cardinality": 2, "context": "{}"})
         check("Agency: allocate with context explicitly supplied",
               r is not None and "result" in r)
+
+        # --- chunking and the index tier through their tools: each branch of the optional arguments, success and refusal ---
+        def _ok(r): return r is not None and "result" in r and not r["result"].get("isError")
+        def _bad(r): return r is not None and "result" in r and r["result"].get("isError") is True
+        chunk_text = "One. Two sentences! Is this three?\n\nSecond paragraph here, a bit longer than the first one."
+        for mode in (None, "paragraph", "sentence", "fixed"):
+            cargs = {"text": chunk_text, "size": 20, "overlap": 5}
+            if mode: cargs["mode"] = mode
+            r = call("fractal_chunk_text", cargs)
+            check("Chunking: fractal_chunk_text with mode %s returns chunks" % (mode or "omitted (the paragraph default)"),
+                  _ok(r) and "chunks" in json.dumps(r["result"]))
+        r = call("fractal_chunk_text", {"text": chunk_text, "size": 10, "overlap": 10})
+        check("Chunking: an overlap of size or more is refused", _bad(r))
+        r = call("fractal_chunk_text", {"text": chunk_text, "size": 10, "overlap": 0, "mode": "nonsense"})
+        check("Chunking: an unknown mode is refused", _bad(r))
+        r = call("fractal_chunk_text", {"text": "", "size": 10, "overlap": 0})
+        check("Chunking: empty text gives an empty list", _ok(r))
+
+        ixo = {"name": "mcp_sm_ix", "vector_format": "FP32", "nlist": 2}
+        r = call("fractal_index_create", {"table_name": "mcp_sm_docs", "vector_col": "emb", "options": ixo})
+        check("Index: fractal_index_create builds an index (options supplied)", _ok(r))
+        r = call("fractal_index_create", {"table_name": "mcp_sm_docs", "vector_col": "emb", "options": ixo})
+        check("Index: fractal_index_create refuses a name that exists", _bad(r))
+        r = call("fractal_index_create", {"table_name": "mcp_sm_docs", "vector_col": "emb"})
+        check("Index: fractal_index_create with no options builds under the default name", _ok(r))
+        r = call("fractal_index_info", {"name": "mcp_sm_ix"})
+        check("Index: fractal_index_info reports the index", _ok(r))
+        r = call("fractal_index_info", {"name": "mcp_sm_no_such_index"})
+        check("Index: fractal_index_info on a missing index is refused", _bad(r))
+        r = call("fractal_index_list", {})
+        check("Index: fractal_index_list lists the indexes", _ok(r))
+        r = call("fractal_index_candidates", {"table_name": "mcp_sm_docs", "vector_col": "emb", "query": [0.1, 0.1, 0.1]})
+        check("Index: fractal_index_candidates with no options", _ok(r))
+        r = call("fractal_index_candidates", {"table_name": "mcp_sm_docs", "vector_col": "emb", "query": [0.1, 0.1, 0.1],
+                                              "options": {"near": 1, "per_cell": 1, "index": "mcp_sm_ix"}})
+        check("Index: fractal_index_candidates with options", _ok(r))
+        r = call("fractal_index_candidates", {"table_name": "mcp_sm_docs", "vector_col": "no_such_col", "query": [0.1, 0.1, 0.1]})
+        check("Index: fractal_index_candidates on a column with no index is refused", _bad(r))
+        r = call("fractal_index_refresh", {"name": "mcp_sm_ix"})
+        check("Index: fractal_index_refresh on an index with nothing added", _ok(r))
+        r = call("fractal_index_refresh", {"name": "mcp_sm_no_such_index"})
+        check("Index: fractal_index_refresh on a missing index is refused", _bad(r))
+        r = call("fractal_index_ensure", {"table_name": "mcp_sm_docs", "vector_col": "emb"})
+        check("Index: fractal_index_ensure with no options leaves a fit index", _ok(r))
+        r = call("fractal_index_ensure", {"table_name": "mcp_sm_docs", "vector_col": "emb", "options": {"name": "mcp_sm_ix"}})
+        check("Index: fractal_index_ensure with options", _ok(r))
+        r = call("fractal_index_rebuild", {"name": "mcp_sm_ix"})
+        check("Index: fractal_index_rebuild makes the next generation", _ok(r))
+        r = call("fractal_index_rebuild", {"name": "mcp_sm_no_such_index"})
+        check("Index: fractal_index_rebuild on a missing index is refused", _bad(r))
+        r = call("fractal_index_drop", {"name": "mcp_sm_ix"})
+        check("Index: fractal_index_drop removes the index", _ok(r))
+        r = call("fractal_index_drop", {"name": "mcp_sm_ix"})
+        check("Index: fractal_index_drop of an index already gone answers (a count of 0, not a crash)", r is not None and "result" in r)
+        call("fractal_index_drop", {"name": "mcp_sm_docs_emb"})
+
+        # fractal_store_morphology through the tool: a first write, an overwrite by the same client, a forced overwrite, another id, a bad vector
+        for label, margs in (("a first write", {"doc_id": 701, "feature_array": [0.1, 0.2, 0.3]}),
+                             ("an overwrite by the same client", {"doc_id": 701, "feature_array": [0.4, 0.5, 0.6]}),
+                             ("a forced overwrite", {"doc_id": 701, "feature_array": [0.7, 0.8, 0.9], "force": True}),
+                             ("force explicitly false", {"doc_id": 702, "feature_array": [0.1, 0.1, 0.1], "force": False}),
+                             ("a vector that is not numeric", {"doc_id": 703, "feature_array": ["a", "b"]})):
+            r = call("fractal_store_morphology", margs)
+            check("Analytics: fractal_store_morphology %s answers (a result or a documented clean error)" % label, r is not None and "result" in r)
+
+        # the ledger-verify resource: a kind that parses as an integer is read (the engine gives its own verdict for a kind it does not know: the
+        # resource layer does not range-check), and one that does not parse (letters, trailing text, nothing, past the integer range) is refused
+        for i, (kind, valid) in enumerate((("1", True), ("2", True), ("3", True), ("0", True), ("-1", True), (" 2", True), ("abc", False), ("1x", False),
+                                           ("", False), ("99999999999999999999", False))):
+            send({"jsonrpc": "2.0", "id": 9400 + i, "method": "resources/read", "params": {"uri": "fractalsql://ledger/" + kind}})
+            r = wait_for(9400 + i, 20)
+            good = r is not None and (("result" in r and (r["result"] or {}).get("contents")) if valid else ("error" in r or (r.get("result") or {}).get("isError")))
+            check("Resources: fractalsql://ledger/%s %s" % (kind or "(empty)", "reads" if valid else "is refused"), bool(good))
 
         r = call("fractal_agent_rebalance_sibling",
                  {"mu": [0.1, 0.2], "cov": [1.0, 0.0, 0.0, 1.0],
@@ -723,7 +808,7 @@ def main() -> int:  # noqa: ANN201
         check("schema error class rejected before any driver call "
               "(wrong-typed non-vector field: no leniency, 1.4)",
               r["result"]["structuredContent"]["error_class"] == "schema")
-        r = call("fractal_search", {"vector": "not,an,array"})
+        r = call("fractal_sfs_converge", {"vector": "not,an,array"})
         check("schema error: non-array vector rejected",
               r["result"].get("isError")
               and r["result"]["structuredContent"]["error_class"] == "schema")
@@ -731,7 +816,7 @@ def main() -> int:  # noqa: ANN201
         # branch than simply omitting the key (tool_registry.h checks
         # !contains(key) first, then is_null() separately) -- distinct from
         # the omitted-key path every other schema-error check above takes.
-        r = call("fractal_search", {"vector": None, "query": [0.1, 0.2]})
+        r = call("fractal_sfs_converge", {"vector": None, "query": [0.1, 0.2]})
         check("schema error: explicit null for a required arg rejected "
               "(distinct from simply omitting it)",
               r["result"].get("isError")
@@ -898,7 +983,7 @@ def main() -> int:  # noqa: ANN201
 
         # vector-argument form: integer elements coerce leniently,
         # like the engine's own lenient double coercion for array elements
-        r = call("fractal_search", {"vector": [1, 0], "query": [0, 1]})
+        r = call("fractal_sfs_converge", {"vector": [1, 0], "query": [0, 1]})
         check("vectors: integer elements coerce leniently",
               r is not None and not r["result"].get("isError")
               and isinstance(r["result"]["structuredContent"].get("value"),
@@ -1089,6 +1174,42 @@ def main() -> int:  # noqa: ANN201
               not sweep_bad and answered + clean_errors == len(listed))
         for name, why in sweep_bad:
             print("FAIL sweep detail:", name, "->", why)
+            _failures += 1
+
+        # The same sweep with EVERY optional argument supplied as well: the sweep above never sends one, so the "argument present" side of each
+        # adapter's optional-argument handling (a.value(key, default), a.contains(key)) is otherwise only reached by the hand-written pairs.
+        # Same acceptance: a result or a documented clean error, never a hang, a protocol error or a crash.
+        opt_answered, opt_clean, opt_bad, opt_tools = 0, 0, [], 0
+        for tspec in listed:
+            schema = tspec["inputSchema"]
+            props = schema.get("properties", {})
+            optional = [k for k in props if k not in schema.get("required", [])]
+            if schema.get("x-fractalsql-no-arguments") or not optional:
+                continue
+            opt_tools += 1
+            args = {k: stub_for(props.get(k, {})) for k in schema.get("required", []) + optional}
+            r = call(tspec["name"], args)
+            if r is None:
+                opt_bad.append((tspec["name"], "no response (server died or EOF)"))
+                continue
+            if "error" in r:
+                opt_bad.append((tspec["name"], "protocol error: " + str(r["error"])[:160]))
+                continue
+            res = r.get("result") or {}
+            if res.get("isError"):
+                sc = res.get("structuredContent")
+                text = (res.get("content") or [{}])[0].get("text", "")
+                if not isinstance(sc, dict) or sc.get("error_class") not in KNOWN_ERROR_CLASSES or not text.strip():
+                    opt_bad.append((tspec["name"], "error result lacks the 1.6 taxonomy shape: " + json.dumps(res)[:160]))
+                else:
+                    opt_clean += 1
+            else:
+                opt_answered += 1
+        check(f"coverage sweep with every optional argument supplied: all {opt_tools} tools that take one answered (result or clean error); "
+              f"{opt_answered} succeeded, {opt_clean} surfaced their documented clean error",
+              not opt_bad and opt_answered + opt_clean == opt_tools and opt_tools > 0)
+        for name, why in opt_bad:
+            print("FAIL optional-sweep detail:", name, "->", why)
             _failures += 1
 
         # unknown tool/method pairing (framing + dispatch)
@@ -1333,7 +1454,7 @@ def run_http_and_cli_phase() -> None:
                               input="")
     r = cli_run(["--version"])
     check("CLI: --version prints the release banner",
-          r.returncode == 0 and "2.0.13" in r.stdout)
+          r.returncode == 0 and "2.0.14" in r.stdout)
     r = cli_run(["--help"])
     check("CLI: --help prints the flag table",
           r.returncode == 0 and "--tool" in r.stdout)
@@ -1388,7 +1509,7 @@ def run_http_and_cli_phase() -> None:
         [{"jsonrpc": "2.0", "id": 1, "method": "initialize",
           "params": INIT_PARAMS},
          {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-          "params": {"name": "fractal_search",
+          "params": {"name": "fractal_sfs_converge",
                      "arguments": {"vector": [0.1, 0.9], "query": [0.6, 0.8]}}}],
         {"FRACTALSQL_EXTENSION_PATH": bad_ext_path})
     bad_ext_resp = next((x for x in resps if x and x.get("id") == 2), None)
@@ -1539,7 +1660,7 @@ def run_http_and_cli_phase() -> None:
         http_tools = (json.loads(b)["result"]["tools"]
                       if s == 200 and b.startswith("{") else [])
         check("HTTP: tools/list over the session matches the stdio "
-              "catalog (82)", s == 200 and len(http_tools) == 82)
+              "catalog (94)", s == 200 and len(http_tools) == 94)
         s, _, b = rpc({"jsonrpc": "2.0", "id": 6, "method": "tools/call",
                        "params": {"name": "fractal_version",
                                   "arguments": {}}}, sess=minted)

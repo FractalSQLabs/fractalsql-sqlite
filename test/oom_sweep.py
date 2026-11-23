@@ -232,10 +232,17 @@ def sweep_load():
 
 
 t0 = time.time()
-kits = sorted(f for f in os.listdir(os.path.join(ROOT, "demo")) if f.endswith(".sql") and f.startswith("demo-vertical-") and FILTER.search(f))
+# The industry kits, plus the feature demos that own allocation-heavy paths the kits barely touch (chunking and the index tier: fractal_index_*,
+# fractal_search), plus test/oom_extra.sql (self-contained statements for chunking, the index tier and BLOB vectors). Only demos that run
+# with no provider configured belong here: one that waits on an embedding endpoint hangs the sweep. OOM_EXTRA=0 leaves the extras out.
+EXTRA_KITS = ("demo-chunking.sql", "demo-fractal-index.sql") if os.environ.get("OOM_EXTRA", "1") != "0" else ()
+kits = sorted(f for f in os.listdir(os.path.join(ROOT, "demo")) if f.endswith(".sql") and (f.startswith("demo-vertical-") or f in EXTRA_KITS) and FILTER.search(f))
 if MAX_KITS: kits = kits[:MAX_KITS]
-for k in kits:
-    sweep_kit(os.path.join(ROOT, "demo", k))
+paths = [os.path.join(ROOT, "demo", k) for k in kits]
+if os.environ.get("OOM_EXTRA", "1") != "0" and FILTER.search("oom_extra.sql") and os.path.exists(os.path.join(HERE, "oom_extra.sql")):
+    paths.append(os.path.join(HERE, "oom_extra.sql"))
+for p in paths:
+    sweep_kit(p)
 load_points = sweep_load() if os.environ.get("OOM_LOAD", "1") != "0" else 0
 try: os.remove(FIXED_FILES["sql"])
 except OSError: pass

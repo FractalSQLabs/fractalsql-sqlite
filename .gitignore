@@ -98,3 +98,4 @@ fuzz_mcp_*.selftest.txt
 obj/
 *.wixobj
 *.wixpdb
+*.mmd

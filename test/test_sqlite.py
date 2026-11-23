@@ -7,7 +7,7 @@ Exercises the three assertions every release must pass:
     2. fractal_edition() returns 'Community'.
        fractal_version() matches src/fsql_sqlite_internal.h's
        FSQL_SQLITE_VERSION_STR.
-    3. fractal_search(vector, query) returns a sensible distance
+    3. fractal_sfs_converge(vector, query) returns a sensible distance
        ordering: the vector literally equal to the query scores a
        small distance; random far-away vectors score a larger one
        (convergence sanity check).
@@ -120,7 +120,7 @@ def run_checks(conn: sqlite3.Connection) -> None:
     )
     print(f"[ok] metadata: edition={edition!r} version={version!r}")
 
-    # ----- Check 2: fractal_search exists + returns a float ----------------
+    # ----- Check 2: fractal_sfs_converge exists + returns a float ----------------
     dim = 8
     rng = random.Random(42)
     query = [rng.uniform(-1, 1) for _ in range(dim)]
@@ -131,12 +131,12 @@ def run_checks(conn: sqlite3.Connection) -> None:
     self_vec = list(query)
     dist_self = scalar(
         conn,
-        "SELECT fractal_search(?, ?);",
+        "SELECT fractal_sfs_converge(?, ?);",
         vec_to_csv(self_vec),
         vec_to_csv(query),
     )
     assert isinstance(dist_self, (int, float)), (
-        f"fractal_search returned {type(dist_self).__name__}, expected float"
+        f"fractal_sfs_converge returned {type(dist_self).__name__}, expected float"
     )
     print(f"[ok] self-match dist ≈ {dist_self:.4e}")
 
@@ -158,7 +158,7 @@ def run_checks(conn: sqlite3.Connection) -> None:
     for name, v in table:
         d = scalar(
             conn,
-            "SELECT fractal_search(?, ?);",
+            "SELECT fractal_sfs_converge(?, ?);",
             vec_to_csv(v),
             vec_to_csv(query),
         )
@@ -175,7 +175,7 @@ def run_checks(conn: sqlite3.Connection) -> None:
 
     # ----- Check 4: fractal_search_explore (Scout Mode) aggregate -----------------
     # Build a 3-island corpus; the Scout population must disperse across
-    # >1 island where Sniper (fractal_search top-k) collapses into one.
+    # >1 island where Sniper (fractal_sfs_converge top-k) collapses into one.
     centers = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
     edim = 3
     conn.execute("CREATE TABLE _scout_docs(emb TEXT)")

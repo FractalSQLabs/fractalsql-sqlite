@@ -85,7 +85,7 @@ Pick by the problem shape, not by the function name.
 | "Rebalance, and compare to the nearest historical allocation?" | `rebalance_sibling` | optimizer + trajectory search → LLM rationale | ✓ |
 | "Give me several distinct good portfolios, not just one?" (enterprise) | `diverse_portfolios` | multimodal optimizer → LLM tradeoff summary | ✓ |
 | "Which sub-agent should handle this incoming task?" | `route_task` | nearest-capability search + budget accounting → LLM rationale | ✓ |
-| "Which node should this workload land on (with vector refinement)?" | `schedule_workload` | `fractal_search` refine + nearest node → LLM rationale | ✓ |
+| "Which node should this workload land on (with vector refinement)?" | `schedule_workload` | `fractal_sfs_converge` refine + nearest node → LLM rationale | ✓ |
 | "Should I block this proposed action (is it near a known-bad state)?" | `outlier_intercept` | distance-to-bad-state safety barrier → LLM justification | ✓ |
 | "Triage a patient against a cohort + baseline→current drift" | `patient_deterioration_triage` | cohort search + trajectory drift → LLM triage | ✓ |
 | "Ask a natural-language question over my tables" | `data_analyst` | NL→SQL→execute → LLM analysis | ✓ |
@@ -640,7 +640,7 @@ warmup table with enough varied vectors to fill the window, or
 
 Use it for Sovereign-Edge node scheduling, or any "refine a task vector, then
 find the nearest capable node" workflow. Like [route_task](#route-task--fractal_agent_route_task)
-but with a `fractal_search` refinement step that route_task lacks: the "sniper
+but with a `fractal_sfs_converge` refinement step that route_task lacks: the "sniper
 search" in the abstract search space before the nearest-node lookup.
 
 **Inputs**
@@ -651,12 +651,12 @@ search" in the abstract search space before the nearest-node lookup.
 | `node_table` | `text` | (none) | your node/capability table |
 | `node_emb_col` | `text` | (none) | the embedding column in that table |
 | `node_id_col` | `text` | (none) | the column to return as the node id |
-| `iterations` | `int` | `30` | `fractal_search` refinement iterations |
-| `population` | `int` | `50` | `fractal_search` population size |
+| `iterations` | `int` | `30` | `fractal_sfs_converge` refinement iterations |
+| `population` | `int` | `50` | `fractal_sfs_converge` population size |
 | `k` | `int` | `5` | how many nearest nodes |
 | `context` | `text` | `'{}'` | optional label passed to the reason call |
 
-**How it works.** (1) `fractal_search(task_vec, iterations, population, 2)`:
+**How it works.** (1) `fractal_sfs_converge(task_vec, iterations, population, 2)`:
 refines the task vector (diffusion factor 2). (2)
 `fractal_search_telemetry(node_table, node_emb_col, refined, 1)` for the nearest
 node. (3) Resolves the returned `doc_id` (the row's `rowid`) to the named node
@@ -1129,8 +1129,7 @@ the corpus scan) and fetches the matched rows' non-vector columns as a JSON
 array. That compact, LLM-readable context is what `fractal_reason` consumes.
 (The raw Scout result, by contrast, contains the top-k *embeddings*,
 useless to an LLM and large enough, at `pop_size × dim` floats, to exceed a
-local model's context window and fail the chat call.) `source_doc_ids` are the
-0-based positions of the retrieved rows in the corpus scan.
+local model's context window and fail the chat call.) `source_row_ids` are the real row ids of the retrieved rows, best first, on both the Scout and the index path. `used_index` and `context_cut` are reported as for `fractal_rag_agent`. `meta_filter` (an optional sixth argument, after `pop_size` and `iterations`) limits the rows searched exactly as it does for `fractal_rag_agent`. `execution_time_ms` is the measured wall time of the call.
 
 ```sql
 fractal_search_agent(
@@ -1139,10 +1138,10 @@ fractal_search_agent(
     vector_col  text,
     pop_size    int  DEFAULT 50,
     iterations  int  DEFAULT 15
-) RETURNS TEXT          -- one JSON document: {answer, source_doc_ids, execution_time_ms}
+) RETURNS TEXT          -- one JSON document: {answer, source_row_ids, used_index, context_cut, execution_time_ms}
 ```
 - `answer`: The synthesized text response from the LLM (`json_extract(res, '$.answer')`).
-- `source_doc_ids`: The indices of the rows used as context.
+- `source_row_ids`: The real row ids of the rows used as context, best first.
 - `execution_time_ms`: Total pipeline latency.
 
 ### `fractal_sql_agent`
@@ -1276,7 +1275,7 @@ flagged when **either** signal fires:
 ### `fractal_rag_agent`
 **Hybrid Retrieve-Reason Agent**
 
-Embeds a query, Scout-searches a corpus, then reasons over the retrieved context to produce a single answer: a focused, single-turn RAG pattern.
+Embeds a query, finds the nearest rows of a corpus, then reasons over the retrieved context to produce a single answer: a focused, single-turn RAG pattern. The rows come from a Scout search of the table, or from `fractal_search` through an index when `agent_use_index` allows it (see [api-discovery.md](api-discovery.md)); `meta_filter` limits the rows that are searched.
 
 Like `fractal_search_agent`, the reasoning step consumes the **retrieved rows'
 content** (their non-vector columns, fetched by `rowid` in the SQLite
@@ -1308,12 +1307,15 @@ fractal_rag_agent(
     table_name   text,
     vector_col   text,
     meta_filter  text DEFAULT '{}'
-) RETURNS TEXT          -- one JSON document: {answer}
+) RETURNS TEXT          -- one JSON document: {answer, source_row_ids, used_index, context_cut}
 ```
 
-`meta_filter` is reserved for a future metadata `WHERE` filter; it is
-currently accepted but not yet applied to the search.
 - `answer`: The synthesized text response from the LLM.
+- `source_row_ids`: the real row ids of the rows the answer was drawn from (use them to cite a source, or a chunk and, through its `parent_id`, its document).
+- `used_index`: `true` when the nearest rows came from an index, `false` for the Scout search.
+- `context_cut`: `{"cells": N, "rows": M}`. A text cell longer than the `agent_context_row_bytes` setting (default 8192; 0 means no limit) is cut, with a marker saying how many bytes were left out, so the model is never given a silently shortened value; `cells` counts the cut cells and `rows` the matched rows the overall size cap left out.
+
+`meta_filter` is a flat JSON object of `column: value` pairs, for example `{"parent_id": 7, "lang": "en"}`. Only rows where every named column equals its value are searched; `null` matches NULL. The names must be plain column names of the table, the values are bound as parameters, and a filter that is malformed, names a missing column, or matches no row is an error, never ignored. Through an index the matching row ids are passed to `fractal_search` as its `ids` option; with no index the scan simply skips the other rows.
 
 ---
 

@@ -23,7 +23,7 @@ SELECT fractal_edition();        -- 'Community'
 SELECT fractal_version();        -- '2.0.5'
 
 -- ---------------------------------------------------------------
--- fractal_search(vector, query) — cosine distance between `vector`
+-- fractal_sfs_converge(vector, query) — cosine distance between `vector`
 -- and an SFS-refined projection of `query`. Per-row scalar; use it
 -- in an ORDER BY + LIMIT for top-k retrieval.
 -- ---------------------------------------------------------------
@@ -40,12 +40,12 @@ INSERT INTO vectors(embedding) VALUES
     ('0.5,0.5,0.5,0.5');
 
 -- Top 3 nearest to a query:
-SELECT id, fractal_search(embedding, '0.6,0.8,0.0,0.0') AS dist
+SELECT id, fractal_sfs_converge(embedding, '0.6,0.8,0.0,0.0') AS dist
 FROM vectors
 ORDER BY dist
 LIMIT 3;
 
 -- The query can also be a BLOB of packed float32 — handy when the
 -- application already has numpy/arrow-encoded vectors:
--- SELECT id, fractal_search(embedding, :query_blob) AS dist
+-- SELECT id, fractal_sfs_converge(embedding, :query_blob) AS dist
 -- FROM vectors ORDER BY dist LIMIT 3;

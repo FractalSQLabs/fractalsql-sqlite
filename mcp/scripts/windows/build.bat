@@ -75,7 +75,7 @@ rem otherwise rewrite std::min/std::max into "std::(...)" and fail to compile
 rem with C2589. Two headers reach windows.h here: mcp\src\lock_paths.h and
 rem openssl/ssl.h (-> e_ostime.h -> winsock2.h -> windows.h).
 cl.exe /nologo /std:c++17 /utf-8 /EHsc /MT /O2 /W3 /DNOMINMAX ^
-  /DFSQL_MCP_VERSION="\"2.0.13\"" ^
+  /DFSQL_MCP_VERSION="\"2.0.14\"" ^
   /I "%MCP_DIR%\vendor" /I "%MCP_DIR%\src" /I "%SQLITE_DIR%" ^
   /I "%OPENSSL_DIR%\include" ^
   "%SQLITE_DIR%\sqlite3.c" ^
@@ -88,5 +88,14 @@ if errorlevel 1 (
   exit /b 1
 )
 echo mcp build OK: %OUTDIR%\fractalsql-sqlite-mcp.exe
+REM The server looks for its two drift locks beside the executable when no path is configured, so
+REM a server started from this directory is checked against the locks this build was made with.
+REM The Windows build puts the executable in a separate output directory, so the locks are copied
+REM there: a stale copy left in the tree from an earlier build would make the server refuse to
+REM start (a schema-hash mismatch is a hard failure).
+for %%L in (.mcp-schema-lock .mcp-safety-annotations-lock) do (
+  if exist "%MCP_DIR%\%%L" copy /y "%MCP_DIR%\%%L" "%OUTDIR%\%%L" >nul
+)
+
 endlocal
 exit /b 0

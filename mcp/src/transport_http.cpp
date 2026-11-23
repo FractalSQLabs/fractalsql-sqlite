@@ -35,12 +35,33 @@
 #include <csignal>
 #include <algorithm>
 #include <cstdlib>
-#ifndef _WIN32
+#ifdef _WIN32
+  #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+  #endif
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+  // Winsock2 has no inet_pton(); the WinSock spelling of the same call is
+  // InetPtonA (Vista+). Same signature, same return convention.
+  #define inet_pton InetPtonA
+#else
   #include <sys/resource.h>
+  #include <arpa/inet.h>   // inet_pton for the loopback checks
 #endif
 
 namespace fsqlmcp
 {
+    // A header the server acts on that arrives twice is refused: two values for the host, the credential, the origin or the
+    // framing are an ambiguity a proxy in front and this parser could resolve differently.
+    static bool isSingleValuedHeader( const std::string& name )
+    {
+        static const char* const kNames[] = { "host", "authorization", "origin", "content-type", "transfer-encoding",
+                                              "mcp-session-id", "mcp-protocol-version", "mcp-method", "mcp-name" };
+        for( const char* n : kNames )
+            if( name == n ) return true;
+        return false;
+    }
+
     // SIGHUP: a pending forced-reload request, consumed by whichever
     // connection thread next calls TokenStore::matches(). The signal
     // handler itself (onSighup, below) ONLY touches this atomic -- no
@@ -521,7 +542,7 @@ namespace fsqlmcp
             // Same idea for every other header name: remember that it arrived
             // twice, so a request whose framing is ambiguous can be refused
             // rather than served with one of the two values.
-            if( out.headers.count( key ) ) out.repeated.insert( key );
+            if( out.headers.count( key ) ) { out.repeated.insert( key ); if( isSingleValuedHeader( key ) ) return ReadStatus::BadFraming; }
             std::size_t vb = 0;
             while( vb < val.size() && ( val[ vb ] == ' ' || val[ vb ] == '\t' ) ) ++vb;
             out.headers[ key ] = val.substr( vb );
@@ -618,7 +639,23 @@ namespace fsqlmcp
         if( path == "/healthz" ) { sendHttpJson( io, 200, Json{ { "ok", true } } ); return true; }
         if( path == "/readyz" )
         {
-            const bool ready = readinessProbe ? readinessProbe() : false;
+            // This route is unauthenticated and the probe is a live query: the result is kept for 5 s so a burst of requests
+            // costs the engine one probe, not one each.
+            static std::mutex probeMu;
+            static std::chrono::steady_clock::time_point probedAt{};
+            static bool probed = false, lastReady = false;
+            bool ready;
+            {
+                std::lock_guard<std::mutex> lk( probeMu );
+                const auto now = std::chrono::steady_clock::now();
+                if( !probed || now - probedAt >= std::chrono::seconds( 5 ) )
+                {
+                    lastReady = readinessProbe ? readinessProbe() : false;
+                    probedAt = now;
+                    probed = true;
+                }
+                ready = lastReady;
+            }
             sendHttpJson( io, ready ? 200 : 503,
                           Json{ { "ok", ready }, { "probe", "engine version query" } } );
             return true;
@@ -661,6 +698,14 @@ namespace fsqlmcp
         return tokens.check( presentedOut );
     }
 
+    // True for an IPv4 address in 127.0.0.0/8, parsed as an address: a name that merely starts with "127." (127.evil.example,
+    // 127.0.0.1.nip.io) is not one.
+    static bool isLoopbackV4( const std::string& host )
+    {
+        in_addr addr{};
+        return inet_pton( AF_INET, host.c_str(), &addr ) == 1 && ( ntohl( addr.s_addr ) >> 24 ) == 127;
+    }
+
     // True when the origin names a loopback host. The host part is what
     // matters: a page served from http://127.0.0.1:3000 is a loopback
     // origin whatever its port.
@@ -681,7 +726,7 @@ namespace fsqlmcp
         const std::size_t colon = host.rfind( ':' );
         if( colon != std::string::npos ) host = host.substr( 0, colon );
         if( host == "localhost" ) return true;
-        if( host.rfind( "127.", 0 ) == 0 ) return true;
+        if( isLoopbackV4( host ) ) return true;
         return false;
     }
 
@@ -1000,11 +1045,15 @@ namespace fsqlmcp
 
     // Finds the context a request names, or mints one when it names none.
     // Returns false when the handle does not exist or belongs to another
-    // credential: the caller answers "not found" either way.
+    // credential: the caller answers "not found" either way. When it names none and the context cap
+    // (FSQL_MCP_MAX_SESSIONS, the cap initialize enforces) is already reached, returns false with tooMany set,
+    // and the caller answers 503: minting here without the cap let a flood of context-less calls grow the table
+    // without bound.
     static bool resolveContext( ClientState& state, const std::string& requested, const std::string& ownerFp,
                                 std::string& contextIdOut, std::string& connKeyOut,
-                                std::vector<std::string>& expiredConnKeys )
+                                std::vector<std::string>& expiredConnKeys, bool& tooMany )
     {
+        tooMany = false;
         std::lock_guard<std::mutex> lk( state.mu );
         expireLocked( state, expiredConnKeys );
         const auto now = std::chrono::steady_clock::now();
@@ -1016,6 +1065,11 @@ namespace fsqlmcp
             contextIdOut = requested;
             connKeyOut = it->second.connKey;
             return true;
+        }
+        if( state.contexts.size() >= maxSessions() )
+        {
+            tooMany = true;
+            return false;
         }
         const std::string id = mintContextId();
         // The connection key is derived from the handle, so two contexts
@@ -1262,9 +1316,15 @@ namespace fsqlmcp
         std::vector<std::string> expiredConnKeys;
         if( stateful )
         {
-            if( !resolveContext( state, requestedContext, t_callerFp, contextId, connKey, expiredConnKeys ) )
+            bool tooMany = false;
+            if( !resolveContext( state, requestedContext, t_callerFp, contextId, connKey, expiredConnKeys, tooMany ) )
             {
                 for( const std::string& k : expiredConnKeys ) if( closeSession ) closeSession( k );
+                if( tooMany )
+                {
+                    sendHttpJson( io, 503, Json{ { "error", "too many open MCP contexts" } } );
+                    return;
+                }
                 sendHttpJson( io, 404, Json{ { "error",
                     "unknown context handle: it does not exist, or it belongs to another credential" } } );
                 return;
@@ -1325,7 +1385,7 @@ namespace fsqlmcp
         }
         SSL_CTX* sslCtx = tls.get();   // null when !cfg.tlsEnabled
 
-        if( !sslCtx && !( cfg.host.empty() || cfg.host == "localhost" || cfg.host == "::1" || cfg.host.rfind( "127.", 0 ) == 0 ) )
+        if( !sslCtx && !( cfg.host.empty() || cfg.host == "localhost" || cfg.host == "::1" || isLoopbackV4( cfg.host ) ) )
         {
             std::cerr << "WARNING: the HTTP transport is bound to non-loopback address '" << cfg.host
                       << "' WITHOUT TLS; the bearer token and all results travel in clear text (set FSQL_MCP_HTTPS=true)\n";

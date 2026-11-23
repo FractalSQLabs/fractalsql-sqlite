@@ -119,6 +119,8 @@ jobs:
           # two tests, not `a && b`: under `set -e` a failing first test of an && list does not stop the script
           test -f /usr/local/bin/.mcp-schema-lock
           test -f /usr/local/bin/.mcp-safety-annotations-lock
+          # the run card ships in the package's doc dir beside the client guide
+          test -n "$(find /usr/share/doc -path '*/mcp/RUN.txt' | head -1)"
           /usr/local/bin/fractalsql-sqlite-mcp --version
           test "$(cd /tmp && /usr/local/bin/fractalsql-sqlite-mcp --list-tools | wc -l)" -ge 60
           # Ask the package, not the filesystem: the stock ubuntu image excludes /usr/share/doc at install time
@@ -169,6 +171,8 @@ jobs:
           # two tests, not `a && b`: under `set -e` a failing first test of an && list does not stop the script
           test -f /usr/local/bin/.mcp-schema-lock
           test -f /usr/local/bin/.mcp-safety-annotations-lock
+          # the run card ships in the package's doc dir beside the client guide
+          test -n "$(find /usr/share/doc -path '*/mcp/RUN.txt' | head -1)"
           /usr/local/bin/fractalsql-sqlite-mcp --version
           test "$(cd /tmp && /usr/local/bin/fractalsql-sqlite-mcp --list-tools | wc -l)" -ge 60
           # Ask the package, not the filesystem: container images can install with docs excluded.
@@ -368,7 +372,7 @@ jobs:
           tar -xzf "${tgz}" -C "${D}"
           M="$(find "${D}" -type d -name mcp | head -1)"
           test -n "${M}" || { echo "FAIL: no mcp/ folder in ${tgz}"; exit 1; }
-          for f in fractalsql-sqlite-mcp .mcp-schema-lock .mcp-safety-annotations-lock manifest.json README.md; do
+          for f in fractalsql-sqlite-mcp .mcp-schema-lock .mcp-safety-annotations-lock manifest.json README.md RUN.txt; do
               test -e "${M}/${f}" || { echo "FAIL: ${f} missing from the tarball's mcp/"; ls -la "${M}"; exit 1; }
           done
           cd "${D}"
@@ -385,12 +389,12 @@ jobs:
           VERSION=$("${SQLITE3_BIN}" :memory: ".load /usr/local/lib/sqlite3/fractalsql" "SELECT fractal_version();")
           echo "edition=${EDITION} version=${VERSION}"
           test "${EDITION}" = "Community"
-          test "${VERSION}" = "2.0.13"
+          test "${VERSION}" = "2.0.14"
 
           # Search works with no further config.
           "${SQLITE3_BIN}" :memory: \
               ".load /usr/local/lib/sqlite3/fractalsql" \
-              "SELECT fractal_search('0.6,0.8,0.0','0.6,0.8,0.0');"
+              "SELECT fractal_sfs_converge('0.6,0.8,0.0','0.6,0.8,0.0');"
 
           # --- Reasoning smoke test against a mock LLM endpoint --------
           PLUGIN=/usr/local/lib/sqlite3/fractalsql-reasoning-http.so
@@ -480,18 +484,18 @@ jobs:
           VERSION=$(sqlite3 :memory: ".read /usr/local/lib/sqlite3/load_fractalsql.sql" "SELECT fractal_version();" | tail -1)
           echo "edition=${EDITION} version=${VERSION}"
           test "${EDITION}" = "Community"
-          test "${VERSION}" = "2.0.13"
+          test "${VERSION}" = "2.0.14"
           echo "ok: easy_install.sh end-to-end (Debian)"
           SCRIPT
           chmod +x test-easy-install.sh
           docker run --rm -v "${{ github.workspace }}:/work" -w /work \
               ubuntu:24.04 bash /work/test-easy-install.sh
 
-  # Intel macOS: cross-built on an Apple Silicon runner the way release.yml builds it (static x86_64 OpenSSL from
-  # source, -arch x86_64). The package must carry an x86_64 MCP server that links no library outside the system's.
+  # Intel macOS, built natively on macos-15-intel the way release.yml builds it. The package must carry an x86_64 MCP
+  # server that links OpenSSL dynamically from Homebrew's openssl@3 and needs nothing else outside the system.
   macos-mcp-intel:
-    name: "macOS Intel (x86_64) — MCP cross-build + package"
-    runs-on: macos-15
+    name: "macOS Intel (x86_64) — MCP build + package"
+    runs-on: macos-15-intel
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
@@ -505,29 +509,15 @@ jobs:
           unzip -q deps/sqlite.zip -d deps
           mv "deps/sqlite-amalgamation-${SQLITE_VERSION}" deps/sqlite
 
-      - name: Cross-build x86_64 OpenSSL from source
-        run: |
-          set -euo pipefail
-          curl -fsSLO --proto '=https' https://github.com/openssl/openssl/releases/download/openssl-3.5.8/openssl-3.5.8.tar.gz
-          echo "a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2  openssl-3.5.8.tar.gz" | shasum -a 256 -c -
-          tar xf openssl-3.5.8.tar.gz
-          cd openssl-3.5.8
-          ./Configure darwin64-x86_64 no-shared no-tests --prefix=/tmp/openssl-x64 -mmacosx-version-min=13.3 -fPIC
-          make -j1 -s build_generated
-          make -j"$(sysctl -n hw.ncpu)" -s build_libs
-          make -s install_sw
-
       - name: Package the x86_64 tarball
-        env:
-          OPENSSL_PREFIX: /tmp/openssl-x64
         run: |
           set -euo pipefail
-          brew install sqlite
+          brew install sqlite openssl@3
           chmod +x scripts/package-darwin.sh
           FSQL_DARWIN_ARCH=x86_64 FSQL_REQUIRE_MCP=1 ./scripts/package-darwin.sh
           ls -l dist/packages
 
-      - name: The tarball's MCP server is x86_64, self-contained, and complete
+      - name: The tarball's MCP server is x86_64, links openssl@3 dynamically, and is complete
         run: |
           set -euo pipefail
           tgz="$(ls dist/packages/fractalsql-sqlite-*-darwin-x86_64.tar.gz | head -1)"
@@ -535,16 +525,17 @@ jobs:
           tar -xzf "${tgz}" -C "${D}"
           M="$(find "${D}" -type d -name mcp | head -1)"
           test -n "${M}" || { echo "FAIL: no mcp/ folder in ${tgz}"; exit 1; }
-          for f in fractalsql-sqlite-mcp .mcp-schema-lock .mcp-safety-annotations-lock manifest.json README.md; do
+          for f in fractalsql-sqlite-mcp .mcp-schema-lock .mcp-safety-annotations-lock manifest.json README.md RUN.txt; do
               test -e "${M}/${f}" || { echo "FAIL: ${f} missing from the tarball's mcp/"; ls -la "${M}"; exit 1; }
           done
           lipo -info "${M}/fractalsql-sqlite-mcp" | tee /dev/stderr | grep -q x86_64 || { echo "FAIL: not an x86_64 binary"; exit 1; }
           otool -L "${M}/fractalsql-sqlite-mcp"
-          if otool -L "${M}/fractalsql-sqlite-mcp" | tail -n +2 | awk '{print $1}' | grep -vE '^(/usr/lib/|/System/Library/)'; then
-              echo "FAIL: the binary links a library outside the system's"; exit 1
+          LIBS="$(otool -L "${M}/fractalsql-sqlite-mcp" | tail -n +2 | awk '{print $1}')"
+          echo "${LIBS}" | grep -q 'openssl@3/lib/libssl' || { echo "FAIL: libssl is not linked dynamically"; exit 1; }
+          if echo "${LIBS}" | grep -v -E '^(/usr/lib/|/System/Library/|.*/opt/openssl@3/lib/lib(ssl|crypto))' | grep -q .; then
+              echo "FAIL: the binary depends on a library other than openssl@3 and the system's own"; exit 1
           fi
-          # Runs only if Rosetta is present on the runner; the checks above are the gate.
-          "${M}/fractalsql-sqlite-mcp" --version || echo "note: the x86_64 binary could not run on this arm64 runner"
+          "${M}/fractalsql-sqlite-mcp" --version
 
   easy-install-macos:
     name: "easy_install.sh: macOS wizard, non-interactive (arm64)"
@@ -688,6 +679,24 @@ jobs:
           call scripts\windows\build-msi.bat
           if errorlevel 1 exit /b 1
 
+      # The reasoning plugin DLL imports the VC++ runtime (VCRUNTIME140.dll), so the installer must carry the launch
+      # condition that checks for the Redistributable. If the plugin depends on a runtime DLL and the condition is
+      # gone, a clean Windows machine installs fine and the plugin then fails to load with no explanation.
+      - name: The installer guards the plugin's VC++ runtime dependency
+        shell: pwsh
+        run: |
+          $dll = 'include\windows-x86_64\fractalsql-reasoning-http.dll'
+          $txt = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($dll))
+          $imports = @([regex]::Matches($txt, '(?i)(vcruntime|msvcp|vcomp|concrt)[0-9_]*\.dll') | ForEach-Object { $_.Value.ToUpper() } | Sort-Object -Unique)
+          Write-Host "VC++ runtime imports of the plugin: $($imports -join ', ')"
+          if ($imports.Count -gt 0) {
+              $wxs = Get-Content scripts\windows\fractalsql.wxs -Raw
+              if ($wxs -notmatch 'VCRUNTIME140PRESENT' -or $wxs -notmatch 'vc_redist\.x64\.exe') {
+                  Write-Host 'FATAL: the plugin needs the VC++ runtime but fractalsql.wxs has no launch condition for it'; exit 1
+              }
+          }
+          Write-Host 'ok: the installer guards the plugin runtime dependency'
+
       - name: Install our MSI
         shell: pwsh
         run: |
@@ -706,7 +715,7 @@ jobs:
         shell: pwsh
         run: |
           $dir = 'C:\Program Files\FractalSQL\mcp'
-          foreach ($f in 'fractalsql-sqlite-mcp.exe','.mcp-schema-lock','.mcp-safety-annotations-lock','manifest.json','README.md') {
+          foreach ($f in 'fractalsql-sqlite-mcp.exe','.mcp-schema-lock','.mcp-safety-annotations-lock','manifest.json','README.md','RUN.txt') {
               if (-not (Test-Path (Join-Path $dir $f))) { Get-ChildItem $dir -Force | Format-Table Name; Write-Host "FATAL: $f missing from the installed mcp folder"; exit 1 }
           }
           # From another directory: the lock files must be found beside the executable.

@@ -29,7 +29,7 @@ Example top-k query:
 
     SELECT id
     FROM my_vectors
-    ORDER BY fractal_search(embedding, :query_vector)
+    ORDER BY fractal_sfs_converge(embedding, :query_vector)
     LIMIT 10;
 
 For full examples, see /usr/share/doc/sqlite3-fractalsql/load_extension.sql.

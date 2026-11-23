@@ -204,6 +204,8 @@ SELECT fractal_dimension_boxcount(
 -- a real rationale (plugin-gated: the clean hint is the expected output
 -- without one).
 .print --- detour_classify composition (trajectory + trace + reason) ---
+DROP TABLE IF EXISTS temp.last_scan;
+CREATE TEMP TABLE last_scan AS
 WITH tr AS (SELECT fractal_search_trajectory(
                     'vfl_vehicles', 'current',
                     (SELECT baseline FROM vfl_vehicles WHERE id = 5),
@@ -226,7 +228,9 @@ SELECT (SELECT v.id FROM tr, json_each(tr.tj) je
         ORDER BY json_extract(je.value, '$.distance') LIMIT 1) AS trajectory_distance,
        fractal_dimension_boxcount(
            '[' || (SELECT group_concat(p) FROM walk) || ']', 2) AS trace_complexity;
-SELECT fractal_reason('one-line detour classification for this fleet vehicle');
+SELECT * FROM temp.last_scan;
+SELECT fractal_reason('one-line detour classification for this fleet vehicle',
+    json_object('scan', (SELECT json_group_array(json_object('nearest_fleet_id', nearest_fleet_id, 'trajectory_distance', trajectory_distance, 'trace_complexity', trace_complexity)) FROM temp.last_scan)));
 
 -- ------------------------------------------------------------------
 -- 6. Reasoning: the dispatch narrative for vehicle 5 is carried by the

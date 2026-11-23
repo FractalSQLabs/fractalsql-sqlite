@@ -39,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, windows-2022]
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
     env:
       GATE_SET: ${{ github.event_name == 'workflow_dispatch' && inputs.gate_set || 'default' }}
 

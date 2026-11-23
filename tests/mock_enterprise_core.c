@@ -54,6 +54,22 @@ static int mock_should_fail(void) {
     return path != NULL && path[0] != '\0' && access(path, F_OK) == 0;
 }
 
+/* The code the failing calls return: FSQL_ESTORAGE by default, or the negative integer in FSQL_MOCK_ENT_FAIL_CODE, so a test can reach each
+ * branch of the host's core-error -> message mapping (integrity, diversity, entropy, ledger full, ledger IO, ...). Only read while the
+ * FSQL_MOCK_ENT_FAIL sentinel file exists, like the toggle itself. */
+static int mock_fail_rc(void) {
+    if (!mock_should_fail())
+        return FSQL_OK;
+    const char *c = getenv("FSQL_MOCK_ENT_FAIL_CODE");
+    if (c != NULL && c[0] != '\0') {
+        char *end = NULL;
+        long v = strtol(c, &end, 10);
+        if (end != NULL && *end == '\0' && v < 0 && v > -1000)
+            return (int) v;
+    }
+    return FSQL_ESTORAGE;
+}
+
 /* Same sentinel-file convention as mock_should_fail: when present, the
  * portfolio_multimodal family returns FSQL_OK with *out_n_found = 0
  * (a legitimate "search ran, found nothing" result) instead of the
@@ -68,27 +84,27 @@ static int mock_should_find_zero(void) {
 
 FSQL_API int fsql_ledger_flush(fsql_ctx *ctx) {
     (void) ctx;
-    return mock_should_fail() ? FSQL_ESTORAGE : FSQL_OK;
+    return mock_fail_rc();
 }
 
 FSQL_API int fsql_ledger_load(fsql_ctx *ctx) {
     (void) ctx;
-    return mock_should_fail() ? FSQL_ESTORAGE : FSQL_OK;
+    return mock_fail_rc();
 }
 
 FSQL_API int fsql_ledger_compact(fsql_ctx *ctx) {
     (void) ctx;
-    return mock_should_fail() ? FSQL_ESTORAGE : FSQL_OK;
+    return mock_fail_rc();
 }
 
 FSQL_API int fsql_ledger_reset_soft(fsql_ctx *ctx) {
     (void) ctx;
-    return mock_should_fail() ? FSQL_ESTORAGE : FSQL_OK;
+    return mock_fail_rc();
 }
 
 FSQL_API int fsql_ledger_reset_hard(fsql_ctx *ctx) {
     (void) ctx;
-    return mock_should_fail() ? FSQL_ESTORAGE : FSQL_OK;
+    return mock_fail_rc();
 }
 
 FSQL_API int fsql_ledger_truth_count(const fsql_ctx *ctx, size_t *out) {

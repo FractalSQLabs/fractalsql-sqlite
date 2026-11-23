@@ -139,6 +139,8 @@ ORDER BY json_extract(je.value, '$.distance');
 -- is caller-built from age>65 AND condition='sepsis' (the two-predicate
 -- cohort a single filter pair can't express).
 .print --- deterioration_triage composition (hybrid + trajectory + reason) ---
+DROP TABLE IF EXISTS temp.last_scan;
+CREATE TEMP TABLE last_scan AS
 WITH cohort AS (SELECT group_concat(id, ',') AS ids
                   FROM vmc_patients
                  WHERE age > 65 AND condition = 'sepsis'),
@@ -157,7 +159,9 @@ SELECT (SELECT p.id FROM hs, json_each(hs.rj) je
         ORDER BY json_extract(je.value, '$.distance') LIMIT 1) AS drift_distance,
        (SELECT count(*) FROM vmc_patients
          WHERE age > 65 AND condition = 'sepsis') AS cohort_matches;
-SELECT fractal_reason('one-line deterioration-triage rationale for this patient cohort scan');
+SELECT * FROM temp.last_scan;
+SELECT fractal_reason('one-line deterioration-triage rationale for this patient cohort scan',
+    json_object('scan', (SELECT json_group_array(json_object('nearest_cohort_id', nearest_cohort_id, 'cohort_distance', cohort_distance, 'drift_distance', drift_distance, 'cohort_matches', cohort_matches)) FROM temp.last_scan)));
 
 -- ------------------------------------------------------------------
 -- 4. fractal_vascular_network: a branching vessel graph -- a 28-node

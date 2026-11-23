@@ -234,6 +234,8 @@ ORDER BY r.snapshot_id ASC;
 -- preset generalizes exactly this trajectory search (plus the optimizer
 -- itself); the composition's rationale is the section-5 closing reason
 -- call.
+DROP TABLE IF EXISTS vqf_nearest;
+CREATE TEMP TABLE vqf_nearest AS
 WITH w AS (SELECT je.value AS weight
              FROM vqf_result r, json_each(r.rj, '$.weights') je),
      cur AS (SELECT group_concat(weight, ',') AS csv FROM w),
@@ -246,6 +248,7 @@ SELECT s.quarter, json_extract(je.value, '$.distance') AS distance
 FROM tj, json_each(tj.rj) je
 JOIN vqf_allocation_snapshots s ON s.id - 1 = json_extract(je.value, '$.doc_id')
 ORDER BY json_extract(je.value, '$.distance');
+SELECT * FROM vqf_nearest;
 
 -- ------------------------------------------------------------------
 -- 6. Reasoning: the regime-shift + optimized-allocation narrative the
@@ -257,7 +260,12 @@ ORDER BY json_extract(je.value, '$.distance');
 -- ------------------------------------------------------------------
 .print
 .print === 6. Reasoning: regime shift + rebalance rationale ===
-SELECT fractal_reason('one-line rationale tying this market regime shift to the optimized 8-asset rebalance and its nearest historical pattern');
+SELECT fractal_reason('one-line rationale tying this market regime shift to the optimized 8-asset rebalance and its nearest historical pattern',
+    json_object(
+        'regime_drift',   (SELECT json(fractal_dimension_drift(series, 64)) FROM vqf_price_series),
+        'optimized_book', (SELECT json(rj) FROM vqf_result),
+        'nearest_historical_quarters',
+            (SELECT json_group_array(json_object('quarter', quarter, 'distance', distance)) FROM vqf_nearest)));
 
 .print
 .print === Demo complete ===

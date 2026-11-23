@@ -60,7 +60,7 @@ Confirm the extension is alive and which edition it is:
 ```bash
 docker compose exec demo sqlite3 fractalsql_demo.sqlite \
   -init demo_init.sql "SELECT fractal_edition(), fractal_version();"
-# expect: Community|2.0.13
+# expect: Community|2.0.14
 ```
 
 Run any demo (re-runnable; each recreates its own fixture tables):
@@ -79,10 +79,8 @@ file is a "go read its log" signal, not proof of a bug — several demos
 intentionally trigger a runtime error as their own point (a deliberate
 CHECK-constraint failure, an unknown-metric rejection, the enterprise-
 tier-gated demos on this Community build); `run_demo.sh --help` lists
-the known ones plus `--only`/`--skip`/`--quiet` flags and how to also
-exercise `response-modes.sql` (skipped by default — see
-[Response modes](../demo/README.md#response-modes) for why it needs
-separate treatment).
+the known ones plus the `--only`/`--skip`/`--quiet` flags. It includes
+`response-modes.sql` (see [Response modes](../demo/README.md#response-modes)).
 
 Or open an interactive `sqlite3` shell with reasoning pre-configured:
 ```bash
@@ -156,7 +154,7 @@ The demo image stages the **production MCP server binary itself** (the
 same `fractalsql-sqlite-mcp` the repo's [`mcp/`](../mcp/) directory
 builds), launched through `demo/mcp/call-tool.sh` with its tool table
 narrowed (launch-time `--tool` filter) to exactly four tools
-(`fractal_search`, `fractal_reason`, `fractal_agent_data_analyst`,
+(`fractal_sfs_converge`, `fractal_reason`, `fractal_agent_data_analyst`,
 `fractal_agent_diverse_portfolios`), chosen to prove the MCP
 call shapes end to end on real demo data. There is no second demo-server
 implementation to keep in sync. It is stdio-only: SQLite has no
@@ -167,7 +165,7 @@ new container, nothing new to install beyond what's already in the image.
 One-liner real tool call round-trip (search needs no model):
 
 ```bash
-docker compose exec demo /demo/mcp/call-tool.sh fractal_search \
+docker compose exec demo /demo/mcp/call-tool.sh fractal_sfs_converge \
   '{"vector":[0.1,0.9],"query":[0.6,0.8]}'
 ```
 
@@ -191,12 +189,12 @@ docker compose exec demo /demo/mcp/call-tool.sh fractal_agent_diverse_portfolios
 If you have Node available and want the richer, interactive Explorer,
 the MCP inspector talks to the same binary's stdio transport like any
 other MCP client (inside the container:
-`npx @modelcontextprotocol/inspector /usr/local/bin/fractalsql-sqlite-mcp --tool fractal_search`,
+`npx @modelcontextprotocol/inspector /usr/local/bin/fractalsql-sqlite-mcp --tool fractal_sfs_converge`,
 or drop the `--tool` list to see the full catalog); optional, not
 required.
 
 The demo server reuses the demo compose project's own credentials and
-posture, *not* a production configuration. For the full 82-tool
+posture, *not* a production configuration. For the full 87-tool
 catalog, a real client config, and the production server, see
 **[docs/mcp-plugin.md](mcp-plugin.md)**.
 

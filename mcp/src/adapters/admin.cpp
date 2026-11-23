@@ -23,13 +23,13 @@ namespace fsqlmcp
     // The documented per-connection config surface (reasoning-setup.md,
     // text-to-sql-setup.md, vectorizer-setup.md, enterprise.md), minus the
     // derived internals fractal_config_get doesn't resolve.
-    static const std::array<const char*, 17> kKnownKeys{
+    static const std::array<const char*, 20> kKnownKeys{
         "reasoning_plugin", "http_url", "http_model", "http_allow_plaintext",
         "http_embed_url", "http_embed_model", "http_think", "http_think_provider",
-        "http_native_url", "http_num_ctx", "text_to_sql_max_attempts",
+        "http_native_url", "http_response_mode", "http_num_ctx", "text_to_sql_max_attempts",
         "text_to_sql_allowed_statements", "text_to_sql_use_review",
         "enterprise_lib", "enterprise_ledger_key", "enterprise_require_signature",
-        "agent_partial_reasoning_fail"
+        "ledger_retention", "agent_partial_reasoning_fail", "agent_use_index"
     };
 
     static bool isSecretKey( const std::string& k )
@@ -38,7 +38,7 @@ namespace fsqlmcp
     static bool isEnterpriseKey( const std::string& k )
     {
         return k == "enterprise_lib" || k == "enterprise_require_signature" ||
-               k == "enterprise_ledger_key";
+               k == "enterprise_ledger_key" || k == "ledger_retention";
     }
 
     static std::string redactedValue( const std::string& key, const std::string& value )
@@ -122,7 +122,7 @@ namespace fsqlmcp
             } } );
         t.back().description = "Confirms the FractalSQL install is alive and which edition (Community/Enterprise) "
             "is active: calls fractal_version() and fractal_edition(). The one-line sanity check after "
-            "installing; expect a real edition/version back (e.g. Community|2.0.13), plus a startup warning if "
+            "installing; expect a real edition/version back (e.g. Community|2.0.14), plus a startup warning if "
             "the engine version differs from what this plugin was built against (the version-skew guard warns, "
             "never hard-fails).";
 
@@ -130,13 +130,13 @@ namespace fsqlmcp
             { StrEnum( "key", true, "One of the documented per-connection config keys (enforced: reasoning_plugin, "
                                     "http_url, http_model, http_allow_plaintext, http_embed_url, "
                                     "http_embed_model, http_think, http_think_provider, http_native_url, "
-                                    "http_num_ctx, text_to_sql_max_attempts, text_to_sql_allowed_statements, "
+                                    "http_response_mode, http_num_ctx, text_to_sql_max_attempts, text_to_sql_allowed_statements, "
                                     "text_to_sql_use_review, enterprise_lib, enterprise_ledger_key, "
-                                    "enterprise_require_signature, agent_partial_reasoning_fail)." ),
+                                    "enterprise_require_signature, ledger_retention, agent_partial_reasoning_fail, agent_use_index)." ),
               Str("value", true, "The value to set (engine-side type coercion applies)."),
               Bool_("allow_secrets", false,
                     "Must be true to set an enterprise-posture key (enterprise_lib, "
-                    "enterprise_require_signature, enterprise_ledger_key) through the MCP boundary: an "
+                    "enterprise_require_signature, enterprise_ledger_key, ledger_retention) through the MCP boundary: an "
                     "explicit operator intent, never a default.", false) },
             std::nullopt, true, false,
             [&db]( const Json& a, CallCtx& ctx ) {
@@ -155,10 +155,10 @@ namespace fsqlmcp
                         "documented per-connection keys (reasoning_plugin, http_url, "
                         "http_model, http_allow_plaintext, http_embed_url, "
                         "http_embed_model, http_think, http_think_provider, "
-                        "http_native_url, http_num_ctx, text_to_sql_max_attempts, "
+                        "http_native_url, http_response_mode, http_num_ctx, text_to_sql_max_attempts, "
                         "text_to_sql_allowed_statements, text_to_sql_use_review, "
                         "enterprise_lib, enterprise_ledger_key, "
-                        "enterprise_require_signature, agent_partial_reasoning_fail); "
+                        "enterprise_require_signature, ledger_retention, agent_partial_reasoning_fail, agent_use_index); "
                         "the fractalsql.-prefixed "
                         "spelling is accepted by the engine too" );
                 // The config-writes switch: a key the current mode does not
@@ -204,6 +204,16 @@ namespace fsqlmcp
         t.back().description = "Reads back a config key's resolved value on THIS session's connection (the SQLite "
             "column's wrapper over fractal_config_get). Secrets (http_token, enterprise_ledger_key) are refused; "
             "they are never read back through any tool or resource.";
+
+        t.push_back( ToolSpec{ "fractal_config_keys", "Admin", ToolClass::Cheap,
+            {}, std::nullopt, false, true,
+            [&db]( const Json&, CallCtx& ) {
+                return Json{ { "keys", parseJsonStrict( db.callScalar( "SELECT fractal_config_keys()", {} ) ) } };
+            } } );
+        t.back().idempotentHint = true;
+        t.back().description = "Every config key the engine knows, as {name, type, session_overridable}: string, path, int, bool or enum "
+            "(agent_use_index is an enum: off, on, auto). Lets a caller discover the knobs instead of hard-coding them; every key is set per connection "
+            "with fractal_config_set.";
 
         t.push_back( ToolSpec{ "fractal_configure_reasoning", "Admin", ToolClass::Cheap,
             { Str("provider_url", false, "Chat endpoint URL (e.g. http://127.0.0.1:11434/v1/chat/completions for ollama, or an OpenAI-compatible /v1/chat/completions)."),

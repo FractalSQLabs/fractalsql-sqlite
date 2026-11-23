@@ -71,8 +71,8 @@ runs.
 - **1 — Setup.** A small `demo_alerts` table with a deliberate story in
   it: a login-attempt count that escalates (3 → 3 → 17) and a latency
   spike in the last ~10 minutes. Nothing here calls the LLM yet.
-- **2 — Sniper Search.** `fractal_search()` converges a stored column
-  toward a query vector — the fast, precise mode. `fractal_search_debug`
+- **2 — Sniper Search.** `fractal_sfs_converge()` converges a stored column
+  toward a query vector — the fast, precise mode. `fractal_sfs_converge_debug`
   exposes the tunable form if you need it; the default form here is
   fixed at the SFS engine's own defaults.
 - **3 — Reasoning over real data.** `fractal_reason()` gets a real
@@ -90,37 +90,22 @@ runs.
 
 ## Response modes
 
-`response-modes.sql` demonstrates `FSQL_REASONING_HTTP_RESPONSE_MODE`
+`response-modes.sql` demonstrates the `http_response_mode` config key
 (`text` / `code` / `json`) — see
 [docs/reasoning-setup.md](../docs/reasoning-setup.md#response-modes)
 for the full explanation.
 
-It's a **separate file from `demo.sql`**, not another section in it,
-because the response mode is env-var-only and read once when the
-reasoning plugin initializes — changing it needs an OS-level
-environment change plus a restart of the **host process** (the
-`sqlite3` CLI or your application; SQLite has no separate server to
-restart, but a new `sqlite3` session does not pick up the variable
-unless its own environment changed). Run it as three manual passes
-instead:
+The mode is a per-connection key, so one pass shows all three: each
+section sets the key with `fractal_config_set`, then runs its query.
 
 1. Run `demo.sql` first if you haven't — `response-modes.sql` reuses
    its `demo_alerts` table.
-2. For each mode (`text` needs no setup — it's the default):
-   1. Set `FSQL_REASONING_HTTP_RESPONSE_MODE` and restart the host
-      process. See "Switching modes on an already-running install" in
-      [docs/reasoning-setup.md](../docs/reasoning-setup.md#response-modes)
-      for the exact commands on your platform (Windows/Linux/macOS
-      differ here).
-   2. Run only that section's query from `response-modes.sql`:
+2. Run the file:
 
-      ```sh
-      sqlite3 mydb.sqlite -cmd ".load ./dist/amd64/fractalsql" \
-        -init load_fractalsql.sql ".read demo/response-modes.sql"
-      ```
-
-      — copy just that one section into a one-statement file, or paste
-      it directly into the `sqlite3` shell; not the whole file at once.
+   ```sh
+   sqlite3 mydb.sqlite -cmd ".load ./dist/amd64/fractalsql" \
+     -init load_fractalsql.sql ".read demo/response-modes.sql"
+   ```
 
 What to expect: `code` mode returns a bare SQL statement with no
 prose wrapper (no "Here's a query that does that:" preamble, no
@@ -129,10 +114,9 @@ script's own `json()` call — SQLite's JSON parser raises on malformed
 input, so a successful result is proof the plugin's own extraction and
 validation actually worked, not just "looks like JSON."
 
-In the [Docker demo](../docs/docker-demo.md#docker-demo-the-learning-path), skip
-the manual three-pass dance above: `run_demo.sh --include-response-modes`
-runs each mode as its own process with the right environment set,
-matching this procedure exactly.
+In the [Docker demo](../docs/docker-demo.md#docker-demo-the-learning-path),
+`run_demo.sh --include-response-modes` runs each mode as its own process
+with `FSQL_REASONING_HTTP_RESPONSE_MODE` set.
 
 ## Enterprise Tier — QTL & CISO Audit
 
@@ -536,7 +520,7 @@ The demo exercises all sixteen end to end:
   audit cycle (real `fractal_detect_collapse` + real `fractal_explain_result`);
   pure analytics, **no LLM**, self-disables diversify.
 - **`fractal_agent_schedule_workload`** — refines a task vector then finds
-  the nearest node (real `fractal_search` + real `fractal_search_telemetry` →
+  the nearest node (real `fractal_sfs_converge` + real `fractal_search_telemetry` →
   real `fractal_reason`).
 - **`fractal_agent_rebalance_sibling`** — optimized book vs nearest
   historical allocation (real `fractal_optimize_portfolio` + real
@@ -703,3 +687,7 @@ block rather than duplicating that here.
   sent as `'{}'`, and the model's default system prompt explicitly
   expects "database search results" to analyze; with nothing there, it
   will say so rather than hallucinate an answer.
+
+* `demo-fractal-index.sql` -- the native IVF index end to end: the build, the indexed
+  search, the exact fallback, the delta (a row added after the build) and the proof
+  that the index was really used.

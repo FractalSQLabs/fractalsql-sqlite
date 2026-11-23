@@ -148,6 +148,8 @@ INSERT INTO agents_demo_caps VALUES
 
 .print
 .print === 4. route_task blueprint (task near root-cause-analyzer) ===
+DROP TABLE IF EXISTS temp.last_scan;
+CREATE TEMP TABLE last_scan AS
 WITH t AS (SELECT json_extract(value, '$.doc_id')   AS doc_id,
                   json_extract(value, '$.distance') AS dist
              FROM json_each(fractal_search_telemetry(
@@ -157,8 +159,10 @@ SELECT m.capability_name                       AS routed_to,
        1000                                    AS remaining_budget
 FROM t
 JOIN agents_demo_caps m ON m.rowid = t.doc_id;
+SELECT * FROM temp.last_scan;
 .print --- rationale (fractal_reason) ---
-SELECT fractal_reason('one-line rationale for this task routing decision');
+SELECT fractal_reason('one-line rationale for this task routing decision',
+    json_object('scan', (SELECT json_group_array(json_object('routed_to', routed_to, 'confidence', confidence, 'remaining_budget', remaining_budget)) FROM temp.last_scan)));
 .print --- the shipped agent: same composition, one call ---
 SELECT fractal_agent_route_task(
     '0.11,0.21,0.31', 'agents_demo_caps', 'emb', 'capability_name', 1000);
@@ -314,14 +318,18 @@ INSERT INTO agents_demo_data VALUES
 
 .print
 .print === 9. data_analyst (NL: total spend per category) ===
+DROP TABLE IF EXISTS temp.last_scan;
+CREATE TEMP TABLE last_scan AS
 WITH a AS (SELECT fractal_sql_agent('total amount spent per category in agents_demo_data',
                                     '["agents_demo_data"]', 2, 1) AS rj)
 SELECT json_extract(rj, '$.generated_sql')     AS generated_sql,
        json_extract(rj, '$.execution_status')  AS execution_status,
        json_extract(rj, '$.result_json')       AS result_json
 FROM a;
+SELECT * FROM temp.last_scan;
 .print --- analysis (fractal_reason over the result) ---
-SELECT fractal_reason('one-line read of this SQL analysis result');
+SELECT fractal_reason('one-line read of this SQL analysis result',
+    json_object('scan', (SELECT json_group_array(json_object('generated_sql', generated_sql, 'execution_status', execution_status, 'result_json', json(CASE WHEN json_valid(result_json) THEN result_json ELSE json_quote(result_json) END))) FROM temp.last_scan)));
 .print --- the shipped agent: same composition, one call ---
 .print --- the last argument opts in to running the generated statement (1 = run it, 0 = only generate and validate it) ---
 SELECT fractal_agent_data_analyst(
@@ -347,6 +355,8 @@ INSERT INTO agents_demo_patients VALUES
 
 .print
 .print === 10. patient_deterioration_triage blueprint (age>65 sepsis cohort) ===
+DROP TABLE IF EXISTS temp.last_scan;
+CREATE TEMP TABLE last_scan AS
 WITH cohort AS (SELECT group_concat(rowid, ',') AS ids
                   FROM agents_demo_patients
                  WHERE age > 65 AND condition = 'sepsis'),
@@ -366,8 +376,10 @@ SELECT (SELECT m.id FROM hs, json_each(hs.rj) je
         ORDER BY json_extract(je.value, '$.distance') LIMIT 1) AS drift_distance,
        (SELECT count(*) FROM agents_demo_patients
          WHERE age > 65 AND condition = 'sepsis') AS cohort_matches;
+SELECT * FROM temp.last_scan;
 .print --- rationale (fractal_reason) ---
-SELECT fractal_reason('one-line triage rationale for this patient cohort scan');
+SELECT fractal_reason('one-line triage rationale for this patient cohort scan',
+    json_object('scan', (SELECT json_group_array(json_object('nearest_cohort_id', nearest_cohort_id, 'cohort_distance', cohort_distance, 'drift_distance', drift_distance, 'cohort_matches', cohort_matches)) FROM temp.last_scan)));
 .print --- the shipped agent: same composition, one call (explicit two-predicate cohort) ---
 SELECT fractal_agent_patient_deterioration_triage(
     'agents_demo_patients', 'vitals', '0.9,-0.8,0.7,0.6',
@@ -430,13 +442,13 @@ SELECT fractal_agent_feedback_audit(
 
 -- 12. schedule_workload (sovereign-edge: fractal_agent_schedule_workload).
 -- Refines the task vector with Sniper Search (the abstract [-1,1]^dim
--- fractal_search_debug here, whose $.best_point is the refined vector),
+-- fractal_sfs_converge_debug here, whose $.best_point is the refined vector),
 -- finds the nearest node
 -- via fractal_search_telemetry, resolves the row's doc_id (the REAL
 -- rowid) to the named node id, and reasons. assigned_node is the real
 -- node id; confidence is
 -- 1/(1+distance) (real); rationale is the real fractal_reason output. Like
--- route_task but with the fractal_search refinement step route_task lacks.
+-- route_task but with the fractal_sfs_converge refinement step route_task lacks.
 DROP TABLE IF EXISTS agents_demo_nodes;
 CREATE TABLE agents_demo_nodes (id INTEGER PRIMARY KEY, capability TEXT);
 INSERT INTO agents_demo_nodes VALUES
@@ -446,7 +458,9 @@ INSERT INTO agents_demo_nodes VALUES
 
 .print
 .print === 12. schedule_workload blueprint (inference task -> nearest node) ===
-WITH q AS (SELECT json_extract(fractal_search_debug('0.8,0.1,0,0,0.1', 30, 50),
+DROP TABLE IF EXISTS temp.last_scan;
+CREATE TEMP TABLE last_scan AS
+WITH q AS (SELECT json_extract(fractal_sfs_converge_debug('0.8,0.1,0,0,0.1', 30, 50),
                                '$.best_point') AS refined),
      t AS (SELECT json_extract(value, '$.doc_id')   AS doc_id,
                   json_extract(value, '$.distance') AS dist
@@ -459,8 +473,10 @@ SELECT m.id               AS assigned_node,
        1.0 / (1.0 + t.dist) AS confidence
 FROM t
 JOIN agents_demo_nodes m ON m.rowid = t.doc_id;
+SELECT * FROM temp.last_scan;
 .print --- rationale (fractal_reason) ---
-SELECT fractal_reason('one-line rationale for this workload assignment');
+SELECT fractal_reason('one-line rationale for this workload assignment',
+    json_object('scan', (SELECT json_group_array(json_object('assigned_node', assigned_node, 'confidence', confidence)) FROM temp.last_scan)));
 .print --- the shipped agent: same composition, one call ---
 SELECT fractal_agent_schedule_workload(
     '0.8,0.1,0,0,0.1', 'agents_demo_nodes', 'capability', 'id', 30, 50);
@@ -484,6 +500,8 @@ INSERT INTO agents_demo_alloc VALUES
 
 .print
 .print === 13. rebalance_sibling blueprint (4 assets, cardinality=4) ===
+DROP TABLE IF EXISTS temp.last_scan;
+CREATE TEMP TABLE last_scan AS
 WITH opt AS (SELECT fractal_optimize_portfolio(
                     '0.05,0.10,0.15,0.20',
                     '0.04,0,0,0, 0,0.09,0,0, 0,0,0.16,0, 0,0,0,0.25',
@@ -500,8 +518,10 @@ SELECT (SELECT json_extract(j, '$.sharpe') FROM opt)   AS sharpe,
 FROM t
 JOIN (SELECT id, (row_number() OVER (ORDER BY rowid) - 1) AS doc_id
         FROM agents_demo_alloc) m USING (doc_id);
+SELECT * FROM temp.last_scan;
 .print --- rationale (fractal_reason) ---
-SELECT fractal_reason('one-line rebalance rationale for this portfolio');
+SELECT fractal_reason('one-line rebalance rationale for this portfolio',
+    json_object('scan', (SELECT json_group_array(json_object('sharpe', sharpe, 'weights', json(weights), 'nearest_alloc_id', nearest_alloc_id, 'nearest_distance', nearest_distance)) FROM temp.last_scan)));
 .print --- the shipped agent: same composition, one call (baseline = the equal-weight row) ---
 SELECT fractal_agent_rebalance_sibling(
     '0.05,0.10,0.15,0.20',
@@ -565,6 +585,8 @@ UPDATE agents_demo_vehicles
 
 .print
 .print === 14. detour_classify blueprint (vehicle 1 detour + GPS trace) ===
+DROP TABLE IF EXISTS temp.last_scan;
+CREATE TEMP TABLE last_scan AS
 WITH tr AS (SELECT fractal_search_trajectory(
                     'agents_demo_vehicles', 'current',
                     (SELECT baseline FROM agents_demo_vehicles WHERE id = 1),
@@ -584,8 +606,10 @@ SELECT (SELECT m.id FROM tr, json_each(tr.tj) je
         ORDER BY json_extract(je.value, '$.distance') LIMIT 1) AS trajectory_distance,
        fractal_dimension_boxcount(
            '[' || (SELECT group_concat(p) FROM walk) || ']', 2) AS trace_complexity;
+SELECT * FROM temp.last_scan;
 .print --- rationale (fractal_reason) ---
-SELECT fractal_reason('one-line detour classification for this fleet scan');
+SELECT fractal_reason('one-line detour classification for this fleet scan',
+    json_object('scan', (SELECT json_group_array(json_object('nearest_fleet_id', nearest_fleet_id, 'trajectory_distance', trajectory_distance, 'trace_complexity', trace_complexity)) FROM temp.last_scan)));
 .print --- the shipped agent: same composition, one call (fresh GPS trace -- own randomness) ---
 WITH gs(t) AS (SELECT 1 UNION ALL SELECT t + 1 FROM gs WHERE t < 100),
 steps AS (SELECT t, (random() / 9223372036854775808.0 - 0.5) * 0.3 AS v FROM gs),
@@ -629,6 +653,8 @@ UPDATE agents_demo_tracks
 
 .print
 .print === 15. track_anomaly blueprint (vessel 1 deviation + heading DFA) ===
+DROP TABLE IF EXISTS temp.last_scan;
+CREATE TEMP TABLE last_scan AS
 WITH tr AS (SELECT fractal_search_trajectory(
                     'agents_demo_tracks', 'current',
                     (SELECT baseline FROM agents_demo_tracks WHERE id = 1),
@@ -646,8 +672,10 @@ SELECT (SELECT m.id FROM tr, json_each(tr.tj) je
         ORDER BY json_extract(je.value, '$.distance') LIMIT 1) AS trajectory_distance,
        fractal_dimension_dfa('[' || (SELECT group_concat(s) FROM walk) || ']')
            AS dfa_exponent;
+SELECT * FROM temp.last_scan;
 .print --- rationale (fractal_reason) ---
-SELECT fractal_reason('one-line anomaly read for this maritime track scan');
+SELECT fractal_reason('one-line anomaly read for this maritime track scan',
+    json_object('scan', (SELECT json_group_array(json_object('nearest_fleet_id', nearest_fleet_id, 'trajectory_distance', trajectory_distance, 'dfa_exponent', dfa_exponent)) FROM temp.last_scan)));
 .print --- the shipped agent: same composition, one call (fresh heading series -- own randomness) ---
 WITH gs(t) AS (SELECT 1 UNION ALL SELECT t + 1 FROM gs WHERE t < 120),
 steps AS (SELECT t, (random() / 9223372036854775808.0 - 0.5)
@@ -671,6 +699,8 @@ SELECT fractal_agent_track_anomaly(
 -- real boolean; rationale is the real fractal_reason output.
 .print
 .print === 16. network_coverage_alert blueprint (20x20 grid + step-up drift) ===
+DROP TABLE IF EXISTS temp.last_scan;
+CREATE TEMP TABLE last_scan AS
 WITH grid AS (
     WITH RECURSIVE
     g(r, c) AS (
@@ -697,8 +727,10 @@ SELECT json_extract(g.mj, '$.dimension')              AS morph_dimension,
        json_extract(g.mj, '$.lacunarity')             AS lacunarity,
        (abs(json_extract(d.dj, '$.drift')) > 0.5)     AS drift_detected
 FROM grid g, drift d;
+SELECT * FROM temp.last_scan;
 .print --- rationale (fractal_reason) ---
-SELECT fractal_reason('one-line coverage alert for this sensor-grid scan');
+SELECT fractal_reason('one-line coverage alert for this sensor-grid scan',
+    json_object('scan', (SELECT json_group_array(json_object('morph_dimension', morph_dimension, 'lacunarity', lacunarity, 'drift_detected', drift_detected)) FROM temp.last_scan)));
 .print --- the shipped agent: same composition, one call (fresh grid + series -- own randomness; the agent computes drift itself, so it takes the raw series, not the drift JSON) ---
 WITH RECURSIVE
 g(r, c) AS (
@@ -728,6 +760,8 @@ SELECT fractal_agent_network_coverage_alert(
 -- rationale is the real fractal_reason output.
 .print
 .print === 17. regime_triage blueprint (96-pt step-up series) ===
+DROP TABLE IF EXISTS temp.last_scan;
+CREATE TEMP TABLE last_scan AS
 WITH series AS (
     WITH RECURSIVE gs(t) AS (SELECT 1 UNION ALL SELECT t + 1 FROM gs WHERE t < 96)
     SELECT '[' || (SELECT group_concat(printf('%.4f', v) ORDER BY t)
@@ -745,8 +779,10 @@ SELECT d.dfa                                            AS dfa_exponent,
        json_extract(d.dj, '$.recent_alpha')             AS recent_alpha,
        json_extract(d.dj, '$.baseline_alpha')           AS baseline_alpha
 FROM d;
+SELECT * FROM temp.last_scan;
 .print --- rationale (fractal_reason) ---
-SELECT fractal_reason('one-line regime triage for this series');
+SELECT fractal_reason('one-line regime triage for this series',
+    json_object('scan', (SELECT json_group_array(json_object('dfa_exponent', dfa_exponent, 'drift_detected', drift_detected, 'recent_alpha', recent_alpha, 'baseline_alpha', baseline_alpha)) FROM temp.last_scan)));
 .print --- the shipped agent: same composition, one call (fresh series -- own randomness) ---
 WITH gs(t) AS (SELECT 1 UNION ALL SELECT t + 1 FROM gs WHERE t < 96),
 sv AS (SELECT t, CASE WHEN t < 48
@@ -787,33 +823,23 @@ SELECT fractal_agent_detect_loop(
 -- analytics the agent blueprints just produced.
 .print
 .print === 19. Closing narrative: fractal_reason over the agent results ===
+-- The context carries the real outputs of the model-free agents from sections 12-18 (recomputed here, deterministic),
+-- so the model has actual numbers to synthesize rather than only agent names.
 SELECT fractal_reason(
-    'Synthesize a one-paragraph ops brief across the agent tier: the '
-    || 'anomaly-triage threat_score, the allocation sharpe, the route_task '
-    || 'routed_to/confidence, the outlier_intercept decision, the patient-'
-    || 'deterioration cohort/drift distances, the schedule_workload '
-    || 'assignment, the rebalance sharpe/weights, the detour/track '
-    || 'distances and trace/DFA complexity, and the coverage/regime '
-    || 'drift_detected flags above, and what each implies for the '
+    'Synthesize a one-paragraph ops brief from the agent results in the context: the outlier_intercept decisions '
+    || '(cosine and l2), the trajectory_predict forecast, and the detect_loop scan, and what each implies for the '
     || 'on-call engineer.',
     json_object(
         'source',  'demo-agents.sql',
-        'engines', json('["fractal_agent_anomaly_triage",'
-                  || '"fractal_agent_allocate",'
-                  || '"fractal_agent_route_task",'
-                  || '"fractal_agent_outlier_intercept",'
-                  || '"fractal_agent_recall_hybrid",'
-                  || '"fractal_agent_recommend_diverse",'
-                  || '"fractal_agent_data_analyst",'
-                  || '"fractal_agent_patient_deterioration_triage",'
-                  || '"fractal_agent_feedback_audit",'
-                  || '"fractal_agent_schedule_workload",'
-                  || '"fractal_agent_rebalance_sibling",'
-                  || '"fractal_agent_diverse_portfolios",'
-                  || '"fractal_agent_detour_classify",'
-                  || '"fractal_agent_track_anomaly",'
-                  || '"fractal_agent_network_coverage_alert",'
-                  || '"fractal_agent_regime_triage"]')
+        'outlier_intercept_l2', json(fractal_agent_outlier_intercept('0.05,0.0,0.0', 'agents_demo_badstates', 'emb', 0.5, 'l2')),
+        'outlier_intercept_cosine', json(fractal_agent_outlier_intercept('0.95,0.05,0.0', 'agents_demo_badstates', 'emb', 0.5, 'cosine')),
+        'trajectory_predict', json(fractal_agent_trajectory_predict('agents_demo_vehicles', 'current', 1, 8)),
+        'detect_loop', json(fractal_agent_detect_loop(
+            'agents-demo-loop',
+            '[' || (SELECT group_concat(printf('%.3f', v))
+                      FROM (WITH RECURSIVE gs(t) AS (SELECT 1 UNION ALL SELECT t + 1 FROM gs WHERE t < 64)
+                            SELECT t, 0.1 * sin(t * 0.7) AS v FROM gs)) || ']',
+            1))
     )
 );
 

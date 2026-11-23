@@ -104,7 +104,7 @@ static inline int fsql_clamp_to_int(sqlite3_int64 n)
 
 /* Extension version. Single source of truth for fractal_version()
  * and the smoke gate; bumped in lockstep with packaging scripts. */
-#define FSQL_SQLITE_VERSION_STR   "2.0.13"
+#define FSQL_SQLITE_VERSION_STR   "2.0.14"
 #define FSQL_SQLITE_EDITION_STR   "Community"
 
 /* SFS tuning: same values the pre-2.x path used. */
@@ -182,6 +182,7 @@ typedef struct FsqlReasoningAttach {
  * time instead. */
 typedef int (*fsql_ent_ledger_fn)(fsql_ctx *);
 typedef int (*fsql_ent_count_fn)(const fsql_ctx *, size_t *);
+typedef int (*fsql_ent_set_mode_fn)(fsql_ctx *, int);
 typedef int (*fsql_ent_audit_unpack_fn)(const void *blob, size_t blob_len,
                                         char *json, size_t *json_cap);
 typedef int (*fsql_ent_portfolio_mm_fn)(const double *mu, const double *cov,
@@ -217,6 +218,7 @@ typedef struct FsqlEnterpriseApi {
     fsql_ent_count_fn          ledger_shadow_count;
     fsql_ent_audit_unpack_fn   audit_unpack;
     /* Optional (tolerant-absence) symbols. */
+    fsql_ent_set_mode_fn         ledger_set_retention;   /* absent in a core older than the retention modes */
     fsql_ent_portfolio_mm_fn     optimize_portfolio_multimodal;
     fsql_ent_portfolio_pareto_fn optimize_portfolio_multimodal_pareto;
     fsql_ent_portfolio_mm_ex_fn  optimize_portfolio_multimodal_ex;
@@ -246,11 +248,16 @@ typedef struct FsqlConfig {
     char *http_native_url;           /* native-shape endpoint override */
     int   http_num_ctx;              /* ollama options.num_ctx, 0=unset*/
     int   t2s_max_attempts;          /* default 2, range 1..10         */
+    char *ledger_retention;          /* "fade"|"exact" (enterprise ledger retention)  */
     char *t2s_allowed_statements;    /* "select"|"select_insert_update"*/
     int   t2s_use_review;            /* bool: extra LLM review pass    */
     char *enterprise_lib;            /* enterprise core .so/.dll path  */
     char *enterprise_ledger_key;     /* HMAC key for ledger blobs      */
     int   enterprise_require_signature; /* bool                        */
+    int   agent_use_index;           /* 0 off, 1 on, 2 auto: the nearest-row agents search through fractal_index (auto: only a ready, calibrated one on a large enough table) */
+    int   ledger_max_rows;           /* the audit chain may not grow past this many rows (0 = unbounded); default 10,000,000 or FSQL_LEDGER_MAX_ROWS */
+    int   agent_index_min_rows;      /* auto: the fewest rows a table must have before an agent goes through its index */
+    int   agent_context_row_bytes;   /* retrieval agents: a text cell over this many bytes is cut (and marked) in the model's context; 0 = no cut */
     int   agent_partial_reasoning_fail; /* bool: agent returns the
                                          * computed data half plus
                                          * reasoning_step_failed instead
@@ -370,7 +377,7 @@ typedef struct FsqlState {
  * the caller and reports through that TU's own sqlite3_api. */
 #define FSQL_REFUSE_IN_GENERATED_SQL(ctx, st, name)                          \
     do {                                                                     \
-        if ((st)->generated_sql_depth > 0) {                                 \
+        if ((st) && (st)->generated_sql_depth > 0) {                              \
             sqlite3_result_error((ctx),                                      \
                 name " is not permitted from model-generated SQL", -1);      \
             return;                                                          \
@@ -387,6 +394,7 @@ void       fsql_state_destroy(void *p);
  * reason in `err`. On success the handle is kept open for the
  * process's life. */
 int fsql_enterprise_ensure(FsqlState *st, char *err, size_t err_cap);
+int fsql_enterprise_apply_retention(FsqlState *st, char *err, size_t err_cap);
 
 /* --- ledger storage VFS (fsql_ledger.c) ------------------------------ */
 
@@ -476,10 +484,21 @@ int fsql_reasoning_guard_response(const char *resp, size_t resp_len,
 int fsql_vector_register(sqlite3 *db, FsqlState *st);
 #ifdef FSQL_SQLITE_SOVEREIGN
 int fsql_config_register(sqlite3 *db, FsqlState *st);
+/* fsql_index.c: fractal_index_* and the indexed fractal_search (calls the core's fsql_ivf_* maths). */
+int fsql_index_register(sqlite3 *db, FsqlState *st);
+int fsql_index_ready_for_agents(sqlite3 *db, const char *tbl, const char *col, long long min_rows);   /* agent_use_index = auto: a ready, calibrated index on a large enough table */
 /* fsql_reasoning.c registers no SQL functions of its own: it is the
  * helpers-only TU behind the reasoning calls (fsql_reasoning_generate
  * above); its other two functions are declared with the helpers. */
 int fsql_t2s_register(sqlite3 *db, FsqlState *st);
+
+/* Generated SQL may not call the extension's state-changing functions (the audit log, the ledger, the vectorizer, the
+ * configuration writers, ...): a SELECT of one is "read-only" to sqlite3_stmt_readonly, and would still write. While
+ * deny is installed, sqlite3_prepare of a statement that calls one fails ("not authorized") and *denied_out names it.
+ * Installing replaces any authorizer the connection already has, and end removes it. */
+typedef struct FsqlT2sDeny { const char *denied; } FsqlT2sDeny;
+void fsql_t2s_deny_begin(sqlite3 *db, FsqlT2sDeny *deny);
+void fsql_t2s_deny_end(sqlite3 *db);
 int fsql_vectorizer_register(sqlite3 *db, FsqlState *st);
 int fsql_agents_register(sqlite3 *db, FsqlState *st);
 int fsql_domain_agents_register(sqlite3 *db, FsqlState *st);

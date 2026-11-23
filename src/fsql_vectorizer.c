@@ -776,6 +776,102 @@ static int fsqlv_backfill(const FsqlState *st, sqlite3_int64 vid,
     return fsqlv_exec(st->db, sql, err, err_cap);
 }
 
+/* ------------------------------------------------------------------ */
+/* Chunking: options chunk_size / chunk_overlap / chunk_mode / chunk_table */
+/* ------------------------------------------------------------------ */
+/* With chunk_size in the options, the text column is split with fractal_chunk_text into a chunk table
+ *   <chunk_table> (id INTEGER PRIMARY KEY, parent_id, chunk_no INTEGER, chunk_text TEXT, <embedding_col> BLOB, UNIQUE (parent_id, chunk_no))
+ * (chunk_table defaults to <source_table>_chunks) and the vectorizer embeds the CHUNKS: it is registered on the chunk table, text column
+ * chunk_text. Rows already in the source are chunked at once. Three temp triggers on the source keep the chunks current, like the
+ * vectorizer's own: an insert chunks the new row, an update of the text column rechunks it, a delete removes its chunks. The vectorizer's
+ * id is returned, as for a plain vectorizer. */
+
+static int fsqlv_opt_int(const char *opts, const char *key, int dflt) {
+    const char *p = fsql_json_top_level_value(opts, key);
+    if (!p) return dflt;
+    char *end = NULL;
+    long v = strtol(p, &end, 10);
+    return end == p ? dflt : (int)v;
+}
+
+static int fsqlv_opt_str(const char *opts, const char *key, char *out, size_t cap) {
+    out[0] = '\0';
+    const char *p = fsql_json_top_level_value(opts, key);
+    if (!p || *p != '"') return 0;
+    p++;
+    size_t n = 0;
+    while (*p && *p != '"' && n + 1 < cap) out[n++] = *p++;
+    out[n] = '\0';
+    return 1;
+}
+
+/* Creates the chunk table and the triggers and chunks the rows already there. On success the chunk table is named in ctab. */
+static int fsqlv_chunk_setup(const FsqlState *st, const char *src_q, const char *src_name, const char *tcol_q,
+                             const char *pk_q, const char *ecol, const char *opts,
+                             char *ctab, size_t ctab_cap, char *err, size_t err_cap) {
+    int size = fsqlv_opt_int(opts, "chunk_size", 0);
+    int overlap = fsqlv_opt_int(opts, "chunk_overlap", 0);
+    char mode[16];
+    if (!fsqlv_opt_str(opts, "chunk_mode", mode, sizeof mode)) snprintf(mode, sizeof mode, "paragraph");
+    if (size < 1 || size > 100000 || overlap < 0 || overlap >= size ||
+        (strcmp(mode, "fixed") && strcmp(mode, "paragraph") && strcmp(mode, "sentence"))) {
+        fsqlv_set_err(err, err_cap, "fractal_vectorizer_create: chunk_size must be 1..100000, chunk_overlap 0..chunk_size-1 and chunk_mode fixed, paragraph or sentence");
+        return -1;
+    }
+    if (!fsqlv_opt_str(opts, "chunk_table", ctab, ctab_cap)) snprintf(ctab, ctab_cap, "%.60s_chunks", src_name);
+    if (!fsqlv_ident_ok(ctab, 0) || !fsqlv_ident_ok(ecol, 0)) {
+        fsqlv_set_err(err, err_cap, "fractalsql: invalid identifier");
+        return -1;
+    }
+    char qctab[100], qecol[100];
+    if (fsqlv_quote_ident(qctab, sizeof qctab, ctab, 0) != 0 || fsqlv_quote_ident(qecol, sizeof qecol, ecol, 0) != 0) {
+        fsqlv_set_err(err, err_cap, "fractalsql: invalid identifier");
+        return -1;
+    }
+    char sql[FSQLV_SQL_MAX * 2];
+    snprintf(sql, sizeof sql,
+        "CREATE TABLE IF NOT EXISTS %s (id INTEGER PRIMARY KEY, parent_id, chunk_no INTEGER NOT NULL, chunk_text TEXT NOT NULL, %s BLOB, "
+        "UNIQUE (parent_id, chunk_no))", qctab, qecol);
+    if (fsqlv_exec(st->db, sql, err, err_cap) != 0) return -1;
+    /* the chunks of rows that are already there */
+    snprintf(sql, sizeof sql,
+        "INSERT OR IGNORE INTO %s (parent_id, chunk_no, chunk_text) "
+        "SELECT s.%s, json_extract(j.value,'$.no'), json_extract(j.value,'$.text') "
+        "FROM %s s, json_each(fractal_chunk_text(s.%s, %d, %d, '%s')) j WHERE s.%s IS NOT NULL",
+        qctab, pk_q, src_q, tcol_q, size, overlap, mode, tcol_q);
+    if (fsqlv_exec(st->db, sql, err, err_cap) != 0) return -1;
+    /* the triggers keep them current */
+    const char *tr = ctab;
+    snprintf(sql, sizeof sql,
+        "CREATE TEMP TRIGGER IF NOT EXISTS \"fractal_chunk_%s_i\" AFTER INSERT ON %s WHEN NEW.%s IS NOT NULL BEGIN "
+        "INSERT OR IGNORE INTO %s (parent_id, chunk_no, chunk_text) SELECT NEW.%s, json_extract(j.value,'$.no'), json_extract(j.value,'$.text') "
+        "FROM json_each(fractal_chunk_text(NEW.%s, %d, %d, '%s')) j; END",
+        tr, src_q, tcol_q, qctab, pk_q, tcol_q, size, overlap, mode);
+    if (fsqlv_exec(st->db, sql, err, err_cap) != 0) return -1;
+    snprintf(sql, sizeof sql,
+        "CREATE TEMP TRIGGER IF NOT EXISTS \"fractal_chunk_%s_u\" AFTER UPDATE OF %s ON %s BEGIN "
+        "DELETE FROM %s WHERE parent_id = OLD.%s; "
+        "INSERT OR IGNORE INTO %s (parent_id, chunk_no, chunk_text) SELECT NEW.%s, json_extract(j.value,'$.no'), json_extract(j.value,'$.text') "
+        "FROM json_each(fractal_chunk_text(NEW.%s, %d, %d, '%s')) j WHERE NEW.%s IS NOT NULL; END",
+        tr, tcol_q, src_q, qctab, pk_q, qctab, pk_q, tcol_q, size, overlap, mode, tcol_q);
+    if (fsqlv_exec(st->db, sql, err, err_cap) != 0) return -1;
+    snprintf(sql, sizeof sql,
+        "CREATE TEMP TRIGGER IF NOT EXISTS \"fractal_chunk_%s_d\" AFTER DELETE ON %s BEGIN DELETE FROM %s WHERE parent_id = OLD.%s; END",
+        tr, src_q, qctab, pk_q);
+    return fsqlv_exec(st->db, sql, err, err_cap);
+}
+
+/* Drops the chunk triggers that belong to the chunk table ctab (no error when there are none). */
+static void fsqlv_chunk_drop_triggers(const FsqlState *st, const char *ctab) {
+    if (!fsqlv_ident_ok(ctab, 0)) return;
+    char sql[300];
+    static const char *const sfx[] = { "i", "u", "d" };
+    for (int i = 0; i < 3; i++) {
+        snprintf(sql, sizeof sql, "DROP TRIGGER IF EXISTS \"fractal_chunk_%s_%s\"", ctab, sfx[i]);
+        sqlite3_exec(st->db, sql, NULL, NULL, NULL);
+    }
+}
+
 /* fractal_vectorizer_create(source_table, text_col, embedding_col
  *                           [, options_json]) -> vectorizer id.
  * The options default is an optional TEXT argument defaulting to
@@ -821,6 +917,27 @@ static void fsqlv_create_fn(sqlite3_context *ctx, int argc,
     if (fsqlv_quote_ident(q.pk, sizeof q.pk, pk_col, 0) != 0) {
         sqlite3_result_error(ctx, "fractalsql: invalid identifier", -1);
         return;
+    }
+
+    /* Chunking: the vectorizer is then registered on the chunk table (see fsqlv_chunk_setup). */
+    char chunk_tab[100];
+    chunk_tab[0] = '\0';
+    if (fsqlv_opt_int(opts, "chunk_size", 0) != 0 || fsql_json_top_level_value(opts, "chunk_size")) {
+        if (fsqlv_check_columns(st, c.src, c.tcol, pk_col, err, sizeof err) != 0) {   /* the text column must be there (the pk column stands in for the embedding column, which lives in the chunk table) */
+            sqlite3_result_error(ctx, err, -1);
+            return;
+        }
+        if (fsqlv_chunk_setup(st, q.src, c.src, q.tcol, q.pk, c.ecol, opts, chunk_tab, sizeof chunk_tab, err, sizeof err) != 0) {
+            sqlite3_result_error(ctx, err, -1);
+            return;
+        }
+        c.src = chunk_tab;
+        c.tcol = "chunk_text";
+        snprintf(pk_col, sizeof pk_col, "id");
+        if (fsqlv_quote_cols(&c, &q) != 0 || fsqlv_quote_ident(q.pk, sizeof q.pk, pk_col, 0) != 0) {
+            sqlite3_result_error(ctx, "fractalsql: invalid identifier", -1);
+            return;
+        }
     }
 
     /* The text and embedding columns must exist in the source table:
@@ -980,6 +1097,16 @@ static void fsqlv_drop_fn(sqlite3_context *ctx, int argc,
                  (long long)vid);
         sqlite3_result_error(ctx, msg, -1);
         return;
+    }
+
+    /* A vectorizer on a chunk table: the triggers that keep the chunks current (on the source table) go too. The chunk table and its rows stay. */
+    {
+        sqlite3_stmt *ct = NULL;
+        if (sqlite3_prepare_v2(st->db, "SELECT source_table FROM fractal_vectorizers WHERE id=?1", -1, &ct, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(ct, 1, vid);
+            if (sqlite3_step(ct) == SQLITE_ROW) fsqlv_chunk_drop_triggers(st, (const char *)sqlite3_column_text(ct, 0));
+        }
+        sqlite3_finalize(ct);
     }
 
     /* The triggers may already be gone (source table dropped since
@@ -1461,6 +1588,44 @@ static int fsqlv_process_one_row(FsqlState *st, sqlite3_stmt *row_q,
     return 1;
 }
 
+/* Option "index_ensure": true on a vectorizer (off by default). After a batch that embedded rows for it, the index on the vectorizer's
+ * embedding column (the chunk table's "embedding" when it chunks) is brought up to date with fractal_index_ensure: a few added rows are
+ * folded in, a large change rebuilds. Only an index that already exists is touched (this never creates one), and a failure never fails
+ * the batch. */
+static void fsqlv_ensure_indexes(FsqlState *st, const sqlite3_int64 *ids, int n_claim) {
+    char sql[FSQLV_SQL_MAX];
+    int n = snprintf(sql, sizeof sql,
+        "SELECT DISTINCT "
+        "  CASE WHEN json_extract(v.options,'$.chunk_table') IS NOT NULL THEN json_extract(v.options,'$.chunk_table') ELSE v.source_table END, "
+        "  CASE WHEN json_extract(v.options,'$.chunk_table') IS NOT NULL THEN 'embedding' ELSE v.embedding_col END "
+        "FROM fractal_vectorizer_queue q JOIN fractal_vectorizers v ON v.id = q.vectorizer_id "
+        "WHERE q.status='done' AND json_extract(v.options,'$.index_ensure') IN (1,'true') AND q.id IN (");
+    size_t used = (n > 0 && (size_t)n < sizeof sql) ? fsqlv_append_claim_ids(sql, sizeof sql, (size_t)n, ids, n_claim) : 0;
+    if (used == 0 || used + 2 >= sizeof sql) return;
+    memcpy(sql + used, ")", 2);
+    sqlite3_stmt *q = NULL;
+    if (sqlite3_prepare_v2(st->db, sql, -1, &q, NULL) != SQLITE_OK) return;
+    char *tbl[16]; char *col[16]; int nt = 0;
+    while (nt < 16 && sqlite3_step(q) == SQLITE_ROW) {
+        const char *a = (const char *)sqlite3_column_text(q, 0), *b = (const char *)sqlite3_column_text(q, 1);
+        if (!a || !b) continue;
+        tbl[nt] = sqlite3_mprintf("%s", a); col[nt] = sqlite3_mprintf("%s", b); nt++;
+    }
+    sqlite3_finalize(q);
+    for (int i = 0; i < nt; i++) {
+        sqlite3_stmt *e = NULL;
+        if (sqlite3_prepare_v2(st->db,
+                "SELECT CASE WHEN EXISTS (SELECT 1 FROM fractal_index_meta WHERE tbl=?1 AND col=?2) "
+                "THEN fractal_index_ensure(?1,?2) END", -1, &e, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(e, 1, tbl[i], -1, SQLITE_STATIC);
+            sqlite3_bind_text(e, 2, col[i], -1, SQLITE_STATIC);
+            sqlite3_step(e);
+        }
+        if (e) sqlite3_finalize(e);
+        sqlite3_free(tbl[i]); sqlite3_free(col[i]);
+    }
+}
+
 /* fractal_vectorizer_process_queue([batch_size [, stale_after_secs]])
  * -> number of rows actually processed (done + failed); a row
  * deferred by the rate cap or belonging to a paused vectorizer isn't
@@ -1588,9 +1753,176 @@ static void fsqlv_process_fn(sqlite3_context *ctx, int argc,
     if (row_q) sqlite3_finalize(row_q);
     if (done_u) sqlite3_finalize(done_u);
     if (fail_u) sqlite3_finalize(fail_u);
+    if (n_processed > 0) fsqlv_ensure_indexes(st, ids, n_claim);
     free(ids);
 
     sqlite3_result_int(ctx, n_processed);
+}
+
+/* ------------------------------------------------------------------ */
+/* fractal_chunk_text(text, size, overlap [, mode])                    */
+/* ------------------------------------------------------------------ */
+/* Splits text into chunks of at most `size` characters, as a JSON array of {"no","start","end","text"}. Positions are character (code point)
+ * offsets, end exclusive, and text is the slice [start, end) of the input. The result is the same on every FractalSQL host: the algorithm
+ * below is the specification, and each host's test pins it with the same inputs.
+ *
+ *   mode "fixed"      one span, the whole text, split every size - overlap characters.
+ *   mode "paragraph"  (default) the text is cut into paragraphs at paragraph breaks (a run of whitespace characters -- space, tab, CR, LF --
+ *                     that contains at least two LF) and consecutive paragraphs are packed into a chunk while the chunk stays within size.
+ *   mode "sentence"   the same with sentences: a sentence ends after a run of '.', '!' or '?' that is followed by whitespace or the end of the
+ *                     text, and a paragraph break also ends one.
+ * A unit (paragraph or sentence) never includes the whitespace around it, a chunk runs from the start of its first unit to the end of its last
+ * (so it keeps the separators between them), and a unit longer than size is split like a fixed span, with overlap characters shared between
+ * neighbours. Overlap applies only inside a split unit or in fixed mode. Characters are UTF-8 code points; a byte that is not valid UTF-8 counts as
+ * one character. NULL text gives NULL; empty or all-whitespace text gives [] (fixed mode keeps whitespace).
+ * size is 1..100000, overlap 0..size-1, and at most 100000 chunks are produced. */
+#define FSQLV_CHUNK_MAX_SIZE   100000
+#define FSQLV_CHUNK_MAX_CHUNKS 100000
+#define FSQLV_CHUNK_MAX_OUT    (64 * 1024 * 1024)   /* the whole JSON result: size x chunks would otherwise reach gigabytes */
+
+typedef struct { size_t *cp; size_t n; const unsigned char *t; size_t blen; } FsqlvCps;
+
+static int fsqlv_cps_build(FsqlvCps *c, const unsigned char *t, size_t blen) {
+    c->t = t; c->blen = blen; c->n = 0;
+    c->cp = (size_t *)malloc((blen + 1) * sizeof(size_t));
+    if (!c->cp) return -1;
+    size_t i = 0;
+    while (i < blen) {
+        c->cp[c->n++] = i;
+        unsigned char b = t[i];
+        size_t len = b < 0x80 ? 1 : (b >= 0xF0 && b <= 0xF4) ? 4 : (b >= 0xE0) ? 3 : (b >= 0xC2) ? 2 : 1;
+        if (b >= 0xF5) len = 1;
+        size_t k = 1;
+        while (k < len && i + k < blen && (t[i + k] & 0xC0) == 0x80) k++;
+        i += (k == len) ? len : 1;       /* a truncated or invalid sequence is one character per byte */
+    }
+    c->cp[c->n] = blen;
+    return 0;
+}
+
+static int fsqlv_is_ws(unsigned char b) { return b == ' ' || b == '\t' || b == '\r' || b == '\n'; }
+
+/* The character at index i as a single byte when it is ASCII, else 0xFF. */
+static unsigned char fsqlv_cp_ascii(const FsqlvCps *c, size_t i) {
+    size_t b = c->cp[i];
+    return c->t[b] < 0x80 ? c->t[b] : 0xFF;
+}
+
+static void fsqlv_chunk_emit(sqlite3_str *o, const FsqlvCps *c, size_t no, size_t a, size_t b) {
+    /* SQLite's own printf has no %zu: the offsets go through %lld */
+    sqlite3_str_appendf(o, "%s{\"no\":%lld,\"start\":%lld,\"end\":%lld,\"text\":\"", no ? "," : "", (long long)no, (long long)a, (long long)b);
+    for (size_t i = c->cp[a]; i < c->cp[b]; i++) {
+        unsigned char ch = c->t[i];
+        if (ch >= 0x80) {
+            /* a byte that does not belong to a well-formed UTF-8 character is written as U+FFFD, so the JSON stays valid UTF-8 */
+            size_t need = ch >= 0xF0 ? 4 : ch >= 0xE0 ? 3 : 2, ln = 1;
+            while (i + ln < c->cp[b] && (c->t[i + ln] & 0xC0) == 0x80 && ln < need) ln++;
+            int okc = 0;
+            if (ch >= 0xC2 && ch <= 0xDF) okc = ln == 2;
+            else if (ch >= 0xE0 && ch <= 0xEF) okc = ln == 3 && !(ch == 0xE0 && c->t[i + 1] < 0xA0) && !(ch == 0xED && c->t[i + 1] >= 0xA0);
+            else if (ch >= 0xF0 && ch <= 0xF4) okc = ln == 4 && !(ch == 0xF0 && c->t[i + 1] < 0x90) && !(ch == 0xF4 && c->t[i + 1] >= 0x90);
+            if (!okc) { sqlite3_str_appendall(o, "\\ufffd"); continue; }
+            sqlite3_str_append(o, (const char *)&c->t[i], (int)ln);
+            i += ln - 1;
+            continue;
+        }
+        if (ch == '"') sqlite3_str_appendall(o, "\\\"");
+        else if (ch == '\\') sqlite3_str_appendall(o, "\\\\");
+        else if (ch == '\n') sqlite3_str_appendall(o, "\\n");
+        else if (ch == '\r') sqlite3_str_appendall(o, "\\r");
+        else if (ch == '\t') sqlite3_str_appendall(o, "\\t");
+        else if (ch < 0x20) sqlite3_str_appendf(o, "\\u%04x", ch);
+        else sqlite3_str_append(o, (const char *)&c->t[i], 1);       /* a raw byte: UTF-8 passes through unchanged */
+    }
+    sqlite3_str_appendall(o, "\"}");
+}
+
+/* Emits the span [a,b) split into pieces of at most size characters, overlap shared. Returns the new chunk count, or (size_t)-1 over the cap. */
+static size_t fsqlv_chunk_split(sqlite3_str *o, const FsqlvCps *c, size_t no, size_t a, size_t b, size_t size, size_t overlap) {
+    size_t pos = a;
+    for (;;) {
+        if (no >= FSQLV_CHUNK_MAX_CHUNKS || sqlite3_str_length(o) > FSQLV_CHUNK_MAX_OUT) return (size_t)-1;
+        size_t e = pos + size < b ? pos + size : b;
+        fsqlv_chunk_emit(o, c, no++, pos, e);
+        if (e >= b) break;
+        pos = e - overlap;
+    }
+    return no;
+}
+
+static void fsqlv_chunk_fn(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    if (sqlite3_value_type(argv[0]) == SQLITE_NULL) { sqlite3_result_null(ctx); return; }
+    if (sqlite3_value_type(argv[1]) == SQLITE_NULL || sqlite3_value_type(argv[2]) == SQLITE_NULL) {
+        sqlite3_result_error(ctx, "fractal_chunk_text: size and overlap must not be NULL", -1);
+        return;
+    }
+    sqlite3_int64 size = sqlite3_value_int64(argv[1]), overlap = sqlite3_value_int64(argv[2]);
+    const char *mode = argc > 3 && sqlite3_value_type(argv[3]) != SQLITE_NULL ? (const char *)sqlite3_value_text(argv[3]) : "paragraph";
+    if (!mode) { sqlite3_result_error_nomem(ctx); return; }
+    int m = !strcmp(mode, "fixed") ? 0 : !strcmp(mode, "paragraph") ? 1 : !strcmp(mode, "sentence") ? 2 : -1;
+    if (m < 0) { sqlite3_result_error(ctx, "fractal_chunk_text: mode must be one of: fixed, paragraph, sentence", -1); return; }
+    if (size < 1 || size > FSQLV_CHUNK_MAX_SIZE) { sqlite3_result_error(ctx, "fractal_chunk_text: size must be 1..100000", -1); return; }
+    if (overlap < 0 || overlap >= size) { sqlite3_result_error(ctx, "fractal_chunk_text: overlap must be 0..size-1", -1); return; }
+    const unsigned char *t = sqlite3_value_text(argv[0]);
+    size_t blen = (size_t)sqlite3_value_bytes(argv[0]);
+    FsqlvCps c;
+    if (!t || fsqlv_cps_build(&c, t, blen) != 0) { sqlite3_result_error_nomem(ctx); return; }
+    sqlite3_str *o = sqlite3_str_new(NULL);
+    sqlite3_str_appendall(o, "[");
+    size_t no = 0, S = (size_t)size, V = (size_t)overlap, n = c.n;
+    int over = 0;
+    if (m == 0) {
+        if (n > 0) { no = fsqlv_chunk_split(o, &c, 0, 0, n, S, V); over = no == (size_t)-1; }
+    } else {
+        /* units: [ua, ub) pairs, found in one pass; a chunk packs consecutive units */
+        size_t cur_a = 0, cur_b = 0; int have = 0;
+        size_t i = 0;
+        while (i < n && !over) {
+            while (i < n && fsqlv_is_ws(fsqlv_cp_ascii(&c, i))) i++;
+            if (i >= n) break;
+            size_t ua = i, ub;
+            for (;;) {                       /* extend to the end of the unit */
+                if (i >= n) { ub = n; break; }
+                unsigned char ch = fsqlv_cp_ascii(&c, i);
+                if (fsqlv_is_ws(ch)) {       /* whitespace: is it a paragraph break, or (sentence mode) just a separator? */
+                    size_t j = i; int lf = 0;
+                    while (j < n && fsqlv_is_ws(fsqlv_cp_ascii(&c, j))) { if (fsqlv_cp_ascii(&c, j) == '\n') lf++; j++; }
+                    if (lf >= 2) { ub = i; i = j; goto have_unit; }
+                    i = j;
+                    continue;
+                }
+                i++;
+                if (m == 2 && (ch == '.' || ch == '!' || ch == '?')) {
+                    while (i < n && (fsqlv_cp_ascii(&c, i) == '.' || fsqlv_cp_ascii(&c, i) == '!' || fsqlv_cp_ascii(&c, i) == '?')) i++;
+                    if (i >= n || fsqlv_is_ws(fsqlv_cp_ascii(&c, i))) { ub = i; goto have_unit; }
+                }
+            }
+have_unit:
+            /* the unit [ua, ub) with trailing whitespace trimmed */
+            while (ub > ua && fsqlv_is_ws(fsqlv_cp_ascii(&c, ub - 1))) ub--;
+            if (ub == ua) continue;
+            if (ub - ua > S) {               /* longer than a chunk: flush, then split it */
+                if (have) { fsqlv_chunk_emit(o, &c, no++, cur_a, cur_b); have = 0; }
+                no = fsqlv_chunk_split(o, &c, no, ua, ub, S, V);
+                if (no == (size_t)-1) over = 1;
+            } else if (!have) { cur_a = ua; cur_b = ub; have = 1; }
+            else if (ub - cur_a <= S) { cur_b = ub; }
+            else { fsqlv_chunk_emit(o, &c, no++, cur_a, cur_b); cur_a = ua; cur_b = ub; }
+            if (no >= FSQLV_CHUNK_MAX_CHUNKS || sqlite3_str_length(o) > FSQLV_CHUNK_MAX_OUT) over = 1;
+        }
+        if (have && !over) fsqlv_chunk_emit(o, &c, no++, cur_a, cur_b);
+    }
+    free(c.cp);
+    sqlite3_str_appendall(o, "]");
+    if (over) {
+        char *junk = sqlite3_str_finish(o); sqlite3_free(junk);
+        sqlite3_result_error(ctx, "fractal_chunk_text: more than 100000 chunks or 64 MiB of output (raise size or lower overlap)", -1);
+        return;
+    }
+    int bad = sqlite3_str_errcode(o);
+    char *res = sqlite3_str_finish(o);
+    if (bad || !res) { sqlite3_free(res); sqlite3_result_error_nomem(ctx); return; }
+    sqlite3_result_text(ctx, res, -1, sqlite3_free);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1612,6 +1944,9 @@ int fsql_vectorizer_register(sqlite3 *db, FsqlState *st) {
         { "fractal_vectorizer_process_queue", -1, (void *)&fsqlv_process_fn },
         { "fractal_embed",                    1, (void *)&fsqlv_embed_fn   },
     };
+    /* fractal_chunk_text is pure: the same input gives the same chunks every time. */
+    if ((rc = sqlite3_create_function_v2(db, "fractal_chunk_text", 3, SQLITE_UTF8 | SQLITE_DETERMINISTIC, st, fsqlv_chunk_fn, NULL, NULL, NULL)) != SQLITE_OK) return rc;
+    if ((rc = sqlite3_create_function_v2(db, "fractal_chunk_text", 4, SQLITE_UTF8 | SQLITE_DETERMINISTIC, st, fsqlv_chunk_fn, NULL, NULL, NULL)) != SQLITE_OK) return rc;
     for (size_t i = 0; i < sizeof(fns) / sizeof(fns[0]); i++) {
         rc = sqlite3_create_function_v2(db, fns[i].name, fns[i].narg,
                                         flags, st,

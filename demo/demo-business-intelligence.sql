@@ -33,9 +33,9 @@
 --   * The generated SQL is executed with the CLI's .once/.read spool
 --     trick (keep .timer OFF around the .once SELECTs). Spool files
 --     land in the current directory, overwritten each run.
---   * fractal_search_debug(query, iterations[, population_size,
+--   * fractal_sfs_converge_debug(query, iterations[, population_size,
 --     diffusion_factor]) is the tunable abstract-space Sniper form
---     (the two-argument fractal_search(vector, query) is the per-row
+--     (the two-argument fractal_sfs_converge(vector, query) is the per-row
 --     form over a stored column). The result is one JSON document;
 --     the ideal point is its $.best_point.
 --   * Scout Discovery is the AGGREGATE fractal_search_explore(col,
@@ -211,17 +211,19 @@ SELECT fractal_text_to_sql('show total revenue for each of the 6 most recent FUL
 SELECT sql_text AS trend_sql FROM bi_gen;
 
 -- Result materialized by spooling the candidate wrapped in CREATE
--- TEMP TABLE AS (no dynamic SQL in SQLite; empty staging -> empty
--- spool -> no-op .read -> bi_trend_result stays the empty placeholder
--- below, so Section 4 keeps a defined shape):
+-- TEMP TABLE AS (no dynamic SQL in SQLite). The empty placeholder is
+-- created AFTER the load and only if the load created nothing (empty
+-- staging -> empty spool -> no-op .read), so Section 4 keeps a defined
+-- shape. Creating the placeholder first would make the load's IF NOT
+-- EXISTS a no-op and leave the real result empty.
 DROP TABLE IF EXISTS bi_trend_result;
-CREATE TEMP TABLE bi_trend_result (month TEXT, total_revenue NUMERIC);
 
 .timer off
 .once bi_trend.sql
 SELECT 'CREATE TEMP TABLE IF NOT EXISTS bi_trend_result AS ' || sql_text || ';'
   FROM bi_gen;
 .read bi_trend.sql
+CREATE TEMP TABLE IF NOT EXISTS bi_trend_result (month TEXT, total_revenue NUMERIC);
 .timer on
 
 .print
@@ -232,8 +234,8 @@ SELECT * FROM bi_trend_result;
 .print Reasoning over the actual result (not the question, the DATA):
 SELECT fractal_reason(
     'this is our last 6 months of revenue by month -- what happened, and does it need attention?',
-    (SELECT json_group_array(json_object('month', month, 'total_revenue', total_revenue))
-       FROM bi_trend_result)
+    (WITH t(month, total_revenue) AS (SELECT * FROM bi_trend_result)   -- by position: the generated SQL may alias the columns differently
+     SELECT json_group_array(json_object('month', month, 'total_revenue', total_revenue)) FROM t)
 );
 
 -- ------------------------------------------------------------------
@@ -249,8 +251,8 @@ SELECT fractal_reason(
 SELECT fractal_reason(
     'given revenue trend, customer segment mix, and status breakdown together, what is the state of the business and what would you look into first?',
     json_object(
-        'monthly_revenue',  (SELECT json_group_array(json_object('month', month, 'total_revenue', total_revenue))
-                               FROM bi_trend_result),
+        'monthly_revenue',  (WITH t(month, total_revenue) AS (SELECT * FROM bi_trend_result)
+                               SELECT json_group_array(json_object('month', month, 'total_revenue', total_revenue)) FROM t),
         'segment_mix',      (SELECT json_group_array(json_object('segment', segment, 'customers', customers))
                                FROM (SELECT segment, count(*) AS customers FROM bi_customers GROUP BY segment ORDER BY segment)),
         'status_breakdown', (SELECT json_group_array(json_object('status', status, 'customers', customers))
@@ -268,10 +270,10 @@ SELECT fractal_reason(
 .print
 .print === 5. Sniper Search: converge toward an ideal-customer profile ===
 .print Query: recent + frequent + high-value (a Champions-shaped target)
-.print (fractal_search_debug(query, iterations) is the abstract-space
+.print (fractal_sfs_converge_debug(query, iterations) is the abstract-space
 .print Sniper form; the ideal point is its $.best_point key.)
 SELECT json_extract(
-           fractal_search_debug('-0.7,0.7,0.7', 50),
+           fractal_sfs_converge_debug('-0.7,0.7,0.7', 50),
            '$.best_point') AS ideal_profile;
 
 .print

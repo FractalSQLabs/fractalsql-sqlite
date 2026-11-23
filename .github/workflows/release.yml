@@ -113,8 +113,8 @@ jobs:
           # yields the wrong "sqlite3_fractalsqllegacy_init".
           OUT=$(sqlite3 :memory: ".load ${SO} sqlite3_fractalsql_init" "SELECT fractal_edition() || '|' || fractal_version();")
           echo "result: ${OUT}"
-          test "${OUT}" = "Community|2.0.13"
-          DIST=$(sqlite3 :memory: ".load ${SO} sqlite3_fractalsql_init" "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');")
+          test "${OUT}" = "Community|2.0.14"
+          DIST=$(sqlite3 :memory: ".load ${SO} sqlite3_fractalsql_init" "SELECT fractal_sfs_converge('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');")
           echo "self-search distance: ${DIST}"
           awk -v d="${DIST}" 'BEGIN { if (d >= 1e-6) exit 1 }'
 
@@ -140,7 +140,7 @@ jobs:
             test "${OUT}" = "Community"
             OUT=$(sqlite3 :memory: ".load '"${SO}"' sqlite3_fractalsql_init" "SELECT fractal_version();")
             echo "version: ${OUT}"
-            test "${OUT}" = "2.0.13"
+            test "${OUT}" = "2.0.14"
           '
 
       # Every profile installs to the SAME fixed path regardless of the
@@ -202,11 +202,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ------------------------------------------------------------------
-  # macOS: fractalsql.dylib for Apple Silicon (arm64, native) + Intel
-  # (x86_64, cross-compiled via FSQL_DARWIN_ARCH -- the free Intel
-  # macos-13 runner was retired Dec 2025, so both legs now run on
-  # macos-15), packaged by scripts/package-darwin.sh into the
-  # easy_install-compatible tarball
+  # macOS: fractalsql.dylib for Apple Silicon (arm64, on macos-15) and Intel (x86_64, on macos-15-intel), each
+  # built natively on its own runner. macos-15-intel is GitHub's last Intel image, available until August 2027
+  # (actions/runner-images#13045); when it goes, so does the Intel macOS package. Packaged by
+  # scripts/package-darwin.sh into the easy_install-compatible tarball
   # (fractalsql-sqlite-<version>-darwin-<arch>.tar.gz).
   #
   # Pure C, statically linked against the vendored darwin core archive
@@ -228,7 +227,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15
+          - runner: macos-15-intel
             fsql_arch: x86_64
           - runner: macos-15
             fsql_arch: arm64
@@ -265,42 +264,7 @@ jobs:
           unzip -q deps/sqlite.zip -d deps
           mv "deps/sqlite-amalgamation-${SQLITE_VERSION}" deps/sqlite
 
-      # x86_64 only: Homebrew no longer ships x86_64 bottles for openssl@3
-      # on Apple Silicon (Intel support discontinued), so on this arm64
-      # runner `brew --prefix openssl@3` resolves to an arm64-only keg.
-      # ld silently ignores the mismatched-arch .dylib (just a warning)
-      # and the link then fails with "Undefined symbols for architecture
-      # x86_64" for every OpenSSL symbol -- reproduced directly. Same
-      # problem (and same fix) as fractalsql-mariadb's release.yml
-      # solves for its daemon's libcrypto-only need; the MCP server
-      # additionally links libssl (for the --https transport), so this
-      # cross-builds the full static library, not just libcrypto: clang
-      # -arch x86_64 emits x86_64 objects at full speed on the arm64
-      # host, no Rosetta needed, since only the archive is linked and
-      # its binaries are never run.
-      - name: Cross-build x86_64 OpenSSL from source (for the MCP server)
-        if: matrix.fsql_arch == 'x86_64'
-        run: |
-          set -euo pipefail
-          curl -fsSLO --proto '=https' https://github.com/openssl/openssl/releases/download/openssl-3.5.8/openssl-3.5.8.tar.gz
-          echo "a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2  openssl-3.5.8.tar.gz" | shasum -a 256 -c -
-          tar xf openssl-3.5.8.tar.gz
-          cd openssl-3.5.8
-          ./Configure darwin64-x86_64 no-shared no-tests \
-              --prefix=/tmp/openssl-x64 \
-              -mmacosx-version-min=13.3 -fPIC
-          # opensslv.h and friends are generated at build time; force the
-          # header-generation step first (serially) before build_libs --
-          # same ordering fractalsql-mariadb's identical step uses, to
-          # avoid racing the first .o compiles against ungenerated
-          # headers under -j.
-          make -j1 -s build_generated
-          make -j"$(sysctl -n hw.ncpu)" -s build_libs
-          make -s install_sw
-
       - name: Build + package dylib
-        env:
-          OPENSSL_PREFIX: ${{ matrix.fsql_arch == 'x86_64' && '/tmp/openssl-x64' || '' }}
         run: |
           set -euo pipefail
           chmod +x scripts/package-darwin.sh
@@ -308,28 +272,32 @@ jobs:
           # on v* tags; strip the v). Branch builds fall back to the
           # header-derived version inside package-darwin.sh.
           export FSQL_PKG_VERSION="${GITHUB_REF_NAME#v}"
-          # x86_64 cross-builds on an Apple Silicon runner (the Intel
-          # macos-13 image was retired) and arm64 builds native. The
-          # script passes -arch itself — without it clang would target
-          # the arm64 host on both legs and the x86_64 link would come
-          # up empty against the x86_64 vendored archive. OPENSSL_PREFIX
-          # (set above for x86_64 only) overrides package-darwin.sh's
-          # own `brew --prefix openssl@3` default, pointing it at the
-          # cross-built x86_64 static library instead of the arm64 keg.
+          # Each leg builds natively on its own runner, against that runner's own Homebrew (openssl@3 and sqlite), so the
+          # MCP server links OpenSSL dynamically on both architectures. The script still passes -arch itself, which is
+          # harmless natively and keeps the output architecture explicit.
           export FSQL_REQUIRE_MCP=1   # a release package without the MCP server is a failure, not a warning
           FSQL_DARWIN_ARCH=${{ matrix.fsql_arch }} ./scripts/package-darwin.sh
           ls -l dist/packages
 
-      # arm64 only: native leg can actually execute the binary it just
-      # built; the x86_64 leg cross-builds on this same arm64 runner
-      # (see the job header comment) and can't run its own output.
+      # Each leg runs on its own architecture, so both can execute the binary they just built.
       - name: Smoke-check fractalsql-sqlite-mcp
-        if: matrix.fsql_arch == 'arm64'
         run: |
           set -euo pipefail
           test -f mcp/fractalsql-sqlite-mcp
           ./mcp/fractalsql-sqlite-mcp --version
           ./mcp/fractalsql-sqlite-mcp --list-tools | head -5
+
+      # OpenSSL must be linked as a shared library from Homebrew's openssl@3 (not folded in statically): Homebrew
+      # patches it, and none of it is shipped in the tarball. The binary must need nothing else outside the system.
+      - name: The MCP server links openssl@3 dynamically
+        run: |
+          set -euo pipefail
+          LIBS="$(otool -L mcp/fractalsql-sqlite-mcp | tail -n +2 | awk '{print $1}')"
+          echo "${LIBS}"
+          echo "${LIBS}" | grep -q 'openssl@3/lib/libssl' || { echo "FAIL: libssl is not linked dynamically" >&2; exit 1; }
+          if echo "${LIBS}" | grep -v -E '^(/usr/lib/|/System/Library/|.*/opt/openssl@3/lib/lib(ssl|crypto))' | grep -q .; then
+              echo "FAIL: the MCP server depends on a library other than openssl@3 and the system's own" >&2; exit 1
+          fi
 
       - name: Posture checks (otool, size, exports)
         run: |
@@ -366,16 +334,9 @@ jobs:
               || { echo "FAIL: sqlite3_fractalsql_init missing"; exit 1; }
           echo "ok: ${DYLIB}"
 
-      # arm64 only: both legs now run on the same native-arm64 macos-15
-      # runner (see the job header comment), and Homebrew's sqlite3
-      # there is an arm64-native binary -- it cannot .load the
-      # cross-compiled x86_64 dylib (architecture mismatch in the TEST,
-      # not a signal about the build). install-test.yml's macos-install
-      # job covers the live functional path on the arch that IS native
-      # here; the posture checks above (otool/size/exports) are pure
-      # static inspection and still run for x86_64 too.
+      # Each leg runs on its own architecture, and Homebrew's sqlite3 there is a native binary, so both can .load the
+      # dylib they just built.
       - name: Functional test — .load in sqlite3 CLI
-        if: matrix.fsql_arch == 'arm64'
         run: |
           set -euo pipefail
           DYLIB="$(pwd)/fractalsql.dylib"
@@ -386,10 +347,10 @@ jobs:
               ".load ${DYLIB}" \
               "SELECT fractal_edition() || '|' || fractal_version();")
           echo "result: ${OUT}"
-          test "${OUT}" = "Community|2.0.13"
+          test "${OUT}" = "Community|2.0.14"
           DIST=$("${SQLITE_BIN}" :memory: \
               ".load ${DYLIB}" \
-              "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');")
+              "SELECT fractal_sfs_converge('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');")
           echo "self-search distance: ${DIST}"
           awk -v d="${DIST}" 'BEGIN { if (d >= 1e-6) exit 1 }'
 
@@ -598,9 +559,9 @@ jobs:
           $load = '.load "C:/Program Files/FractalSQL/fractalsql.dll"'
           $out = & $cmd.Source ':memory:' $load "SELECT fractal_edition() || '|' || fractal_version();"
           Write-Host "result: $out"
-          if ($out -ne 'Community|2.0.13') { Write-Host "FATAL: unexpected edition|version: $out"; exit 1 }
+          if ($out -ne 'Community|2.0.14') { Write-Host "FATAL: unexpected edition|version: $out"; exit 1 }
 
-          $dist = & $cmd.Source ':memory:' $load "SELECT fractal_search('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');"
+          $dist = & $cmd.Source ':memory:' $load "SELECT fractal_sfs_converge('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');"
           Write-Host "self-search distance: $dist"
           if ([double]$dist -ge 1e-6) { Write-Host "FATAL: self-search distance too large: $dist"; exit 1 }
           Write-Host "ok: MSI install + .load + search"

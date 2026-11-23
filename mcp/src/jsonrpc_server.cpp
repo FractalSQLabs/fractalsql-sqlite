@@ -353,13 +353,17 @@ namespace fsqlmcp
         std::string clientKey;
         {
             std::lock_guard<std::mutex> lk( inflightMu_ );
-            cancelledIds_.insert( requestId );
             auto it = inflightSessions_.find( requestId );
-            if( it != inflightSessions_.end() ) clientKey = it->second;
+            // Only an id that is in flight is remembered: the completion path is the one place an entry is erased, so an id
+            // that never was (or already finished) would stay in the set for the life of the process.
+            if( it == inflightSessions_.end() ) return;
+            clientKey = it->second;
+            cancelledIds_.insert( requestId );
         }
         if( interruptHook && !clientKey.empty() )
             interruptHook( clientKey );   // adapter-layer interrupt (engine-specific)
-        logging::event( "cancel_propagated", Json{ { "request", requestId } } );
+        // The id is the client's text: capped, so a long one cannot flood the log line.
+        logging::event( "cancel_propagated", Json{ { "request", requestId.substr( 0, 64 ) } } );
     }
 
     void JsonRpcServer::beginShutdown()

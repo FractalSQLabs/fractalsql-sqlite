@@ -56,7 +56,7 @@ if not exist "%OUTDIR%" mkdir "%OUTDIR%"
 rem /DNOMINMAX suppresses windows.h's function-like min()/max() macros so they
 rem do not rewrite std::min/std::max -- see build.bat for the full rationale.
 cl.exe /nologo /std:c++17 /utf-8 /EHsc /MT /Od /W3 /Zi /fsanitize=address /DNOMINMAX ^
-  /DFSQL_MCP_VERSION="\"2.0.13\"" ^
+  /DFSQL_MCP_VERSION="\"2.0.14\"" ^
   /I "%MCP_DIR%\vendor" /I "%MCP_DIR%\src" /I "%SQLITE_DIR%" ^
   /I "%OPENSSL_DIR%\include" ^
   "%SQLITE_DIR%\sqlite3.c" ^
@@ -77,5 +77,14 @@ if errorlevel 1 (
   exit /b 1
 )
 echo asan mcp build OK: %OUTDIR%\fractalsql-sqlite-mcp.exe
+REM The server looks for its two drift locks beside the executable when no path is configured, so
+REM a server started from this directory is checked against the locks this build was made with.
+REM The Windows build puts the executable in a separate output directory, so the locks are copied
+REM there: a stale copy left in the tree from an earlier build would make the server refuse to
+REM start (a schema-hash mismatch is a hard failure).
+for %%L in (.mcp-schema-lock .mcp-safety-annotations-lock) do (
+  if exist "%MCP_DIR%\%%L" copy /y "%MCP_DIR%\%%L" "%OUTDIR%\%%L" >nul
+)
+
 endlocal
 exit /b 0

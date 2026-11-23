@@ -23,8 +23,8 @@ namespace fsqlmcp
     // The plugin's own version, and the engine surface version it was
     // built and tested against (version numbers track the engine).
     static const char* const kMcpPluginName       = "fractalsql-sqlite-mcp";
-    static const char* const kMcpPluginVersion    = "2.0.13";
-    static const char* const kEngineVersionExpect = "2.0.13";
+    static const char* const kMcpPluginVersion    = "2.0.14";
+    static const char* const kEngineVersionExpect = "2.0.14";
 
     using SqlValue = std::variant<std::nullptr_t, std::int64_t, double, std::string,
                                   std::vector<std::uint8_t>>;

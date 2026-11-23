@@ -29,6 +29,7 @@
 #endif
 
 #define MOCK_SQL_FILE "/tmp/fractalsql_bt_sql.txt"
+#define MOCK_REQUEST_DUMP_FILE "/tmp/fractalsql_bt_last_request.txt"
 
 /* Dumped fresh on every generate() call so gate_28_review_isolation can
  * tell which tier's dispatch last ran: REVIEW runs after GENERATE within
@@ -60,7 +61,16 @@ static int
 mock_format(void *u, const char *q, size_t ql, const char *c, size_t cl,
             const char **prompt_out, size_t *prompt_len_out)
 {
-    (void) u; (void) q; (void) ql; (void) c; (void) cl;
+    (void) u; (void) ql; (void) cl;
+    /* Record exactly what the host handed the plugin (the user query and the context JSON) so a gate can assert
+     * on it: an agent must carry its computed findings in the context, because the real plugin tells the model
+     * to answer only from that context. Overwritten on every call. */
+    FILE *req = fopen(MOCK_REQUEST_DUMP_FILE, "w");
+    if (req != NULL)
+    {
+        fprintf(req, "QUERY: %s\nCONTEXT: %s\n", q != NULL ? q : "", c != NULL ? c : "");
+        fclose(req);
+    }
     static char b[2] = { 'x', '\0' };
     *prompt_out = b;
     *prompt_len_out = 1;
@@ -84,6 +94,15 @@ mock_generate(void *u, const char *p, size_t pl,
 
     char  sql[8192] = "SELECT 1";
     FILE *f = fopen(MOCK_SQL_FILE, "r");
+    if (f == NULL)
+    {
+        /* The reply file is missing. The harness writes it moments before the
+         * call and removes it when the run ends, so a run that overlaps this
+         * one can take it away. Say so on stderr: the default answer below is
+         * a valid statement, and without this line a gate that sees it cannot
+         * tell a missing reply file from a real reply. */
+        fprintf(stderr, "mock_reasoning_plugin: the canned reply file %s could not be opened -- answering the default\n", MOCK_SQL_FILE);
+    }
     if (f != NULL)
     {
         size_t n = fread(sql, 1, sizeof(sql) - 1, f);

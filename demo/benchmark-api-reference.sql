@@ -66,7 +66,7 @@ SELECT fractal_edition(), fractal_version();
 -- 1. Search (3 functions)
 -- ------------------------------------------------------------------
 .print
-.print === Search: fractal_search, fractal_search_debug, fractal_search_explore ===
+.print === Search: fractal_sfs_converge, fractal_sfs_converge_debug, fractal_search_explore ===
 
 DROP TABLE IF EXISTS bmk_corpus;
 CREATE TABLE bmk_corpus (id INTEGER PRIMARY KEY, emb TEXT);
@@ -77,8 +77,8 @@ SELECT '[' || group_concat(printf('%.4f', random() / 9223372036854775808.0) ORDE
 FROM gs CROSS JOIN d
 GROUP BY gs.n;
 
-SELECT fractal_search(emb, '0.6,0.8,0,0,0,0,0,0') AS fractal_search FROM bmk_corpus LIMIT 3;
-SELECT json_extract(fractal_search_debug('[0.6,0.8,0,0,0,0,0,0]', 10), '$.best_fit') AS search_debug_best_fit;
+SELECT fractal_sfs_converge(emb, '0.6,0.8,0,0,0,0,0,0') AS fractal_sfs_converge FROM bmk_corpus LIMIT 3;
+SELECT json_extract(fractal_sfs_converge_debug('[0.6,0.8,0,0,0,0,0,0]', 10), '$.best_fit') AS search_debug_best_fit;
 SELECT count(*) AS fractal_search_explore_population
   FROM (SELECT fractal_search_explore(emb, '[0,0,0,0,0,0,0,0]',
                                '{"population_size": 6, "iterations": 6, "walk": 0}') AS res

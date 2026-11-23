@@ -4,7 +4,8 @@ REM
 REM Builds fractalsql.dll on Windows with the MSVC toolchain — pure C
 REM (multi-TU, src\*.c) statically linked against the vendored core
 REM archive, matching the Linux posture: zero runtime dependency on the
-REM Visual C++ Redistributable.
+REM Visual C++ Redistributable for fractalsql.dll itself. (The separate
+REM reasoning plugin DLL is built /MD and does need it; the MSI checks.)
 REM
 REM Prerequisites
 REM   * Visual Studio Build Tools (cl.exe on PATH — run from a
@@ -93,4 +94,4 @@ echo.
 echo ==^> Built %OUT_DIR%\fractalsql.dll
 dir "%OUT_DIR%\fractalsql.dll"
 
-endlocal
+endlocal

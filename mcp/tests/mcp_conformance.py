@@ -484,10 +484,13 @@ class Client(object):
         self.session_id = None
 
     def headers(self, extra=None):
+        # A header in `extra` replaces the client's own of the same name: sending both would be a repeated header, which
+        # the server refuses as ambiguous, and is not what a test passing it means.
+        named = {k.lower() for k, _ in (extra or [])}
         headers = []
-        if self.token:
+        if self.token and "authorization" not in named:
             headers.append(("Authorization", "Bearer %s" % self.token))
-        if self.session_id and self.profile["echo_session"]:
+        if self.session_id and self.profile["echo_session"] and "mcp-session-id" not in named:
             headers.append(("Mcp-Session-Id", self.session_id))
         headers.extend(extra or [])
         return headers

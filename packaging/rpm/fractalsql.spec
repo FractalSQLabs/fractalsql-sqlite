@@ -3,7 +3,7 @@
 %global mcpdocdir %{docdir}/mcp
 
 Name:           fractalsql-sqlite
-Version:        2.0.13
+Version:        2.0.14
 Release:        1%{?dist}
 Summary:        Stochastic Fractal Search SQLite loadable extension (Community)
 
@@ -25,8 +25,8 @@ fractalsql-sqlite is a SQLite loadable extension exposing the full
 FractalSQL 2.0 surface:
 
     fractal_edition()          -> 'Community'
-    fractal_version()          -> '2.0.13'
-    fractal_search(vector, query) -> REAL (cosine distance to
+    fractal_version()          -> '2.0.14'
+    fractal_sfs_converge(vector, query) -> REAL (cosine distance to
                                           SFS-refined projection
                                           of the query vector)
     fractal_search_explore(emb, query)   -> TEXT (Scout-mode SFS aggregate)
@@ -87,10 +87,12 @@ install -Dm0755 mcp/fractalsql-sqlite-mcp \
     %{buildroot}%{_bindir}/fractalsql-sqlite-mcp
 install -Dm0644 mcp/README.md \
     %{buildroot}%{mcpdocdir}/README.md
+install -Dm0644 mcp/RUN.txt \
+    %{buildroot}%{mcpdocdir}/RUN.txt
 install -Dm0644 mcp/.mcp-schema-lock \
-    %{buildroot}%{mcpdocdir}/.mcp-schema-lock
+    %{buildroot}%{_bindir}/.mcp-schema-lock
 install -Dm0644 mcp/.mcp-safety-annotations-lock \
-    %{buildroot}%{mcpdocdir}/.mcp-safety-annotations-lock
+    %{buildroot}%{_bindir}/.mcp-safety-annotations-lock
 install -Dm0644 mcp/manifest.json \
     %{buildroot}%{mcpdocdir}/manifest.json
 
@@ -103,8 +105,9 @@ install -Dm0644 mcp/manifest.json \
 %{docdir}/fractalsql--1.0.sql
 %{_bindir}/fractalsql-sqlite-mcp
 %{mcpdocdir}/README.md
-%{mcpdocdir}/.mcp-schema-lock
-%{mcpdocdir}/.mcp-safety-annotations-lock
+%{mcpdocdir}/RUN.txt
+%{_bindir}/.mcp-schema-lock
+%{_bindir}/.mcp-safety-annotations-lock
 %{mcpdocdir}/manifest.json
 %if 0%{?ship_reasoning_plugin}
 # Set -D"ship_reasoning_plugin 1" when the vendored drop includes the
@@ -123,13 +126,26 @@ Load inside any SQLite session:
 
     SELECT load_extension('/usr/local/lib/sqlite3/fractalsql');
     SELECT fractal_edition();   -- 'Community'
-    SELECT fractal_version();   -- '2.0.13'
+    SELECT fractal_version();   -- '2.0.14'
 
 See /usr/share/doc/fractalsql-sqlite/load_extension.sql for examples.
 
 EOF
 
 %changelog
+* Sun Nov 22 2026 FractalSQLabs - 2.0.14-1
+- Indexed vector search: fractal_index_create, _info, _list, _refresh, _rebuild, _drop, _ensure and _candidates build and maintain an IVF index (INT8, INT4, FP16 or FP32), and fractal_search(table, column, query, k) answers from it with exact, verified distances.
+- Agents can search through the index: the agent_use_index setting (off, on or auto, with agent_index_min_rows) and a meta_filter option limit what the retrieval agents scan.
+- Agent results now report source_row_ids, used_index and context_cut, and agent_context_row_bytes caps how much of each row reaches the model; the earlier source_doc_ids field is removed.
+- Breaking: the two-argument fractal_search(vector, query) is now fractal_sfs_converge (its trace is fractal_sfs_converge_debug); the old call is refused with a message naming the new one.
+- Long text: fractal_chunk_text splits text into character-offset chunks (fixed, paragraph or sentence), and a vectorizer can chunk and embed with chunk_size, chunk_overlap and chunk_mode.
+- Distances (cosine, L2, inner product, norm) are bit-identical to a sequential double-precision reference across the scan, the index and the text round trip.
+- With agent_partial_reasoning_fail on, an agent whose reasoning step fails returns the data it computed plus reasoning_step_failed instead of raising.
+- Enterprise: the library's signature is now verified by default (set FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 in the environment to opt out), and ledger_retention chooses fade (the default) or exact.
+- MCP server: tools for the index tier and chunking, a stricter HTTP transport (lookalike origins and repeated headers refused, the /readyz probe cached), and a new mcp/RUN.txt quick-start.
+- New demos (demo-chunking.sql, demo-fractal-index.sql), new benchmarks (index_head_to_head.py, precision_agreement.py) and an architecture diagram.
+- The bundled FractalSQL core and reasoning plugin are refreshed for Linux, macOS and Windows.
+
 * Fri Nov 13 2026 FractalSQLabs - 2.0.13-1
 - Version bump to 2.0.13.
 

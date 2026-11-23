@@ -12,7 +12,7 @@
  * Registered here (smoke + search surface):
  *   fractal_edition() -> TEXT      "Community"
  *   fractal_version() -> TEXT      "2.0.0"
- *   fractal_search(vector, query) -> DOUBLE
+ *   fractal_sfs_converge(vector, query) -> DOUBLE
  *   fractal_search_explore(emb, query [, params]) -> TEXT (aggregate, Scout)
  * Remaining modules register from their own TUs (see
  * fsql_sqlite_internal.h for the TU map).
@@ -22,7 +22,7 @@
  *   BLOB                       : packed little-endian float32
  *
  * Per-row hot path
- *   `fractal_search` is invoked once per candidate row. SFS itself
+ *   `fractal_sfs_converge` is invoked once per candidate row. SFS itself
  *   only depends on the query, not the row vector, so we run SFS
  *   ONCE per distinct query (memoized by FNV hash of the query
  *   bytes) and reuse the refined best_point for every row in the
@@ -51,6 +51,7 @@
 #include <limits.h>
 
 #include "fsql_sqlite_internal.h"
+#include "fsql_precision.h"
 #include "fractalsql_parse.h"
 
 SQLITE_EXTENSION_INIT1
@@ -85,10 +86,10 @@ FsqlState *fsql_state_create(sqlite3 *db, char **pzErrMsg) {
      * the tier would unsetenv it, since nothing else ever populates
      * cfg->response_mode -- and re-asserts it after a T2S-tier load
      * that failed partway could otherwise leave that tier's forced
-     * "code" value sitting in the process environment. Env-only by
-     * design (no fractal_config_set key), only ever set in the service
-     * environment, as docs/reasoning-setup.md documents. A new connection (new FsqlState) picks up a changed
-     * value; a live one keeps the value it booted with. */
+     * "code" value sitting in the process environment. The environment
+     * value is the starting value; fractal_config_set('http_response_mode', ...)
+     * changes it for this connection afterwards, as docs/reasoning-setup.md documents. A new connection (new
+     * FsqlState) picks up a changed environment value; a live one keeps the value it booted with. */
     {
         const char *rm = getenv("FSQL_REASONING_HTTP_RESPONSE_MODE");
         if (rm && *rm) {
@@ -143,6 +144,7 @@ void fsql_state_destroy(void *p) {
     free(st->cfg.http_think_provider);
     free(st->cfg.http_native_url);
     free(st->cfg.t2s_allowed_statements);
+    free(st->cfg.ledger_retention);
     free(st->cfg.enterprise_lib);
     free(st->cfg.enterprise_ledger_key);
     free(st->cfg.response_mode);
@@ -265,7 +267,7 @@ static void version_fn(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
 }
 
 /* -------------------------------------------------------------------
- * fractal_search: Sniper mode, memoized per distinct query.
+ * fractal_sfs_converge: Sniper mode, memoized per distinct query.
  * ------------------------------------------------------------------- */
 
 static uint64_t fnv1a_64(const void *bytes, size_t n) {
@@ -278,17 +280,10 @@ static uint64_t fnv1a_64(const void *bytes, size_t n) {
     return h;
 }
 
+/* The one shared cosine (fsql_precision.h): the Sniper path and every SQL vector function accumulate in double in the same
+ * fixed order, so they agree to the last bit. */
 static double cosine_distance(const double *a, const double *b, int dim) {
-    double dot = 0.0;
-    double na = 0.0;
-    double nb = 0.0;
-    for (int i = 0; i < dim; i++) {
-        dot += a[i] * b[i];
-        na  += a[i] * a[i];
-        nb  += b[i] * b[i];
-    }
-    if (na == 0.0 || nb == 0.0) return 1.0;
-    return 1.0 - dot / (sqrt(na) * sqrt(nb));
+    return fsqlp_cosine_distance_d(a, b, (size_t)dim);
 }
 
 /* Run SFS on st->query and cache the refined point in st->best_point.
@@ -318,7 +313,7 @@ static void fractal_search_fn(sqlite3_context *ctx, int argc,
                               sqlite3_value **argv) {
     if (argc != 2) {
         sqlite3_result_error(ctx,
-            "fractal_search(vector, query) expects 2 args", -1);
+            "fractal_sfs_converge(vector, query) expects 2 args", -1);
         return;
     }
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
@@ -374,7 +369,7 @@ static void fractal_search_fn(sqlite3_context *ctx, int argc,
 /* -------------------------------------------------------------------
  * fractal_search_explore: Scout Mode aggregate.
  *
- * Sniper (fractal_search, scalar) collapses into one basin. Scout
+ * Sniper (fractal_sfs_converge, scalar) collapses into one basin. Scout
  * scans the WHOLE `emb` column as the corpus and runs SFS with walk=0
  * + return_population so the final population disperses across
  * distinct basins. The corpus buffer is the one place this TU still
@@ -487,12 +482,23 @@ static void fractal_search_explore_final(sqlite3_context *ctx) {
     if (diff     > FSQL_AGENTS_MAX_DIFFUSION)
                                   diff     = FSQL_AGENTS_MAX_DIFFUSION;
 
-    char core_params[256];
+    /* mmr_lambda is a documented option of fractal_search_explore; the host used to drop it, so the core always ran its 0.5
+     * default. Forward it (clamped to [0, 1]). */
+    double mmr_lambda = 0.5;
+    {
+        const char *lp = fsql_json_top_level_value(agg->params, "mmr_lambda");
+        if (lp) {
+            char *e2;
+            double v = strtod(lp, &e2);
+            if (e2 != lp && v == v) mmr_lambda = v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v);
+        }
+    }
+    char core_params[320];
     snprintf(core_params, sizeof core_params,
         "{\"max_generation\":%d,\"population_size\":%d,"
         "\"maximum_diffusion\":%d,\"walk\":0,"
-        "\"return_population\":true,\"bound_clipping\":true}",
-        iters, pop_size, diff);
+        "\"return_population\":true,\"bound_clipping\":true,\"mmr_lambda\":%.17g}",
+        iters, pop_size, diff, mmr_lambda);
 
     const char *result_json = NULL;
     size_t result_len = 0;
@@ -589,7 +595,7 @@ int sqlite3_fractalsql_init(sqlite3 *db, char **pzErrMsg,
     const int flags = SQLITE_UTF8 | SQLITE_DETERMINISTIC | SQLITE_INNOCUOUS;
     int rc;
 
-    /* Smoke surface. fractal_search owns the state (xDestroy); every
+    /* Smoke surface. fractal_sfs_converge owns the state (xDestroy); every
      * later registration passes NULL to avoid a double-free. */
     rc = sqlite3_create_function_v2(
         db, "fractal_edition", 0, flags, NULL,
@@ -602,7 +608,7 @@ int sqlite3_fractalsql_init(sqlite3 *db, char **pzErrMsg,
     if (rc != SQLITE_OK) { fsql_state_destroy(st); return rc; }
 
     rc = sqlite3_create_function_v2(
-        db, "fractal_search", 2, flags, st,
+        db, "fractal_sfs_converge", 2, flags, st,
         fractal_search_fn, NULL, NULL, fsql_state_destroy);
     if (rc != SQLITE_OK) { fsql_state_destroy(st); return rc; }
 
@@ -620,20 +626,21 @@ int sqlite3_fractalsql_init(sqlite3 *db, char **pzErrMsg,
         db, "cos", 1, flags, NULL, math_cos_fn, NULL, NULL, NULL);
 
     /* fractal_search_explore: Scout Mode aggregate (xStep + xFinal). Shares
-     * the same per-connection state as fractal_search. NOT marked
+     * the same per-connection state as fractal_sfs_converge. NOT marked
      * DETERMINISTIC: SFS is stochastic. Variadic narg (-1) accepts
      * the 2-arg (emb, query) and 3-arg (emb, query, params) forms. */
     rc = sqlite3_create_function_v2(
         db, "fractal_search_explore", -1, SQLITE_UTF8 | SQLITE_INNOCUOUS, st,
         NULL /*xFunc*/,
         fractal_search_explore_step, fractal_search_explore_final,
-        NULL /*xDestroy: owned by fractal_search's registration*/);
+        NULL /*xDestroy: owned by fractal_sfs_converge's registration*/);
     if (rc != SQLITE_OK) return rc;
 
     /* Feature modules. Sovereign-only modules are compiled out on a
      * minimal build (their names then resolve as unknown functions). */
 #ifdef FSQL_SQLITE_SOVEREIGN
     rc = fsql_vector_register(db, st);        if (rc) return rc;
+    rc = fsql_index_register(db, st);         if (rc) return rc;
     rc = fsql_config_register(db, st);        if (rc) return rc;
     rc = fsql_t2s_register(db, st);           if (rc) return rc;
     rc = fsql_vectorizer_register(db, st);    if (rc) return rc;

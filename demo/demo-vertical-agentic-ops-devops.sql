@@ -172,6 +172,8 @@ SELECT fractal_agent_detect_loop(
 -- confidence is 1/(1+distance) (real).
 .print
 .print === 5. Task routing over the capability map ===
+DROP TABLE IF EXISTS temp.last_scan;
+CREATE TEMP TABLE last_scan AS
 WITH t AS (SELECT json_extract(value, '$.doc_id')   AS doc_id,
                   json_extract(value, '$.distance') AS dist
              FROM json_each(fractal_search_telemetry(
@@ -183,8 +185,10 @@ SELECT m.capability_name  AS routed_to,
        1000               AS remaining_budget
 FROM t
 JOIN agent_capabilities m ON m.rowid = t.doc_id;
+SELECT * FROM temp.last_scan;
 .print --- rationale (fractal_reason) ---
-SELECT fractal_reason('one-line rationale for this task routing decision');
+SELECT fractal_reason('one-line rationale for this task routing decision',
+    json_object('scan', (SELECT json_group_array(json_object('routed_to', routed_to, 'confidence', confidence, 'remaining_budget', remaining_budget)) FROM temp.last_scan)));
 .print --- the shipped agent: same composition, one call ---
 SELECT fractal_agent_route_task(
     '0.15,0.25,0.35', 'agent_capabilities', 'embedding', 'capability_name', 1000);

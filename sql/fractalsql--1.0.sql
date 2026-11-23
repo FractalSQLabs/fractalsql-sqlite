@@ -27,7 +27,7 @@
 -- Smoke + search:
 --   fractal_edition() -> TEXT                        -- 'Community'
 --   fractal_version() -> TEXT                        -- '2.0.5'
---   fractal_search(vector, query) -> REAL               -- Sniper, memoized
+--   fractal_sfs_converge(vector, query) -> REAL               -- Sniper, memoized
 --   fractal_search_explore(emb, query[, params]) -> TEXT       -- Scout aggregate
 --
 -- fractal_vector (BLOB convention: u16 dim LE + u16 reserved + f32[]):
@@ -51,10 +51,10 @@
 --   Keys: reasoning_plugin, http_url, http_token, http_model,
 --         http_allow_plaintext, http_embed_url, http_embed_model,
 --         http_think, http_think_provider, http_native_url,
---         http_num_ctx, text_to_sql_max_attempts,
+--         http_response_mode, http_num_ctx, text_to_sql_max_attempts,
 --         text_to_sql_allowed_statements, text_to_sql_use_review,
 --         enterprise_lib, enterprise_ledger_key,
---         enterprise_require_signature
+--         enterprise_require_signature, ledger_retention
 --   (Prefix-free names as shown; the 'fractalsql.'-prefixed spelling
 --   is accepted for parity with the PG GUC names.)
 --
@@ -72,7 +72,7 @@
 --     (rows are enqueued by the TEMP triggers fractal_vectorizer_create
 --      installs on INSERT and on UPDATE OF text_col:
 --      INSERT INTO fractal_vectorizer_queue(source_pk_value))
---   fractal_search_debug(query[, iterations, population_size,
+--   fractal_sfs_converge_debug(query[, iterations, population_size,
 --     diffusion_factor])                                 -> TEXT
 --   fractal_search_agent(query, table_name, vector_col
 --     [, pop_size, iterations])                          -> TEXT
@@ -88,6 +88,13 @@
 --     [, n_bits, seed, hamming_threshold])               -> TEXT
 --     (SimHash state fingerprints + Brent's cycle detector, with a
 --      DFA drift check over the per-state L2-norm trajectory)
+--   fractal_search(table, col, query, k[, options])          -> TEXT
+--     (the indexed search: the IVF index on (table, col) when one
+--      exists, an exact scan otherwise; every distance exact)
+--   fractal_index_create(table, col[, options])              -> TEXT
+--   fractal_index_rebuild(name)                              -> TEXT
+--   fractal_index_drop(name)                                 -> INTEGER
+--   fractal_index_info(name)                                 -> TEXT
 --   fractal_search_telemetry(table, col, query, k)       -> TEXT
 --   fractal_search_trajectory(table, col, baseline, current, k)  -> TEXT
 --   fractal_cross_modal_search(tbl, col, morph, clinic, alpha, k)-> TEXT
@@ -158,7 +165,7 @@ INSERT INTO vectors(embedding) VALUES
     ('0.5,0.5,0.5,0.5');
 
 -- Top 3 nearest to a query (SFS runs once per distinct query per scan):
-SELECT id, fractal_search(embedding, '0.6,0.8,0.0,0.0') AS dist
+SELECT id, fractal_sfs_converge(embedding, '0.6,0.8,0.0,0.0') AS dist
 FROM vectors
 ORDER BY dist
 LIMIT 3;

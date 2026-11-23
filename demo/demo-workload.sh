@@ -236,10 +236,10 @@ worker() {
         case "$op" in
             sniper)
                 # Abstract-space Sniper: one SFS convergence per call
-                # (PG's abstract fractal_search(query, 30, 30, 2) form).
+                # (PG's abstract fractal_sfs_converge(query, 30, 30, 2) form).
                 out=$(sqlite3 -batch "$DB" "${CMD_BASE[@]}" \
                     ${CMD_CONFIG[@]+"${CMD_CONFIG[@]}"} \
-                    "SELECT fractal_search_debug('0.3,0.6,0.9,0.2,0.0', 30, 30, 2);" 2>&1) ;;
+                    "SELECT fractal_sfs_converge_debug('0.3,0.6,0.9,0.2,0.0', 30, 30, 2);" 2>&1) ;;
             scout)
                 # Scout over the corpus: the aggregate fractal_search_explore
                 # runs once per distinct query per scan (memoized), the

@@ -128,6 +128,7 @@ install -Dm0644 THIRD-PARTY-NOTICES.md   "${STAGE_ZIP}/LICENSE-THIRD-PARTY"
 if [[ "${HAVE_MCP}" = "1" ]]; then
 install -Dm0755 "${MCP_BIN}"                          "${STAGE_ZIP}/mcp/fractalsql-sqlite-mcp"
 install -Dm0644 mcp/README.md                         "${STAGE_ZIP}/mcp/README.md"
+install -Dm0644 mcp/RUN.txt                           "${STAGE_ZIP}/mcp/RUN.txt"
 install -Dm0644 mcp/.mcp-schema-lock                  "${STAGE_ZIP}/mcp/.mcp-schema-lock"
 install -Dm0644 mcp/.mcp-safety-annotations-lock      "${STAGE_ZIP}/mcp/.mcp-safety-annotations-lock"
 install -Dm0644 mcp/manifest.json                     "${STAGE_ZIP}/mcp/manifest.json"
@@ -149,7 +150,7 @@ Quick start:
 SQL surface (2.0):
   fractal_edition()               TEXT
   fractal_version()               TEXT
-  fractal_search(vector, query)      REAL  (cosine distance to SFS-refined query)
+  fractal_sfs_converge(vector, query) REAL  (cosine distance to SFS-refined query)
   fractal_search_explore(emb, query)        TEXT  (Scout-mode SFS aggregate)
   fractal_vector + 15 vector-math functions (canonical BLOB type)
   fractal_config_set / fractal_config_get    per-connection configuration
@@ -194,6 +195,7 @@ if [[ "${HAVE_MCP}" = "1" ]]; then
         # the two lock files go beside the binary: the server looks for them in its own directory
         ./${MCP_BIN}=/usr/local/bin/fractalsql-sqlite-mcp
         ./mcp/README.md=/usr/share/doc/${DEB_NAME}/mcp/README.md
+        ./mcp/RUN.txt=/usr/share/doc/${DEB_NAME}/mcp/RUN.txt
         ./mcp/.mcp-schema-lock=/usr/local/bin/.mcp-schema-lock
         ./mcp/.mcp-safety-annotations-lock=/usr/local/bin/.mcp-safety-annotations-lock
         ./mcp/manifest.json=/usr/share/doc/${DEB_NAME}/mcp/manifest.json
@@ -216,7 +218,7 @@ echo "built ${DEB_OUT}"
 fi
 
 # ---------------------------------------------------------------------
-# .rpm — same install path for consistency with the brief.
+# .rpm — same install path, for consistency with the .deb.
 # ---------------------------------------------------------------------
 RPM_NAME="fractalsql-sqlite${PKG_SUFFIX}"
 RPM_OUT="${DIST_DIR}/${RPM_NAME}-${PKG_ARCH}.rpm"
@@ -246,6 +248,8 @@ install -Dm0755 "${MCP_BIN}" \
     "${STAGE_PKG}/usr/local/bin/fractalsql-sqlite-mcp"
 install -Dm0644 mcp/README.md \
     "${STAGE_PKG}/usr/share/doc/${RPM_NAME}/mcp/README.md"
+install -Dm0644 mcp/RUN.txt \
+    "${STAGE_PKG}/usr/share/doc/${RPM_NAME}/mcp/RUN.txt"
 install -Dm0644 mcp/.mcp-schema-lock \
     "${STAGE_PKG}/usr/local/bin/.mcp-schema-lock"
 install -Dm0644 mcp/.mcp-safety-annotations-lock \

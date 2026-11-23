@@ -27,12 +27,12 @@ if not build(os.path.join(ROOT, "tests", "mock_enterprise_core.c"), ENT) or not 
     print("  FAIL the test libraries did not build"); sys.exit(1)
 
 passes = fails = 0
-def run(lib, calls=1, env=None, sig=None):
+def run(lib, calls=1, env=None, sig=None, pre=""):
     """One shell session: set enterprise_lib, call a ledger function `calls` times. Returns the combined output."""
     if sig is not None: open(lib + ".sig", "wb").write(sig)
     e = {k: v for k, v in os.environ.items() if not k.startswith("FRACTALSQL_ENTERPRISE")}
     e.update(env or {})
-    script = ".load %s\nSELECT fractal_config_set('enterprise_lib','%s');\n%s" % (EXT, lib, "SELECT fractal_ledger_truth_count();\n" * calls)
+    script = ".load %s\nSELECT fractal_config_set('enterprise_lib','%s');\n%s%s" % (EXT, lib, pre, "SELECT fractal_ledger_truth_count();\n" * calls)
     p = subprocess.run([SQLITE3, "-batch", ":memory:"], input=script, capture_output=True, text=True, env=e, timeout=60)
     return p.stdout + p.stderr
 def check(out, want, what, absent=False):
@@ -61,6 +61,8 @@ GONE = os.path.join(W, "gone.so")
 out = run(GONE, sig=b"\2" * 64);              check(out, "could not read enterprise library", "an unreadable library with a well-formed .sig fails closed")
 out = run(GONE, env=OPT_OUT, sig=b"\2" * 64); check(out, "could not load enterprise library", "...and, opted out, fails at the loader")
 out = run(GONE, env=OPT_OUT);                 check(out, "could not load enterprise library", "a library that does not exist and has no .sig")
+out = run(ENT, env=OPT_OUT, pre="SELECT fractal_config_set('ledger_retention','exact');\n"); check(out, "fsql_ledger_set_retention", "exact retention is refused by a library that does not export the retention modes")
+out = run(ENT, env=OPT_OUT, pre="SELECT fractal_config_set('ledger_retention','fade');\n"); check(out, "fsql_ledger_set_retention", "fade (the default) needs no export: a library without the modes still loads", absent=True)
 out = run(NOSYM, env=OPT_OUT);                check(out, "missing expected enterprise symbols", "a library that is not an enterprise core is refused")
 LONG = os.path.join(W, "x" * 1100 + ".so")
 out = run(LONG, env=OPT_OUT);                 check(out, "rror", "a path too long to name its .sig is refused somewhere, not silently accepted")

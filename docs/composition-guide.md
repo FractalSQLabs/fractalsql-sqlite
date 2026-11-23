@@ -40,7 +40,7 @@ here is the pick-list.
 | `fractal_agent_trajectory_predict` | Forecast state by matching a drift delta-vector in history | You need "where is this heading, based on past drift?" |
 | `fractal_agent_detect_loop` | SimHash + Brent cycle detector over a state-vector log | You need a safety monitor on an autonomous agent's state log |
 
-Underneath these, the **Discovery primitives** (`fractal_search`,
+Underneath these, the **Discovery primitives** (`fractal_sfs_converge`,
 `fractal_search_explore`, `fractal_search_trajectory`, `fractal_search_telemetry`,
 `fractal_optimize_portfolio`, the `fractal_dimension_*` family) are also
 ordinary functions you can chain directly when a Universal Agent is more than
@@ -81,6 +81,8 @@ SELECT fractal_rag_agent(
     'What does our runbook say about a node that stops heartbeating?',
     'runbook_chunks', 'emb');
 ```
+
+`runbook_chunks` is a table of runbook passages with an embedding column. You do not have to build it by hand: give the vectorizer a `chunk_size` (`fractal_vectorizer_create('runbook', 'body', 'emb', '{"chunk_size": 800}')`) and it creates `runbook_chunks`, fills it from the long `body` text and embeds each chunk. To answer from one runbook only, add a filter on the chunk table's `parent_id`: `fractal_rag_agent(question, 'runbook_chunks', 'emb', '{"parent_id": 7}')`. The result's `source_row_ids` name the chunks the answer came from. See [vectorizer-setup.md](vectorizer-setup.md).
 
 Compose it yourself only when you want to shape the output or pre-filter the
 corpus with SQL the block doesn't expose yet. In the SQLite integration that

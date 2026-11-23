@@ -1,0 +1,34 @@
+fractalsql-sqlite-mcp: how to start the MCP server
+
+Where it is
+  .deb package    /usr/local/bin/fractalsql-sqlite-mcp
+  .rpm package    /usr/bin/fractalsql-sqlite-mcp
+  macOS archive   mcp/fractalsql-sqlite-mcp, in the unpacked archive
+  Windows MSI     C:\Program Files\FractalSQL\mcp\fractalsql-sqlite-mcp.exe
+  The two .mcp-*-lock files must stay beside the executable: the server refuses to start without them.
+
+Settings (environment)
+  SQLITE_DB_PATH             required   a database file, or :memory:
+  FRACTALSQL_EXTENSION_PATH  required   the FractalSQL extension to load (fractalsql.so, .dylib or .dll)
+  FRACTALSQL_BOOTSTRAP_SQL   optional   a SQL file run once after the extension loads
+
+stdio (the default: a client such as Claude Desktop or Cursor launches the server)
+  SQLITE_DB_PATH=/path/to/data.db \
+  FRACTALSQL_EXTENSION_PATH=/path/to/fractalsql.so \
+  fractalsql-sqlite-mcp
+
+HTTP or HTTPS (a bearer token is required)
+  FSQL_MCP_AUTH_TOKEN=<secret> fractalsql-sqlite-mcp --http 8765
+  FSQL_MCP_AUTH_TOKEN=<secret> fractalsql-sqlite-mcp --https 8765 --tls-cert cert.pem --tls-key key.pem
+
+Check it
+  fractalsql-sqlite-mcp --version
+  fractalsql-sqlite-mcp --list-tools
+
+What it needs
+  Linux    OpenSSL's runtime library (libssl.so.3).
+  macOS    Homebrew's openssl@3 (brew install openssl@3). The files are unsigned: clear quarantine once
+               xattr -d com.apple.quarantine mcp/fractalsql-sqlite-mcp
+  Windows  nothing else; OpenSSL and the C runtime are built in.
+
+All settings are in README.md next to this file.

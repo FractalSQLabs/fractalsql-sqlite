@@ -59,9 +59,9 @@ INSERT INTO demo_alerts (service, message, severity, created_at) VALUES
 
 .print
 .print === 2. Sniper Search: converge to a single best point ===
--- fractal_search(vector, query) is a per-row scalar over a stored column --
+-- fractal_sfs_converge(vector, query) is a per-row scalar over a stored column --
 -- it converges each stored vector toward the query point, fixed at the
--- SFS defaults (fractal_search_debug(query, ...) exposes the tunable
+-- SFS defaults (fractal_sfs_converge_debug(query, ...) exposes the tunable
 -- abstract-space form). The SFS engine runs once per distinct query per
 -- scan, so order a small corpus by distance and take the top row.
 DROP TABLE IF EXISTS demo_points;
@@ -71,7 +71,7 @@ INSERT INTO demo_points (label, pt) VALUES
     ('b', '0.1,0.2,0.0'),
     ('c', '-0.9,0.4,0.0'),
     ('d', '0.0,0.0,1.0');
-SELECT label, fractal_search(pt, '0.6,0.8,0.0') AS dist
+SELECT label, fractal_sfs_converge(pt, '0.6,0.8,0.0') AS dist
   FROM demo_points
  ORDER BY dist
  LIMIT 3;

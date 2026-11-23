@@ -8,6 +8,7 @@
 #include <cctype>
 #include <fstream>
 #include <filesystem>
+#include <exception>
 #include <iostream>
 #include <algorithm>
 #include <string>
@@ -56,7 +57,7 @@ static std::vector<ToolSpec> buildAllTools( Db& db )
         all.insert( all.end(), v.begin(), v.end() );
     Resources::init( &db );
 
-    // 82 tools total: 14+4+23+22+10+5+4. This is what the engine actually
+    // 93 tools total: 23+4+23+23+10+5+5 (Discovery includes fractal_index_list, fractal_index_refresh, fractal_index_ensure and fractal_index_candidates). This is what the engine actually
     // registers, verified against the live extension, and main.cpp checks
     // the same total when it labels a filtered surface.
 
@@ -368,7 +369,7 @@ static int checkSchemaGate( const std::string& lockPath, const std::string& hash
         }
         std::cerr << "WARN: schema lock '" << lockPath << "' not found; the tool-surface drift check is skipped\n";
     }
-    std::string filtered = ( tools.size() == 82 ) ? std::string() : " (filtered surface)";
+    std::string filtered = ( tools.size() == 93 ) ? std::string() : " (filtered surface)";
     if( lockResult == LockCheckResult::Warn )
     {
         std::cerr << "schema hash mismatch: expected " << expected << " got " << hash << " ("
@@ -452,7 +453,7 @@ static std::string findRepoLockPath( const char* fname )
     return std::string( fname );
 }
 
-int main( int argc, char** argv )
+static int runMain( int argc, char** argv )
 {
 #if defined( _WIN32 )
     // The stdio transport carries UTF-8 JSON; Windows text mode would corrupt
@@ -560,4 +561,24 @@ int main( int argc, char** argv )
     StdioConfig stdioCfg;
     stdioCfg.shutdownDrainMs = envIntOr( "FSQL_MCP_SHUTDOWN_DRAIN_MS", 5000 );
     return runStdioTransport( server, stdioCfg );
+}
+
+// Nothing may escape main: an uncaught exception ends the process with std::terminate, which prints no line of ours and
+// leaves the supervisor an abort with no reason. Say what happened and exit with the error status instead.
+int main( int argc, char** argv )
+{
+    try
+    {
+        return runMain( argc, argv );
+    }
+    catch( const std::exception& e )
+    {
+        std::cerr << "fatal: unhandled exception: " << e.what() << "\n";
+        return 1;
+    }
+    catch( ... )
+    {
+        std::cerr << "fatal: unhandled exception of an unknown type\n";
+        return 1;
+    }
 }

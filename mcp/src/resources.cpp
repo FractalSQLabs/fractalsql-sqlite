@@ -14,12 +14,12 @@ namespace fsqlmcp
 
     // _CONFIG_KEYS: the documented, NON-SECRET config surface. BOTH secrets
     // (http_token, enterprise_ledger_key) are deliberately absent.
-    static const std::array<const char*, 15> kConfigKeys{
+    static const std::array<const char*, 17> kConfigKeys{
         "reasoning_plugin", "http_url", "http_model", "http_allow_plaintext",
         "http_embed_url", "http_embed_model", "http_think", "http_think_provider",
-        "http_native_url", "http_num_ctx", "text_to_sql_max_attempts",
+        "http_native_url", "http_response_mode", "http_num_ctx", "text_to_sql_max_attempts",
         "text_to_sql_allowed_statements", "text_to_sql_use_review",
-        "enterprise_lib", "enterprise_require_signature"
+        "enterprise_lib", "enterprise_require_signature", "ledger_retention"
     };
 
     static Json contents( const std::string& uri, const std::string& mime, const std::string& text )
@@ -144,7 +144,7 @@ namespace fsqlmcp
                           { "recipe", "nearest-capability search + budget accounting -> LLM rationale" } },
                     Json{ { "problem", "Which node should this workload land on (with vector refinement)?" },
                           { "agent", "fractal_agent_schedule_workload" },
-                          { "recipe", "fractal_search refine + nearest node -> LLM rationale" } },
+                          { "recipe", "fractal_sfs_converge refine + nearest node -> LLM rationale" } },
                     Json{ { "problem", "Should I block this proposed action (is it near a known-bad state)?" },
                           { "agent", "fractal_agent_outlier_intercept" },
                           { "recipe", "distance-to-bad-state safety barrier -> LLM justification" } },

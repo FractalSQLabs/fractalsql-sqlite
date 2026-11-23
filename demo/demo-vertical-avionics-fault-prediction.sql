@@ -135,10 +135,14 @@ SELECT fractal_agent_track_anomaly(
 .print === 5. Reasoning: classify the deviation ===
 
 SELECT fractal_reason(
-    'one-line classification of this flight-path deviation: sensor fault, control-surface fault, or weather',
-    (SELECT fractal_search_trajectory('afp_flights', 'current',
-            (SELECT baseline FROM afp_flights WHERE flight = 'AC-09'),
-            (SELECT current  FROM afp_flights WHERE flight = 'AC-09'), 3)));
+    'one-line read of this flight-path deviation: does the evidence fit a sensor fault, a control-surface fault or weather, or is it indeterminate from these numbers alone?',
+    json_object(
+        'flight', 'AC-09',
+        'nearest_fleet_trajectories',
+            (SELECT json(fractal_search_trajectory('afp_flights', 'current',
+                    (SELECT baseline FROM afp_flights WHERE flight = 'AC-09'),
+                    (SELECT current  FROM afp_flights WHERE flight = 'AC-09'), 3))),
+        'note', 'distances are cosine distances between the flight''s baseline-to-current change and each fleet flight''s; no sensor, actuator or weather data is included'));
 
 .print
 .print === Demo complete ===

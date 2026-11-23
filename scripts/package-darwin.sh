@@ -11,15 +11,16 @@
 # The tarball also bundles the MCP server (mcp/fractalsql-sqlite-mcp),
 # built from source right here with clang — plain C++17 + the vendored
 # sqlite3 amalgamation + Homebrew's OpenSSL (not in the macOS SDK, so
-# -I/-L point at `brew --prefix openssl@3` explicitly). Built once per
-# arch, same -arch cross-build posture as the dylib above; skipped
-# with a warning if Homebrew's openssl@3 isn't installed.
+# -I/-L point at `brew --prefix openssl@3` explicitly) and linked to it
+# DYNAMICALLY, so Homebrew patches it and none of it is shipped. Built once per
+# arch, natively on that arch's runner; skipped with a warning if Homebrew's
+# openssl@3 isn't installed.
 #
 # The extension builds natively with clang against the vendored darwin
 # core archive (include/darwin-<arch>/libfractalsql-community-sovereign-c.a),
 # statically linked — same posture as the Linux .so and the Windows DLL:
-# zero runtime deps beyond libSystem. arm64 builds native; x86_64 can be
-# cross-built on an Apple Silicon host via FSQL_DARWIN_ARCH.
+# zero runtime deps beyond libSystem. Each arch builds natively on its own
+# runner; FSQL_DARWIN_ARCH can still select x86_64 from an Apple Silicon host.
 #
 # Usage:
 #   ./scripts/package-darwin.sh
@@ -103,12 +104,10 @@ echo "== building fractalsql.dylib for darwin-${ARCH} (core: community-sovereign
 # the Makefile. No -fvisibility=hidden — sqlite3_fractalsql_init must
 # stay exported for SQLite's loader.
 #
-# -arch is not optional: both release legs run on the arm64 macos-15
-# image, and without it clang targets the host (arm64) even on the
-# x86_64 leg — arm64 objects against the x86_64 vendored archive make
-# ld silently skip every archive member, so all core symbols go
-# undefined ("symbol(s) not found for architecture arm64" in the
-# x86_64 job).
+# -arch keeps the output architecture explicit. It matters when building x86_64
+# from an Apple Silicon host: without it clang targets the host (arm64), and
+# arm64 objects against the x86_64 vendored archive make ld silently skip every
+# archive member, so all core symbols go undefined. Natively it is harmless.
 clang -std=c11 -O3 -fPIC \
     -arch "${ARCH}" \
     -ffunction-sections -fdata-sections \
@@ -148,6 +147,7 @@ if [[ "${HAVE_MCP}" = "1" ]]; then
     mkdir -p "${STAGE}/mcp"
     install -m 0755 mcp/fractalsql-sqlite-mcp                 "${STAGE}/mcp/fractalsql-sqlite-mcp"
     install -m 0644 mcp/README.md                             "${STAGE}/mcp/README.md"
+    install -m 0644 mcp/RUN.txt                               "${STAGE}/mcp/RUN.txt"
     install -m 0644 mcp/.mcp-schema-lock                      "${STAGE}/mcp/.mcp-schema-lock"
     install -m 0644 mcp/.mcp-safety-annotations-lock          "${STAGE}/mcp/.mcp-safety-annotations-lock"
     install -m 0644 mcp/manifest.json                         "${STAGE}/mcp/manifest.json"
@@ -186,7 +186,8 @@ MCP server (mcp/fractalsql-sqlite-mcp):
   per FractalSQL function, for agent clients (Claude Desktop, Cursor,
   etc.). Unsigned, like the dylib above — clear quarantine first:
       xattr -d com.apple.quarantine mcp/fractalsql-sqlite-mcp
-  See mcp/README.md for usage.
+  It uses Homebrew's openssl@3 (brew install openssl@3); the dylib does not.
+  How to start it: mcp/RUN.txt. All settings: mcp/README.md.
 EOF
 fi
 

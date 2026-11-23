@@ -20,7 +20,9 @@ fractal_agent_trajectory_predict destructive=0 readOnly=1 idempotent=1 openWorld
 fractal_audit_log destructive=1 readOnly=0 idempotent=0 openWorld=0 secret=0
 fractal_audit_unpack destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
 fractal_change_point_detect destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
+fractal_chunk_text destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
 fractal_config_get destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
+fractal_config_keys destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
 fractal_config_set destructive=1 readOnly=0 idempotent=0 openWorld=0 secret=1
 fractal_configure_reasoning destructive=1 readOnly=0 idempotent=0 openWorld=0 secret=1
 fractal_cortical_folding destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
@@ -37,6 +39,14 @@ fractal_embed destructive=0 readOnly=0 idempotent=0 openWorld=1 secret=1
 fractal_explain_result destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
 fractal_feedback_report destructive=1 readOnly=0 idempotent=0 openWorld=0 secret=0
 fractal_hybrid_clinical_search destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
+fractal_index_candidates destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
+fractal_index_create destructive=1 readOnly=0 idempotent=0 openWorld=0 secret=0
+fractal_index_drop destructive=1 readOnly=0 idempotent=0 openWorld=0 secret=0
+fractal_index_ensure destructive=1 readOnly=0 idempotent=0 openWorld=0 secret=0
+fractal_index_info destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
+fractal_index_list destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
+fractal_index_rebuild destructive=1 readOnly=0 idempotent=0 openWorld=0 secret=0
+fractal_index_refresh destructive=1 readOnly=0 idempotent=0 openWorld=0 secret=0
 fractal_isolate_background destructive=1 readOnly=0 idempotent=0 openWorld=0 secret=0
 fractal_ledger_compact destructive=1 readOnly=0 idempotent=0 openWorld=0 secret=0
 fractal_ledger_flush destructive=1 readOnly=0 idempotent=0 openWorld=0 secret=0
@@ -59,10 +69,11 @@ fractal_reason destructive=0 readOnly=0 idempotent=0 openWorld=1 secret=1
 fractal_schema_context destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
 fractal_search destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
 fractal_search_agent destructive=0 readOnly=0 idempotent=0 openWorld=1 secret=1
-fractal_search_debug destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
 fractal_search_explore destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
 fractal_search_telemetry destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
 fractal_search_trajectory destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
+fractal_sfs_converge destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
+fractal_sfs_converge_debug destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
 fractal_spectrogram_entropy destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
 fractal_sql_agent destructive=1 readOnly=0 idempotent=0 openWorld=1 secret=1
 fractal_state_fingerprint destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
@@ -79,4 +90,5 @@ fractal_vectorizer_drop destructive=1 readOnly=0 idempotent=0 openWorld=0 secret
 fractal_vectorizer_pause destructive=1 readOnly=0 idempotent=0 openWorld=0 secret=0
 fractal_vectorizer_process_queue destructive=1 readOnly=0 idempotent=0 openWorld=0 secret=0
 fractal_vectorizer_resume destructive=1 readOnly=0 idempotent=0 openWorld=0 secret=0
+fractal_vectorizer_status destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0
 fractal_version destructive=0 readOnly=1 idempotent=1 openWorld=0 secret=0

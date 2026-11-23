@@ -202,3 +202,26 @@ components. Mirrors core's own THIRD-PARTY-NOTICES-COMMUNITY.md.
   (edges minus vertices plus connected components), not the full
   simplicial first homology group the cited paper's boundary-matrix
   reduction method would produce.
+
+### OpenSSL (MCP server, Windows build)
+Component: OpenSSL 3.x (`libssl`, `libcrypto`), used by the MCP server's HTTPS
+transport. It is linked statically into the Windows MCP binary (vcpkg
+`openssl:x64-windows-static`) and redistributed inside it. The Linux and
+macOS MCP binaries link OpenSSL dynamically (the host's own library on Linux,
+Homebrew's `openssl@3` on macOS) and do not distribute it. The SQLite
+extension does not use it.
+Source: https://www.openssl.org/
+License: Apache License, Version 2.0
+
+Copyright 1995-<year of the release> The OpenSSL Project Authors. All Rights
+Reserved. Individual OpenSSL source files carry their own years and, in places,
+other holders (for example Oracle and Nokia); the header of each file in the
+OpenSSL source tree states the exact line. OpenSSL's own `LICENSE.txt` is the
+unmodified Apache License 2.0 text and the source tree has no separate NOTICE
+file.
+
+Licensed under the Apache License, Version 2.0; the full text of that licence
+is the `LICENSE` file in this distribution (this project is Apache-2.0 too).
+Unless required by applicable law or agreed to in writing, the software is
+distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+either express or implied.

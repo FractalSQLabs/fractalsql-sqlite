@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 /* Extract best_point doubles from fsql_search_ptr's result JSON
- * (fractal_search/fractal_search_debug). Returns the count parsed, or
+ * (fractal_sfs_converge/fractal_sfs_converge_debug). Returns the count parsed, or
  * -1 on malformed input. */
 int fsql_extract_best_point(const char *json, double *out, int cap);
 

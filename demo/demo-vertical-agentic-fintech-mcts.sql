@@ -150,6 +150,8 @@ SELECT fractal_sql_agent(
 -- 0-indexed scan position, mapped back to alloc_id), then reasons over both.
 .print
 .print === 7. Portfolio rebalance (optimizer + nearest prior allocation) ===
+DROP TABLE IF EXISTS temp.last_scan;
+CREATE TEMP TABLE last_scan AS
 WITH opt AS (SELECT fractal_optimize_portfolio('0.05,0.1', '1,0,0,1', 2, 42) AS j),
      t AS (SELECT json_extract(value, '$.doc_id')   AS doc_id,
                   json_extract(value, '$.distance') AS dist
@@ -163,8 +165,10 @@ SELECT (SELECT json_extract(j, '$.sharpe') FROM opt)   AS sharpe,
 FROM t
 JOIN (SELECT alloc_id, (row_number() OVER (ORDER BY rowid) - 1) AS doc_id
         FROM historical_allocations) m USING (doc_id);
+SELECT * FROM temp.last_scan;
 .print --- rationale (fractal_reason over both halves) ---
-SELECT fractal_reason('one-line rebalance rationale for this portfolio');
+SELECT fractal_reason('one-line rebalance rationale for this portfolio',
+    json_object('scan', (SELECT json_group_array(json_object('sharpe', sharpe, 'weights', json(weights), 'nearest_alloc_id', nearest_alloc_id, 'nearest_distance', nearest_distance)) FROM temp.last_scan)));
 .print --- the shipped agent: same composition, one call ---
 SELECT fractal_agent_rebalance_sibling(
     '0.05,0.1', '1,0,0,1', 2, 'historical_allocations', 'weights', '0.5,0.5', 42, 5, 'alloc_id');

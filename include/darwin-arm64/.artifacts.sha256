@@ -1,6 +1,6 @@
-93bfde933a61f5f440a4661df6a1c80ede8fac66455ad2f4721b4f99f1101927  ./fractalsql-reasoning-http.so
-c233b9cf44778789b91c6887c3dddf9ed1e96718c0d09be9aa497c1808fd114c  ./fractalsql-reasoning-http.so.sig
-74639c864ff0b71cf02c96b614d4012670986047ad7cde6ca5d4d4c2e8923f73  ./libfractalsql-community-minimal-c.a
-15fcda12bc97b76d7502e6996bb952487e7d051ea7a24378c1a78db759e60415  ./libfractalsql-community-minimal-c.dylib
-caadac4a5e47c04c2e0125f5b777babedd25a3830f1920dbe5d0cca5399e3a77  ./libfractalsql-community-sovereign-c.a
-82f9d312daac690cb142d0688162bb34aecc4e73eb4c7c266f5e046ae695bd79  ./libfractalsql-community-sovereign-c.dylib
+51d9ad763d1f3f666b70f209534a1195dc3c1f9dc7b4415c4ee3fc896d039a6b  ./fractalsql-reasoning-http.so
+156aa458a23309290b8646e5ce66b7934f3cc2ed592b345db4873e08412c458f  ./fractalsql-reasoning-http.so.sig
+46fde5224f88ce323807dc2052b5c5832fd6b4abadf697f5d03d53b06fabb9fb  ./libfractalsql-community-minimal-c.a
+e6379814e7cbaed3662e58913b55aeb784a064671a6433a047fedcd2291c0d72  ./libfractalsql-community-minimal-c.dylib
+a1561a861ff939ff9249bec8ba7ddd12dcce1100e602cc807361f05013e47586  ./libfractalsql-community-sovereign-c.a
+a7f10a21138736088d272d81c715dba0ebf3e3c1a9124793a131d19a4ef65457  ./libfractalsql-community-sovereign-c.dylib

@@ -146,11 +146,23 @@ static void sb_free(StrBuf *b) {
     free(b->buf);
     b->buf = NULL; b->len = 0; b->cap = 0; b->oom = 0;
 }
+/* strtod with an end check: a non-numeric or non-finite value reads as 0 instead of leaking
+ * "nan"/"inf" into JSON. */
+static double da_strtod(const char *s) {
+    char *e = NULL;
+    double v = strtod(s, &e);
+    return (e == s || !isfinite(v)) ? 0.0 : v;
+}
+
 static int sb_reserve(StrBuf *b, size_t need) {
     if (b->oom) return -1;
+    if (need > ((size_t)1 << 30) || b->len > ((size_t)1 << 30) - need - 1) { b->oom = 1; return -1; }
     if (b->len + need + 1 <= b->cap) return 0;
     size_t nc = b->cap ? b->cap : 256;
-    for (; nc < b->len + need + 1; nc *= 2);
+    while (nc < b->len + need + 1) {
+        if (nc > ((size_t)1 << 29)) { nc = b->len + need + 1; break; }
+        nc *= 2;
+    }
     char *nb = (char *)realloc(b->buf, nc);
     if (!nb) { b->oom = 1; return -1; }
     b->buf = nb; b->cap = nc;
@@ -379,15 +391,47 @@ static int da_require_reasoning(const FsqlState *st, const char *who,
  * still returns plain NULL: that is a setup mistake, not a transient
  * endpoint failure, and failing loudly on it is the documented
  * behavior. */
+/* The reasoning plugin tells the model to answer ONLY from the context JSON it is handed, and an agent states
+ * its computed findings in the prompt, so with a bare or identifier-only context the model sometimes answers
+ * "I don't have any data". Hand the findings over as data too: the context becomes
+ * {"agent": who, "findings": prompt, "context": <the caller's context>}. Built with SQLite's own JSON functions
+ * (a caller context that is not valid JSON is carried as a JSON string). Falls back to the original context if
+ * the wrapper cannot be built. Returns a malloc'd string or NULL. */
+static char *da_findings_context(const FsqlState *st, const char *who, const char *prompt,
+                                 const char *context_json) {
+    const int has_ctx = context_json && *context_json && strcmp(context_json, "{}") != 0;
+    const char *sql = has_ctx
+        ? "SELECT json_object('agent', ?1, 'findings', ?2, 'context', "
+          "json(CASE WHEN json_valid(?3) THEN ?3 ELSE json_quote(?3) END))"
+        : "SELECT json_object('agent', ?1, 'findings', ?2)";
+    sqlite3_stmt *stmt = NULL;
+    char *out = NULL;
+    if (sqlite3_prepare_v2(st->db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, who, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, prompt ? prompt : "", -1, SQLITE_TRANSIENT);
+        if (has_ctx) sqlite3_bind_text(stmt, 3, context_json, -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const unsigned char *t = sqlite3_column_text(stmt, 0);
+            if (t) out = strdup((const char *)t);
+        }
+    }
+    sqlite3_finalize(stmt);
+    return out;
+}
+
 static char *da_reason(FsqlState *st, const char *who, const char *prompt,
                        const char *context_json, char *err, size_t err_cap,
                        int *reasoning_failed) {
     if (reasoning_failed) *reasoning_failed = 0;
     if (da_require_reasoning(st, who, err, err_cap) != 0) return NULL;
     char *resp = NULL;
-    if (fsql_reasoning_generate(st, FSQL_REASONING_TIER_CHAT, prompt,
-                                (context_json && *context_json) ? context_json : "{}",
-                                &resp, err, err_cap) != 0) {
+    char *wrapped = da_findings_context(st, who, prompt, context_json);
+    const char *ctx_for_model = wrapped ? wrapped
+                              : ((context_json && *context_json) ? context_json : "{}");
+    const int gen_rc = fsql_reasoning_generate(st, FSQL_REASONING_TIER_CHAT, prompt,
+                                               ctx_for_model, &resp, err, err_cap);
+    free(wrapped);
+    if (gen_rc != 0) {
         if (reasoning_failed && st->cfg.agent_partial_reasoning_fail)
             *reasoning_failed = 1;
         return NULL;
@@ -839,6 +883,26 @@ static void sb_telemetry_call(StrBuf *sql, const char *table,
     sb_sql_lit(sql, emb_col);
 }
 
+/* True when agent_use_index lets this table and column go through a fractal_index. Off by default: an index is approximate in WHICH rows it
+ * examines (every distance is still exact), so an agent that searched through it could, rarely, pick a different nearest row than the
+ * exact scan. "on" uses any index that exists on the table and column; "auto" uses one only when it is ready, calibrated to its target
+ * recall, and the table has at least agent_index_min_rows rows. */
+static int da_use_index_for(const FsqlState *st, const char *table, const char *emb_col) {
+    int mode = st->cfg.agent_use_index;
+    if (!mode) return 0;
+    if (mode == 2)
+        return fsql_index_ready_for_agents(st->db, table, emb_col, st->cfg.agent_index_min_rows);
+    sqlite3_stmt *s = NULL;
+    int found = 0;
+    if (sqlite3_prepare_v2(st->db, "SELECT 1 FROM fractal_index_meta WHERE tbl=?1 AND col=?2 LIMIT 1", -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(s, 1, table, -1, SQLITE_STATIC);
+        sqlite3_bind_text(s, 2, emb_col, -1, SQLITE_STATIC);
+        found = sqlite3_step(s) == SQLITE_ROW;
+    }
+    sqlite3_finalize(s);                      /* the catalog table does not exist until the first index is built: no index, exact scan */
+    return found;
+}
+
 /* The shared nearest-row telemetry search phase: builds the
  * "fractal_search_telemetry('table','col',?1,1)" call, runs
  * da_nearest1, and reports every failure on ctx exactly as the inline
@@ -853,7 +917,15 @@ static int da_nearest_telemetry_row(sqlite3_context *ctx, const FsqlState *st,
                                     char *err, size_t err_cap,
                                     const char *empty_fmt) {
     StrBuf fnsql; sb_init(&fnsql);
-    sb_telemetry_call(&fnsql, table, emb_col);
+    if (da_use_index_for(st, table, emb_col)) {
+        /* fractal_search answers {doc_id (the rowid), distance, scan_pos} like the telemetry search, through the index */
+        sb_puts(&fnsql, "fractal_search(");
+        sb_sql_lit(&fnsql, table);
+        sb_puts(&fnsql, ",");
+        sb_sql_lit(&fnsql, emb_col);
+    } else {
+        sb_telemetry_call(&fnsql, table, emb_col);
+    }
     sb_puts(&fnsql, ",?1,1)");
     if (sb_failed(&fnsql)) {
         sb_free(&fnsql);
@@ -1316,9 +1388,9 @@ static void agent_route_task_fn(sqlite3_context *ctx, int argc,
         StrBuf out; sb_init(&out);
         sb_puts(&out, "{\"routed_to\":");
         if (routed_to) sb_json_string(&out, routed_to); else sb_puts(&out, "null");
-        sb_printf(&out, ",\"confidence\":%.10f,\"remaining_budget\":%d,"
+        sb_printf(&out, ",\"confidence\":%.10f,\"remaining_budget\":%lld,"
                         "\"rationale\":null,\"reasoning_step_failed\":",
-                 confidence, budget - cost_per_route);
+                 confidence, (long long)budget - (long long)cost_per_route);
         sb_json_string(&out, err);
         sb_puts(&out, "}");
         free(routed_to);
@@ -1334,8 +1406,8 @@ static void agent_route_task_fn(sqlite3_context *ctx, int argc,
     StrBuf audit; sb_init(&audit);
     sb_puts(&audit, "{\"routed_to\":");
     if (routed_to) sb_json_string(&audit, routed_to); else sb_puts(&audit, "null");
-    sb_printf(&audit, ",\"confidence\":%.10f,\"remaining_budget\":%d,\"rationale\":",
-             confidence, budget - cost_per_route);
+    sb_printf(&audit, ",\"confidence\":%.10f,\"remaining_budget\":%lld,\"rationale\":",
+             confidence, (long long)budget - (long long)cost_per_route);
     sb_json_string(&audit, rationale);
     sb_puts(&audit, "}");
     if (!sb_failed(&audit))
@@ -1345,8 +1417,8 @@ static void agent_route_task_fn(sqlite3_context *ctx, int argc,
     StrBuf out; sb_init(&out);
     sb_puts(&out, "{\"routed_to\":");
     if (routed_to) sb_json_string(&out, routed_to); else sb_puts(&out, "null");
-    sb_printf(&out, ",\"confidence\":%.10f,\"remaining_budget\":%d,\"rationale\":",
-             confidence, budget - cost_per_route);
+    sb_printf(&out, ",\"confidence\":%.10f,\"remaining_budget\":%lld,\"rationale\":",
+             confidence, (long long)budget - (long long)cost_per_route);
     sb_json_string(&out, rationale);
     sb_puts(&out, "}");
     free(routed_to); free(rationale);
@@ -1605,15 +1677,28 @@ static void agent_recall_hybrid_fn(sqlite3_context *ctx, int argc,
         "fractalsql: query_vec must be a CSV/JSON vector");
     if (!qv_json) { free(cohort); return; }
 
+    /* agent_use_index: through fractal_search with the cohort as its ids set (exact for a short cohort, the index plus a filter for a long
+     * one) instead of the exact cohort scan. Same row locators (the rowid), same distances. */
+    int via_index = da_use_index_for(st, mem_table, vec_col);
     StrBuf sql; sb_init(&sql);
     sb_puts(&sql, "SELECT '[' || group_concat(json_object('mem_id', x.idv, "
                   "'content', x.cnt)) || ']' FROM "
-                  "(SELECT value AS j FROM json_each(fractal_hybrid_clinical_search(");
-    sb_sql_lit(&sql, mem_table);
-    sb_puts(&sql, ",");
-    sb_sql_lit(&sql, vec_col);
-    sb_printf(&sql, ",?1,?2,%d))) r JOIN "
-             "(SELECT ", k);
+                  "(SELECT value AS j FROM json_each(");
+    if (via_index) {
+        sb_puts(&sql, "fractal_search(");
+        sb_sql_lit(&sql, mem_table);
+        sb_puts(&sql, ",");
+        sb_sql_lit(&sql, vec_col);
+        sb_printf(&sql, ",?1,%d,json_object('ids',json(?2)))", k);
+    } else {
+        sb_puts(&sql, "fractal_hybrid_clinical_search(");
+        sb_sql_lit(&sql, mem_table);
+        sb_puts(&sql, ",");
+        sb_sql_lit(&sql, vec_col);
+        sb_printf(&sql, ",?1,?2,%d)", k);
+    }
+    sb_puts(&sql, ")) r JOIN "
+             "(SELECT ");
     sb_sql_ident(&sql, id_col);
     sb_puts(&sql, " AS idv, ");
     if (content_col) sb_sql_ident(&sql, content_col); else sb_puts(&sql, "NULL");
@@ -2108,8 +2193,8 @@ static void agent_patient_deterioration_triage_fn(sqlite3_context *ctx, int argc
  *   Pure analytics, no LLM step. Self-contained: disables diversify
  *   itself at the end (unlike Engine F, which leaves it on).
  * ====================================================================== */
-static void agent_feedback_audit_fn(sqlite3_context *ctx, int argc,
-                                    sqlite3_value **argv) {
+static void agent_feedback_audit_impl(sqlite3_context *ctx, int argc,
+                                      sqlite3_value **argv, int *diversify_on) {
     FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
     char err[512] = { 0 };
     if (argc < 5 || argc > 7) {
@@ -2147,8 +2232,21 @@ static void agent_feedback_audit_fn(sqlite3_context *ctx, int argc,
                          "fractal_agent_feedback_audit: no catalog rows in %s"))
         return;
 
+    /* warmup_count becomes a LIMIT: a negative value means "no limit" to SQLite, and a huge one
+     * runs that many telemetry searches. */
+    if (warmup_count < 1 || warmup_count > 1000) {
+        sqlite3_result_error(ctx,
+            "fractal_agent_feedback_audit: warmup_count must be 1..1000", -1);
+        return;
+    }
+    if (k < 1 || k > 1000) {
+        sqlite3_result_error(ctx, "fractal_agent_feedback_audit: k must be 1..1000", -1);
+        return;
+    }
+
     /* 1. Enable repulsion + the audit defaults. */
     da_exec_ignore(st, "SELECT fractal_diversify_enable()");
+    *diversify_on = 1;
     da_exec_ignore(st,
         "SELECT fractal_diversify_set_params("
         "'{\"window_n\":5,\"repulsion_sigma\":0.3,\"repulsion_weight\":0.5}')");
@@ -2241,6 +2339,15 @@ static void agent_feedback_audit_fn(sqlite3_context *ctx, int argc,
     sb_free(&out);
 }
 
+/* Every exit, success or error, leaves the session-global Diversify switch off once this call
+ * turned it on; validation failures before that point leave the caller's setting alone. */
+static void agent_feedback_audit_fn(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    FsqlState *st = (FsqlState *)sqlite3_user_data(ctx);
+    int diversify_on = 0;
+    agent_feedback_audit_impl(ctx, argc, argv, &diversify_on);
+    if (diversify_on) da_exec_ignore(st, "SELECT fractal_diversify_disable()");
+}
+
 /* ======================================================================
  * Engine J: fractal_agent_schedule_workload(task_vec, node_table,
  *   node_emb_col, node_id_col, iterations DEFAULT 30, population
@@ -2289,10 +2396,10 @@ static void agent_schedule_workload_fn(sqlite3_context *ctx, int argc,
         "fractalsql: task_vec must be a CSV/JSON vector");
     if (!task_json) return;
 
-    /* 1. Refine the task vector (fractal_search's "sniper search"). */
+    /* 1. Refine the task vector (fractal_sfs_converge's "sniper search"). */
     char callsql[160];
     snprintf(callsql, sizeof callsql,
-             "SELECT json_extract(fractal_search_debug(?1,%d,%d,2),'$.best_point')",
+             "SELECT json_extract(fractal_sfs_converge_debug(?1,%d,%d,2),'$.best_point')",
              iterations, population);
     char *refined_json = da_scalar_text(st, callsql, bind_one_text,
                                         &(OneText){ task_json }, err, sizeof err);
@@ -2316,7 +2423,7 @@ static void agent_schedule_workload_fn(sqlite3_context *ctx, int argc,
     StrBuf prompt; sb_init(&prompt);
     sb_printf(&prompt,
              "Schedule this workload onto node %s (cosine distance %.10f after "
-             "fractal_search refinement). Justify the placement in one sentence.",
+             "fractal_sfs_converge refinement). Justify the placement in one sentence.",
              assigned ? assigned : "?", dist);
     if (sb_failed(&prompt)) { sb_free(&prompt); free(assigned); sqlite3_result_error_nomem(ctx); return; }
     int rfailed = 0;
@@ -2584,7 +2691,7 @@ static void agent_detour_classify_fn(sqlite3_context *ctx, int argc,
     char *bc_text = da_scalar_text(st, bcsql, bind_one_text, &(OneText){ gps_json }, err, sizeof err);
     free(gps_json);
     if (!bc_text) { da_result_err(ctx, err); return; }
-    double bc = atof(bc_text);
+    double bc = da_strtod(bc_text);
     free(bc_text);
 
     char *resolved_id = da_resolve_id(st, vehicle_table, id_col, nearest_doc, err, sizeof err);
@@ -2717,7 +2824,7 @@ static void agent_track_anomaly_fn(sqlite3_context *ctx, int argc,
                                     bind_one_text, &(OneText){ heading_json }, err, sizeof err);
     free(heading_json);
     if (!dfa_text) { da_result_err(ctx, err); return; }
-    double dfa = atof(dfa_text);
+    double dfa = da_strtod(dfa_text);
     free(dfa_text);
 
     char *resolved_id = da_resolve_id(st, track_table, id_col, nearest_doc, err, sizeof err);
@@ -2931,7 +3038,7 @@ static void agent_regime_triage_fn(sqlite3_context *ctx, int argc,
     char *dfa_text = da_scalar_text(st, "SELECT fractal_dimension_dfa(?1)",
                                     bind_one_text, &(OneText){ series_json }, err, sizeof err);
     if (!dfa_text) { free(series_json); da_result_err(ctx, err); return; }
-    double dfa = atof(dfa_text);
+    double dfa = da_strtod(dfa_text);
     free(dfa_text);
 
     char driftsql[128];
@@ -3178,22 +3285,6 @@ static void agent_diverse_portfolios_fn(sqlite3_context *ctx, int argc,
 /* Registration                                                        */
 /* ------------------------------------------------------------------ */
 
-/* Only the agents that read and compute are INNOCUOUS. Those that call the
- * reasoning endpoint are not, so SQLite refuses them inside a view, trigger
- * or CHECK constraint when trusted_schema is off. A function missing from
- * this list is the safe default: not innocuous. */
-static int domain_agent_is_innocuous(const char *name) {
-    static const char *const pure[] = {
-        "fractal_agent_recall_hybrid",
-        /* fractal_agent_recommend_diverse and fractal_agent_feedback_audit
-         * are deliberately absent: both enable / reconfigure / disable the
-         * Diversify engine, i.e. they mutate session state. */
-    };
-    for (size_t i = 0; i < sizeof pure / sizeof pure[0]; i++)
-        if (strcmp(name, pure[i]) == 0) return 1;
-    return 0;
-}
-
 int fsql_domain_agents_register(sqlite3 *db, FsqlState *st) {
 
     struct {
@@ -3221,8 +3312,9 @@ int fsql_domain_agents_register(sqlite3 *db, FsqlState *st) {
     };
 
     for (size_t i = 0; i < sizeof(fns) / sizeof(fns[0]); i++) {
-        const int flags = SQLITE_UTF8 |
-                          (domain_agent_is_innocuous(fns[i].name) ? SQLITE_INNOCUOUS : 0);
+        /* DIRECTONLY, not INNOCUOUS: these reach the reasoning endpoint and change connection state
+         * (see fractal_agent_feedback_audit), so a view or trigger in a database file must not run them. */
+        const int flags = SQLITE_UTF8 | SQLITE_DIRECTONLY;
         int rc = sqlite3_create_function_v2(
             db, fns[i].name, fns[i].narg, flags, st, fns[i].fn,
             NULL, NULL, NULL);

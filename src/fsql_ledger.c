@@ -507,24 +507,15 @@ static int ledger_chain_read_prev(const FsqlLedgerCtx *lc, int kind,
  * ledger_materialize / the audit_log write path -- see the file header
  * for why that lock is needed here). */
 /* The chain table is append-only and, left alone, grows without
- * bound. FSQL_LEDGER_MAX_ROWS (default 10,000,000; 0 disables the cap) is the
+ * bound. The config key ledger_max_rows (default 10,000,000, or FSQL_LEDGER_MAX_ROWS when set; 0 disables the cap) is the
  * highest row id the table may reach. At the cap, appends fail with a clear
  * error instead of filling the disk; the operator archives the database (the
  * chain is self-contained and verifiable on its own) and starts a new one.
  * Retention: rows are never deleted in place, because deleting any row breaks
  * the hash chain. */
-static long long ledger_max_rows(void) {
-    static long long cached = -2;
-    if (cached == -2) {
-        const char *e = getenv("FSQL_LEDGER_MAX_ROWS");
-        cached = 10000000LL;
-        if (e && *e) {
-            char *end = NULL;
-            long long v = strtoll(e, &end, 10);
-            if (end && *end == '\0' && v >= 0) cached = v;
-        }
-    }
-    return cached;
+/* The cap is the config key ledger_max_rows (fractal_config_set), read live. FSQL_LEDGER_MAX_ROWS in the environment is the initial value. */
+static long long ledger_max_rows(const FsqlState *st) {
+    return st ? (long long)st->cfg.ledger_max_rows : 10000000LL;
 }
 
 /* ------------------------------------------------------------------ */
@@ -621,7 +612,7 @@ static int ledger_chain_insert(const FsqlLedgerCtx *lc, int kind,
                                const void *payload, size_t len,
                                char *err, size_t err_cap) {
     {
-        long long cap = ledger_max_rows();
+        long long cap = ledger_max_rows(lc->st);
         if (cap > 0) {
             sqlite3_stmt *cs = NULL;
             long long top = 0;
@@ -632,7 +623,7 @@ static int ledger_chain_insert(const FsqlLedgerCtx *lc, int kind,
             if (cs) sqlite3_finalize(cs);
             if (top >= cap) {
                 snprintf(err, err_cap,
-                         "fractalsql: ledger chain is full (%lld rows, FSQL_LEDGER_MAX_ROWS); "
+                         "fractalsql: ledger chain is full (%lld rows, ledger_max_rows); "
                          "archive this database and start a new one", top);
                 return -1;
             }
@@ -1580,14 +1571,22 @@ static void ledger_audit_log_fn(sqlite3_context *sctx, int argc,
         while (q < pe - 1 && (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r')) q++;
         obj_empty = (q == pe - 1);
     }
-    char actor_blk[256 + 64];
-    snprintf(actor_blk, sizeof actor_blk,
-             "{\"client\":\"%s\",\"attested\":false}", actor_esc);
+    /* Sized from the escaped actor: a control character expands to six bytes, so a
+     * fixed buffer would truncate the block into invalid JSON and defeat redaction. */
+    size_t actor_cap = strlen(actor_esc) + sizeof("{\"client\":\"\",\"attested\":false}") + 1;
+    char *actor_blk = (char *)malloc(actor_cap);
+    if (!actor_blk) {
+        free(actor_esc); free(etype);
+        sqlite3_result_error(sctx, "fractalsql: out of memory", -1);
+        return;
+    }
+    snprintf(actor_blk, actor_cap, "{\"client\":\"%s\",\"attested\":false}", actor_esc);
     free(actor_esc);
     size_t js_len = sizeof("{\"type\":\"\",\"entry\":{\"value\":,\"_actor\":}}") +
                     strlen(etype) + plen + strlen(actor_blk) + 8;
     char *js = (char *)malloc(js_len);
     if (!js) {
+        free(actor_blk);
         free(etype);
         sqlite3_result_error(sctx, "fractalsql: out of memory", -1);
         return;
@@ -1600,6 +1599,7 @@ static void ledger_audit_log_fn(sqlite3_context *sctx, int argc,
     else
         snprintf(js, js_len, "{\"type\":\"%s\",\"entry\":{\"value\":%.*s,\"_actor\":%s}}",
                  etype, (int)(pe - pb), pb, actor_blk);
+    free(actor_blk);
     free(etype);
 
     /* Redact the text the entry carries before it is appended. The
@@ -1650,6 +1650,7 @@ static void ledger_set_actor_fn(sqlite3_context *sctx, int argc,
     (void)argc;
     FsqlState *st = ledger_state_of(sctx);
     if (!st) return;
+    FSQL_REFUSE_IN_GENERATED_SQL(sctx, st, "fractal_set_actor");
     const char *label = (sqlite3_value_type(argv[0]) == SQLITE_TEXT)
                             ? (const char *)sqlite3_value_text(argv[0]) : "";
     if (!label) label = "";
@@ -1889,7 +1890,7 @@ int fsql_ledger_register(sqlite3 *db, FsqlState *st) {
         int direct;     /* 1 = SQLITE_DIRECTONLY */
     } FUNCS[] = {
         { "fractal_ledger_flush",        ledger_flush_fn,        0, 1 },
-        { "fractal_ledger_load",         ledger_load_fn,         0, 0 },
+        { "fractal_ledger_load",         ledger_load_fn,         0, 1 },
         { "fractal_ledger_compact",      ledger_compact_fn,      0, 1 },
         { "fractal_ledger_reset_soft",   ledger_reset_soft_fn,   0, 1 },
         { "fractal_ledger_reset_hard",   ledger_reset_hard_fn,   0, 1 },
@@ -1897,7 +1898,7 @@ int fsql_ledger_register(sqlite3 *db, FsqlState *st) {
         { "fractal_ledger_truth_count",  ledger_truth_count_fn,  0, 0 },
         { "fractal_ledger_shadow_count", ledger_shadow_count_fn, 0, 0 },
         { "fractal_audit_unpack",        ledger_audit_unpack_fn, 1, 0 },
-        { "fractal_audit_log",           ledger_audit_log_fn,    2, 0 },
+        { "fractal_audit_log",           ledger_audit_log_fn,    2, 1 },
         { "fractal_set_actor",           ledger_set_actor_fn,    1, 1 },
         { "fractal_ledger_verify",       ledger_verify_fn,       0, 0 },
         { "fractal_ledger_verify",       ledger_verify_fn,       1, 0 },

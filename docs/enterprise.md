@@ -72,8 +72,8 @@ preserving from that shape, so it starts a fresh chain.
 | `fractal_ledger_flush()` | Encode truth + shadow ledgers into a QTL blob and append it to the chain (returns `'ok'`). |
 | `fractal_ledger_load()` | Hydrate the in-memory ledgers from the chain's latest entry (verifies only the tip, O(1)). |
 | `fractal_ledger_verify([kind])` | Walk the ENTIRE chain for `kind` (default 1) and return a TEXT JSON audit report: `{"ok":true,"rows_verified":N}` or `{"ok":false,"first_failure_id":ID,"reason":"..."}`. Pure read-only forensic query — works even without `enterprise_lib` loaded. |
-| `fractal_ledger_compact()` | Defragment / re-pack the in-memory QTL representation. |
-| `fractal_ledger_reset_soft()` | Soft-reset ledger counters without dropping history. |
+| `fractal_ledger_compact()` | Decay every Shadow weight by x0.9 (the ledger's forgetting step; Truth weights are untouched). In `exact` retention it does nothing. |
+| `fractal_ledger_reset_soft()` | Clear the Shadow ledger; keep the Truth ledger and the epoch. |
 | `fractal_ledger_reset_hard()` | Hard-reset the ledgers to empty. |
 | `fractal_ledger_truth_count()` | Truth-side entry count. |
 | `fractal_ledger_shadow_count()` | Shadow-side entry count. |
@@ -174,6 +174,23 @@ recipe. Apply the key on every connection that touches the ledger (the
 easy_install wizard's `load_fractalsql.sql` snippet is the standard place —
 protect that file like a credential, since it carries the key in plain
 text).
+
+### Retention: fade or exact
+
+By default the ledger **fades**: `fractal_ledger_compact()` decays every Shadow weight by x0.9, and when a ledger is
+full the lowest-significance entry is evicted to make room. Set `ledger_retention` to `exact` when every recorded
+entry must be kept as it was written:
+
+```sql
+SELECT fractal_config_set('ledger_retention', 'exact');   -- or 'fade' (the default)
+```
+
+In `exact` mode compaction changes nothing and nothing is evicted. A report for a handle that is not yet in a full
+ledger is refused with a "ledger full" error rather than displacing another entry, and a handle that is already
+recorded still accepts more weight. The mode is written into every flushed ledger, so `fractal_ledger_load()` on a
+connection configured differently restores the mode the ledger was recorded with. Set it before the first report of
+the session; changing it later applies to everything from that point on. `exact` needs an enterprise library that
+supports it: with an older library the key is refused instead of quietly running the default.
 
 ### External anchoring (closing the truncation gap)
 
