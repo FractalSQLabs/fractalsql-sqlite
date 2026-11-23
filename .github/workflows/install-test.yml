@@ -119,8 +119,9 @@ jobs:
           # two tests, not `a && b`: under `set -e` a failing first test of an && list does not stop the script
           test -f /usr/local/bin/.mcp-schema-lock
           test -f /usr/local/bin/.mcp-safety-annotations-lock
-          # the run card ships in the package's doc dir beside the client guide
-          test -n "$(find /usr/share/doc -path '*/mcp/RUN.txt' | head -1)"
+          # the run card ships in the package's doc dir beside the client guide. Ask the package, not the filesystem: the
+          # container image installs without /usr/share/doc (see the manifest check below). No grep -q (SIGPIPE under pipefail).
+          dpkg-deb -c ./dist/packages/sqlite3-fractalsql-amd64.deb | grep 'mcp/RUN.txt' >/dev/null
           /usr/local/bin/fractalsql-sqlite-mcp --version
           test "$(cd /tmp && /usr/local/bin/fractalsql-sqlite-mcp --list-tools | wc -l)" -ge 60
           # Ask the package, not the filesystem: the stock ubuntu image excludes /usr/share/doc at install time
@@ -171,8 +172,8 @@ jobs:
           # two tests, not `a && b`: under `set -e` a failing first test of an && list does not stop the script
           test -f /usr/local/bin/.mcp-schema-lock
           test -f /usr/local/bin/.mcp-safety-annotations-lock
-          # the run card ships in the package's doc dir beside the client guide
-          test -n "$(find /usr/share/doc -path '*/mcp/RUN.txt' | head -1)"
+          # the run card ships in the package's doc dir; the container installs without docs, so ask the package
+          rpm -qlp ./dist/packages/fractalsql-sqlite-amd64.rpm | grep 'mcp/RUN.txt' >/dev/null
           /usr/local/bin/fractalsql-sqlite-mcp --version
           test "$(cd /tmp && /usr/local/bin/fractalsql-sqlite-mcp --list-tools | wc -l)" -ge 60
           # Ask the package, not the filesystem: container images can install with docs excluded.
