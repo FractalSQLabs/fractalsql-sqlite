@@ -15,12 +15,21 @@ EXT = os.path.abspath(os.environ.get("FSQL_EXT") or os.path.join(ROOT, "fractals
 if not os.path.exists(EXT):
     print("  FAIL need the built extension (FSQL_EXT)"); sys.exit(1)
 WORK = os.path.realpath(tempfile.mkdtemp(prefix="fsql_ledgerpl_"))   # canonical: the extension refuses a plugin or library path that goes through a symlink (macOS /var -> /private/var)
-CORE = os.path.join(WORK, "mock_enterprise_core.so")
+# A harness that already built the mock core hands its path in, so this driver needs no compiler of
+# its own (the Windows runner builds it once and passes it down).
+CORE = os.environ.get("FSQL_ENTERPRISE_CORE")
 _cc_env = {k: v for k, v in os.environ.items() if k not in ("LD_PRELOAD", "DYLD_INSERT_LIBRARIES")}
-r = subprocess.run(["cc", "-shared", "-fPIC", "-std=c99", "-I" + os.path.join(ROOT, "include"), os.path.join(ROOT, "tests", "mock_enterprise_core.c"), "-o", CORE],
-                   capture_output=True, text=True, env=_cc_env)
-if r.returncode != 0:
-    print("  FAIL the mock enterprise core did not build:\n" + r.stderr); sys.exit(1)
+CC = os.environ.get("FSQL_CC") or "cc"
+if not CORE:
+    CORE = os.path.join(WORK, "mock_enterprise_core.so")
+    r = subprocess.run([CC, "-shared", "-fPIC", "-std=c99", "-I" + os.path.join(ROOT, "include"), os.path.join(ROOT, "tests", "mock_enterprise_core.c"), "-o", CORE],
+                       capture_output=True, text=True, env=_cc_env)
+    if r.returncode != 0:
+        print("  FAIL the mock enterprise core did not build:" + chr(10) + r.stderr); sys.exit(1)
+# The mock core is unsigned, so the enterprise opt-out has to be in force. It is a process-environment
+# control and the extension reads the environment when it is loaded, so it has to be in place before the
+# first connection (the Windows build links the static MSVC runtime and therefore reads a private copy of
+# the environment, frozen at load time).
 os.environ["FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE"] = "0"
 passes = fails = 0
 def check(cond, what, detail=""):

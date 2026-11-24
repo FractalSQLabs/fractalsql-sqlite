@@ -402,7 +402,7 @@ jobs:
 
   # coverage: gcov-instrumented build + lcov/genhtml report, driven
   # entirely by build_test.sh --coverage (the flag and the report
-  # generation live there, mirroring the PG runner's proven design).
+  # generation live there).
   # Weekly/workflow_dispatch-only cadence, like the sanitizer matrix
   # above -- the report is useful to refresh on demand, not on every
   # push. Ubuntu only: MSVC has no gcov (build_test.sh warns and no-ops

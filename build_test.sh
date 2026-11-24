@@ -126,7 +126,7 @@
 #                      Requires a libFuzzer-capable clang (set
 #                      FSQL_FUZZ_CC to override auto-detection); skips
 #                      cleanly if none is found.
-#   22  v2_functions   dimension (dfa/boxcount/drift), portfolio
+#   22  new_primitives  dimension (dfa/boxcount/drift), portfolio
 #                      (+ cov-length rejection, pareto dormant path),
 #                      domain geometry (vascular/cortical/nerve/
 #                      morphological), search_telemetry, hybrid/cross-
@@ -290,6 +290,19 @@
 #                      delta/delete/stale, the catalog, status and advice, refresh, the ids option, generation atomicity, corruption refusal, hostile input, the rename error, Scout candidates
 #   55  ledger_v2      QTL v2 through the REAL enterprise core library (test/test_ledger_roundtrip.py; set FSQL_ENTERPRISE_LIB, else it runs the mock core's subset): exact weights,
 #                      lambda and sigma persisted, a handle in both ledgers stored twice, reload restores and re-flushes bit-identically, load replaces
+#   59  id_emission     how the agents write a row's id into their JSON result (test/id_emission.py): the id is the caller's own data, so it
+#                      comes back byte for byte -- quotes, backslashes, control characters, unicode, an empty id, a 400-digit id -- and the
+#                      result document stays valid JSON
+#   60  scripted_replies the extension against a model that answers exactly what the test scripts (test/scripted_replies.py): the embedding
+#                      and text-to-SQL replies in every shape the parser takes or refuses
+#   61  ledger_payloads what fractal_audit_log writes into the chain for every shape of entry type, payload and actor
+#                      (test/ledger_payloads.py): the caller's text never breaks the JSON or the chain
+#   62  rename          the two-argument fractal_search was renamed fractal_sfs_converge: the old names are refused, and the refusal names
+#                      the new one (there are no aliases)
+#   63  ledger_env      the ledger's environment configuration: the row cap refuses an append past the limit, and the anchor mode publishes
+#                      the chain head to the log it names (an unknown mode publishes nothing)
+#   64  analytics       the analytics tier's surface: the dimension, portfolio and signal functions answer on a small fixture and refuse a
+#                      malformed one
 #   43  kits           the twenty-nine newer industry kits (demo/demo-       ~10s
 #                      vertical-{ev-battery-lifecycle,adas-safety-
 #                      validation,v2x-warranty-triage,critical-
@@ -515,7 +528,7 @@ wpath() {
   fi
 }
 
-DEFAULT_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 31 32 34 35 36 37 38 39 40 41 42 43 45 46 47 49 50 51 52 53 54 55)
+DEFAULT_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 31 32 34 35 36 37 38 39 40 41 42 43 45 46 47 49 50 51 52 53 54 55 59 60 61 62 63 64)
 QUICK_GATES=(01 02)
 FUZZ_GATES=(21 44)
 # The fault gates. A fault gate injects an allocation, file or socket failure and proves the
@@ -777,7 +790,10 @@ resolve_ext() {
     EXT="dist/fractalsql.so"
     [[ -f "$EXT" ]] || EXT="fractalsql.so"
   fi
-  [[ -f "$EXT" ]]
+  [[ -f "$EXT" ]] || return 1
+  # Absolute: the sqlite3 shell resolves .load against its own working directory, and a single --gate
+  # run has no build gate to leave an absolute path behind.
+  EXT="$(cd "$(dirname "$EXT")" && pwd)/$(basename "$EXT")"
 }
 
 # --- fixture-DB helpers ----------------------------------------------
@@ -920,7 +936,7 @@ compile_plugins() {
 
 # Skip a gate whose fixture plugin did not compile (platform-limited
 # plugin, e.g. evil_nonterminating's mmap/mprotect on a host without
-# them): the same probe-compile posture the PG runner takes.
+# them): a gate whose fixture did not compile is skipped, not failed.
 have_plugin() { [[ -f "$(wpath "$1")" ]]; }
 
 # py_run <name> [args...]: run an embedded python driver; each driver
@@ -1002,7 +1018,7 @@ drop_scope_exit_branches() {
 
 # --coverage: capture the .gcda the gate processes left in src/ and
 # generate an lcov report. Called once after the gate matrix finishes.
-# Unlike the PG runner there is no GCOV_PREFIX redirect to undo: no
+# There is no GCOV_PREFIX redirect to undo: no
 # server here -- every host process is a sqlite3 CLI or python driver
 # started from this script, and gcov writes .gcda straight back next
 # to the .gcno in src/, inside the (writable) checkout.
@@ -1040,8 +1056,8 @@ run_coverage_report() {
   echo "=== coverage (src/*.c) ==="
   # Computed directly from the .info file's own LF/LH/FNF/FNH totals
   # (lcov 2.0-1's --list renderer miscomputes its Rate% column against
-  # this intermediate gcov-JSON-derived .info -- seen in the PG runner,
-  # a nonsensical 1170% function rate -- even though the underlying
+  # this intermediate gcov-JSON-derived .info -- which can report a
+  # nonsensical function rate -- even though the underlying
   # LF:/LH:/etc. totals, and genhtml's own report built from the same
   # file, are both correct), but branches are summed directly from the
   # raw BRDA: lines rather than trusted from the .info's own BRF:/BRH:
@@ -1249,9 +1265,9 @@ gate_01_build() {
 
 gate_02_smoke() {
   local ver; ver=$(sqlq "SELECT fractal_version();")
-  [[ "$ver" = "2.0.14" ]] \
+  [[ "$ver" = "2.0.15" ]] \
     && pass "02 smoke: version=$ver" \
-    || fail "02 smoke: version='$ver' (want 2.0.14)"
+    || fail "02 smoke: version='$ver' (want 2.0.15)"
   # fractal_sfs_converge convergence: self-distance ~0
   local d; d=$(sqlq "SELECT fractal_sfs_converge('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');")
   if [[ "$d" = "0.0" ]] || python_abs_lt_1e6 "$d"; then
@@ -1491,7 +1507,7 @@ gate_04_text_to_sql() {
 # instantly. Proves the pnstrdup(summary, summary_len) fix holds at all
 # three call sites. Re-aim: the crash kills the whole sqlite3 process,
 # so "survived" means the process exited (rc==0 or a clean SQL error);
-# the PG runner watched for a dropped connection instead.
+# a dropped connection is not the failure mode here.
 gate_05_evil_overread() {
   if [[ ! -f "$(wpath "$EVILNT")" ]]; then
     skip "05 evil_overread (evil_nonterminating_plugin did not build on this platform)"; return
@@ -2852,16 +2868,16 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
   fi
   if expect_err "series needs >= 16 points" \
       "SELECT fractal_dimension_dfa('1.0,2.0,3.0');"; then
-    pass "22 v2_functions: short-series DFA rejected"
+    pass "22 new_primitives: short-series DFA rejected"
   else
-    fail "22 v2_functions: short-series DFA accepted"
+    fail "22 new_primitives: short-series DFA accepted"
   fi
   local r
   r=$(sqlq "SELECT fractal_dimension_dfa('$s32');")
   if [[ $? -eq 0 ]] && grep -Eq '^-?[0-9]' <<< "$r"; then
-    pass "22 v2_functions: DFA returns a numeric exponent"
+    pass "22 new_primitives: DFA returns a numeric exponent"
   else
-    fail "22 v2_functions: DFA happy path: $r"
+    fail "22 new_primitives: DFA happy path: $r"
   fi
   # Drift: 200-point series, window 64; the core's box needs window+16
   # points of recent history AND a deep-enough baseline (window 16/n 32
@@ -2871,15 +2887,15 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
     if(i>1)out=out","; out=out sprintf("%.6f",v)} print out}')
   r=$(sqlq "SELECT fractal_dimension_drift('$s200', 64);")
   if [[ $? -eq 0 ]] && grep <<< "$r" -q "recent_alpha"; then
-    pass "22 v2_functions: drift returns the JSON triple"
+    pass "22 new_primitives: drift returns the JSON triple"
   else
-    fail "22 v2_functions: drift happy path: $r"
+    fail "22 new_primitives: drift happy path: $r"
   fi
   if expect_err "window must be > 0" \
       "SELECT fractal_dimension_drift('$s32', 0);"; then
-    pass "22 v2_functions: drift window<=0 rejected"
+    pass "22 new_primitives: drift window<=0 rejected"
   else
-    fail "22 v2_functions: drift window<=0 accepted"
+    fail "22 new_primitives: drift window<=0 accepted"
   fi
   # Box-counting fixtures: bottom out in box-counting, which needs
   # >= 3 valid epsilon buckets: enough points AND enough scale dynamic
@@ -2891,15 +2907,15 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
     if(i>1) out=out","; out=out x","y} print out}')
   r=$(sqlq "SELECT fractal_dimension_boxcount('$boxpts', 2);")
   if [[ $? -eq 0 ]] && grep -Eq '^-?[0-9]' <<< "$r"; then
-    pass "22 v2_functions: boxcount returns a numeric dimension"
+    pass "22 new_primitives: boxcount returns a numeric dimension"
   else
-    fail "22 v2_functions: boxcount happy path: $r"
+    fail "22 new_primitives: boxcount happy path: $r"
   fi
   if expect_err "need >= 8 finite points" \
       "SELECT fractal_dimension_boxcount('0,0,1,0,0,1,1,1', 2);"; then
-    pass "22 v2_functions: degenerate boxcount rejected"
+    pass "22 new_primitives: degenerate boxcount rejected"
   else
-    fail "22 v2_functions: degenerate boxcount accepted"
+    fail "22 new_primitives: degenerate boxcount accepted"
   fi
   # Portfolio: happy path + cov-shape rejection + dormant pareto path.
   r=$(sqlq "SELECT fractal_optimize_portfolio(
@@ -2907,39 +2923,39 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
               '0.04,0.01,0.005,0.01,0.06,0.01,0.005,0.01,0.05',
               2, 42);")
   if [[ $? -eq 0 ]] && grep <<< "$r" -q "{"; then
-    pass "22 v2_functions: portfolio returns JSON"
+    pass "22 new_primitives: portfolio returns JSON"
   else
-    fail "22 v2_functions: portfolio happy path: $r"
+    fail "22 new_primitives: portfolio happy path: $r"
   fi
   if expect_err "must be n_assets^2" \
       "SELECT fractal_optimize_portfolio(
         '0.10,0.12,0.07',
         '0.04,0.01,0.005,0.01,0.06,0.01,0.005,0.01,0.05,0.9',
         2, 42);"; then
-    pass "22 v2_functions: non-square cov rejected"
+    pass "22 new_primitives: non-square cov rejected"
   else
-    fail "22 v2_functions: non-square cov accepted"
+    fail "22 new_primitives: non-square cov accepted"
   fi
   if expect_err "malformed mu/cov" \
       "SELECT fractal_optimize_portfolio('bad!vec','1.0,0.0,0.0,1.0',1,42);"; then
-    pass "22 v2_functions: portfolio rejects a malformed mu"
+    pass "22 new_primitives: portfolio rejects a malformed mu"
   else
-    fail "22 v2_functions: portfolio accepted a malformed mu"
+    fail "22 new_primitives: portfolio accepted a malformed mu"
   fi
   if expect_err "k must satisfy 1 <= k <= n_assets" \
       "SELECT fractal_optimize_portfolio('0.1,0.1','1.0,0.0,0.0,1.0',3,42);"; then
-    pass "22 v2_functions: portfolio rejects k > n_assets"
+    pass "22 new_primitives: portfolio rejects k > n_assets"
   else
-    fail "22 v2_functions: portfolio accepted k > n_assets"
+    fail "22 new_primitives: portfolio accepted k > n_assets"
   fi
   if expect_err "enterprise tier not loaded" \
       "SELECT fractal_optimize_portfolio_multimodal_pareto(
         '0.10,0.12,0.07',
         '0.04,0.01,0.005,0.01,0.06,0.01,0.005,0.01,0.05',
         2, 42);"; then
-    pass "22 v2_functions: pareto dormant path (no enterprise core)"
+    pass "22 new_primitives: pareto dormant path (no enterprise core)"
   else
-    fail "22 v2_functions: pareto path did not surface the dormant error"
+    fail "22 new_primitives: pareto path did not surface the dormant error"
   fi
   # Domain geometry: synthetic node/edge payloads with the same shapes
   # PG's gate used (30-node 3D vessel chain with per-edge arc lengths;
@@ -2961,17 +2977,17 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
   }')
   r=$(sqlq "SELECT fractal_vascular_network('$vasc_nc', '$vasc_el', '$vasc_al');")
   if [[ $? -eq 0 ]] && grep <<< "$r" -q "fractal_dimension"; then
-    pass "22 v2_functions: vascular returns the JSON triple"
+    pass "22 new_primitives: vascular returns the JSON triple"
   else
-    fail "22 v2_functions: vascular: $r"
+    fail "22 new_primitives: vascular: $r"
   fi
   r=$(sqlq "SELECT fractal_cortical_folding(
               '0,0,0, 1,0,0, 1,1,0, 0,1,0, 0,0,1, 1,0,1, 1,1,1, 0,1,1',
               '0,1,2, 0,2,3, 4,5,6, 4,6,7');")
   if [[ $? -eq 0 ]] && grep <<< "$r" -q "gyrification_index"; then
-    pass "22 v2_functions: cortical returns the gyrification triple"
+    pass "22 new_primitives: cortical returns the gyrification triple"
   else
-    fail "22 v2_functions: cortical: $r"
+    fail "22 new_primitives: cortical: $r"
   fi
   local nerve_nc nerve_el
   {
@@ -2986,51 +3002,51 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
   }')
   r=$(sqlq "SELECT fractal_nerve_plexus_metric('$nerve_nc', 2, '$nerve_el');")
   if [[ $? -eq 0 ]] && grep <<< "$r" -q "fiber_length_density"; then
-    pass "22 v2_functions: nerve plexus returns its JSON"
+    pass "22 new_primitives: nerve plexus returns its JSON"
   else
-    fail "22 v2_functions: nerve: $r"
+    fail "22 new_primitives: nerve: $r"
   fi
   if expect_err "node_coords length must be a multiple of 3" \
       "SELECT fractal_vascular_network('0,0,1,0','0,1','1.0');"; then
-    pass "22 v2_functions: vascular rejects node_coords length not a multiple of 3"
+    pass "22 new_primitives: vascular rejects node_coords length not a multiple of 3"
   else
-    fail "22 v2_functions: vascular accepted bad node_coords length"
+    fail "22 new_primitives: vascular accepted bad node_coords length"
   fi
   if expect_err "edges length must be a multiple of 2" \
       "SELECT fractal_vascular_network('0,0,0,1,0,0','0,1,2','1.0,1.0');"; then
-    pass "22 v2_functions: vascular rejects edges length not a multiple of 2"
+    pass "22 new_primitives: vascular rejects edges length not a multiple of 2"
   else
-    fail "22 v2_functions: vascular accepted bad edges length"
+    fail "22 new_primitives: vascular accepted bad edges length"
   fi
   if expect_err "vertices length must be a multiple of 3" \
       "SELECT fractal_cortical_folding('0,0,0,1,0,0,1,1','0,1,2');"; then
-    pass "22 v2_functions: cortical rejects vertices length not a multiple of 3"
+    pass "22 new_primitives: cortical rejects vertices length not a multiple of 3"
   else
-    fail "22 v2_functions: cortical accepted bad vertices length"
+    fail "22 new_primitives: cortical accepted bad vertices length"
   fi
   if expect_err "faces length must be a multiple of 3" \
       "SELECT fractal_cortical_folding('0,0,0,1,0,0,1,1,1','0,1');"; then
-    pass "22 v2_functions: cortical rejects faces length not a multiple of 3"
+    pass "22 new_primitives: cortical rejects faces length not a multiple of 3"
   else
-    fail "22 v2_functions: cortical accepted bad faces length"
+    fail "22 new_primitives: cortical accepted bad faces length"
   fi
   if expect_err "must be a positive multiple of dim" \
       "SELECT fractal_nerve_plexus_metric('0,0,1',2,'0,1');"; then
-    pass "22 v2_functions: nerve rejects node_coords length not a multiple of dim"
+    pass "22 new_primitives: nerve rejects node_coords length not a multiple of dim"
   else
-    fail "22 v2_functions: nerve accepted bad node_coords length"
+    fail "22 new_primitives: nerve accepted bad node_coords length"
   fi
   if expect_err "edges length must be a multiple of 2" \
       "SELECT fractal_nerve_plexus_metric('0,0,1,1',2,'0,1,2');"; then
-    pass "22 v2_functions: nerve rejects edges length not a multiple of 2"
+    pass "22 new_primitives: nerve rejects edges length not a multiple of 2"
   else
-    fail "22 v2_functions: nerve accepted bad edges length"
+    fail "22 new_primitives: nerve accepted bad edges length"
   fi
   r=$(sqlq "SELECT fractal_morphological_complexity('$boxpts', 2);")
   if [[ $? -eq 0 ]] && grep <<< "$r" -q "lacunarity"; then
-    pass "22 v2_functions: morphology returns dimension+lacunarity"
+    pass "22 new_primitives: morphology returns dimension+lacunarity"
   else
-    fail "22 v2_functions: morphology: $r"
+    fail "22 new_primitives: morphology: $r"
   fi
   # Diversify state + telemetry ground truth.
   r=$(sqlq \
@@ -3040,9 +3056,9 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
     "SELECT fractal_diversify_overhead_p99_us();" \
     "SELECT fractal_diversify_disable();")
   if [[ $? -eq 0 ]]; then
-    pass "22 v2_functions: diversify state machine cycles cleanly"
+    pass "22 new_primitives: diversify state machine cycles cleanly"
   else
-    fail "22 v2_functions: diversify: $r"
+    fail "22 new_primitives: diversify: $r"
   fi
   # current_dq returns an actual float once queries have run through
   # diversify (vs. the NaN-before-any-query path exercised just above).
@@ -3057,8 +3073,8 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
     "SELECT fractal_diversify_current_dq();" \
     "SELECT fractal_diversify_disable();" | tail -n2 | head -n1)
   grep <<< "$r" -Eq '^[0-9]+(\.[0-9]+)?$' \
-    && pass "22 v2_functions: diversify_current_dq returns a real float once queries have run" \
-    || fail "22 v2_functions: expected a numeric current_dq, got: $r"
+    && pass "22 new_primitives: diversify_current_dq returns a real float once queries have run" \
+    || fail "22 new_primitives: expected a numeric current_dq, got: $r"
   sqlq "DROP TABLE IF EXISTS bt_dqlive;" >/dev/null 2>&1
   r=$(sqlq "SELECT d.id, json_extract(je.j,'\$.distance') AS distance FROM
             (SELECT value AS j FROM json_each(fractal_search_telemetry(
@@ -3066,23 +3082,23 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
             JOIN bt_telemetry d ON d.rowid = json_extract(je.j,'\$.doc_id')
             ORDER BY json_extract(je.j,'\$.distance') LIMIT 1;")
   if [[ $? -eq 0 ]] && grep <<< "$r" -q "^1|"; then
-    pass "22 v2_functions: search_telemetry doc_id resolves to the real row (rowid = doc_id)"
+    pass "22 new_primitives: search_telemetry doc_id resolves to the real row (rowid = doc_id)"
   else
-    fail "22 v2_functions: telemetry rowid-join: $r"
+    fail "22 new_primitives: telemetry rowid-join: $r"
   fi
   r=$(sqlq "SELECT json_extract(fractal_search_telemetry(
               'bt_telemetry', 'vec', '0.6,0.8,0.0,0.0', 2), '\$[0].scan_pos');")
   if [[ $? -eq 0 ]] && [[ "$(echo "$r" | tr -d '[:space:]')" = "0" ]]; then
-    pass "22 v2_functions: search_telemetry reports scan_pos alongside the rowid doc_id"
+    pass "22 new_primitives: search_telemetry reports scan_pos alongside the rowid doc_id"
   else
-    fail "22 v2_functions: telemetry scan_pos: $r"
+    fail "22 new_primitives: telemetry scan_pos: $r"
   fi
   if expect_err "k must be > 0" \
       "SELECT fractal_search_telemetry('bt_telemetry','vec',
         '0.6,0.8,0.0,0.0', 0);"; then
-    pass "22 v2_functions: telemetry k<=0 rejected"
+    pass "22 new_primitives: telemetry k<=0 rejected"
   else
-    fail "22 v2_functions: telemetry k<=0 accepted"
+    fail "22 new_primitives: telemetry k<=0 accepted"
   fi
   # agents_scan_corpus's own prepare failure: a WITHOUT ROWID table has
   # no rowid for the "ORDER BY rowid" scan query to select, surfacing a
@@ -3097,9 +3113,9 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
   " >/dev/null 2>&1
   if expect_err "scan of bt_telemetry_nr.vec failed" \
       "SELECT fractal_search_telemetry('bt_telemetry_nr','vec','1.0,0.0,0.0,0.0',2);"; then
-    pass "22 v2_functions: search_telemetry surfaces a clean error on a WITHOUT ROWID table"
+    pass "22 new_primitives: search_telemetry surfaces a clean error on a WITHOUT ROWID table"
   else
-    fail "22 v2_functions: search_telemetry accepted a WITHOUT ROWID table"
+    fail "22 new_primitives: search_telemetry accepted a WITHOUT ROWID table"
   fi
   sqlq "DROP TABLE IF EXISTS bt_telemetry_nr;" >/dev/null 2>&1
   # hybrid: the cohort holds real rowids (the same locator the result
@@ -3112,24 +3128,24 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
                  WHERE id IN (2,4,5)), 3))) r
             JOIN bt_telemetry d ON d.rowid = json_extract(r.j,'\$.doc_id');")
   if [[ $? -eq 0 ]] && grep <<< "$r" -q "2" && grep <<< "$r" -q "4" && grep <<< "$r" -q "5"; then
-    pass "22 v2_functions: hybrid restricts to the rowid cohort and returns real row ids"
+    pass "22 new_primitives: hybrid restricts to the rowid cohort and returns real row ids"
   else
-    fail "22 v2_functions: hybrid rowid cohort: $r"
+    fail "22 new_primitives: hybrid rowid cohort: $r"
   fi
   if expect_err "cohort matched no rows" \
       "SELECT fractal_hybrid_clinical_search('bt_telemetry','vec',
         '0.0,1.0,0.0,0.0', '[999999]', 1);"; then
-    pass "22 v2_functions: hybrid rejects a cohort matching zero rows"
+    pass "22 new_primitives: hybrid rejects a cohort matching zero rows"
   else
-    fail "22 v2_functions: hybrid zero-cohort accepted"
+    fail "22 new_primitives: hybrid zero-cohort accepted"
   fi
   r=$(sqlq "SELECT fractal_search_trajectory(
               'bt_traj', 'vec', '0.0,0.0,0.0,0.0',
               '0.3,0.0,0.0,0.0', 3);")
   if [[ $? -eq 0 ]] && grep <<< "$r" -q "{"; then
-    pass "22 v2_functions: search_trajectory returns JSON"
+    pass "22 new_primitives: search_trajectory returns JSON"
   else
-    fail "22 v2_functions: search_trajectory: $r"
+    fail "22 new_primitives: search_trajectory: $r"
   fi
   # With diversify enabled and a few real searches run first (same
   # connection; current_dq needs query history to compute against --
@@ -3146,16 +3162,16 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
     "SELECT fractal_detect_collapse();" \
     "SELECT fractal_diversify_disable();")
   if [[ $? -eq 0 ]] && grep <<< "$r" -Eq '"dq":[0-9]'; then
-    pass "22 v2_functions: explain_result reports a real numeric dq once diversify has run"
+    pass "22 new_primitives: explain_result reports a real numeric dq once diversify has run"
   else
-    fail "22 v2_functions: explain_result numeric-dq call: $r"
+    fail "22 new_primitives: explain_result numeric-dq call: $r"
   fi
   r=$(sqlq "SELECT fractal_explain_result();" \
             "SELECT fractal_detect_collapse();")
   if [[ $? -eq 0 ]]; then
-    pass "22 v2_functions: explain_result/detect_collapse respond"
+    pass "22 new_primitives: explain_result/detect_collapse respond"
   else
-    fail "22 v2_functions: explain/detect_collapse: $r"
+    fail "22 new_primitives: explain/detect_collapse: $r"
   fi
   # --- v2.0.25-core analytics surface (10 functions) ------------------
   # change_point_detect: 40-point mean step at t=20, window 10 ->
@@ -3168,88 +3184,88 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
                3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0',
               10, 1.0);")
   if [[ $? -eq 0 ]] && grep <<< "$r" -q '"indices"'; then
-    pass "22 v2_functions: change_point_detect returns boundary indices"
+    pass "22 new_primitives: change_point_detect returns boundary indices"
   else
-    fail "22 v2_functions: change_point_detect: $r"
+    fail "22 new_primitives: change_point_detect: $r"
   fi
   if expect_err "window and threshold must be > 0" \
       "SELECT fractal_change_point_detect('1,2,3,4,5,6,7,8,9,10',0,1.0);"; then
-    pass "22 v2_functions: change_point_detect rejects window<=0"
+    pass "22 new_primitives: change_point_detect rejects window<=0"
   else
-    fail "22 v2_functions: change_point_detect accepted window<=0"
+    fail "22 new_primitives: change_point_detect accepted window<=0"
   fi
   if expect_err "window and threshold must be > 0" \
       "SELECT fractal_change_point_detect('1,2,3,4,5,6,7,8,9,10',2,0.0);"; then
-    pass "22 v2_functions: change_point_detect rejects threshold<=0"
+    pass "22 new_primitives: change_point_detect rejects threshold<=0"
   else
-    fail "22 v2_functions: change_point_detect accepted threshold<=0"
+    fail "22 new_primitives: change_point_detect accepted threshold<=0"
   fi
   if expect_err "window and threshold must be > 0" \
       "SELECT fractal_change_point_detect('1,2,3,4,5,6,7,8,9,10',2,1.0,0);"; then
-    pass "22 v2_functions: change_point_detect rejects max_points<=0"
+    pass "22 new_primitives: change_point_detect rejects max_points<=0"
   else
-    fail "22 v2_functions: change_point_detect accepted max_points<=0"
+    fail "22 new_primitives: change_point_detect accepted max_points<=0"
   fi
   if expect_err "malformed series" \
       "SELECT fractal_change_point_detect('bad!vec',10,1.0);"; then
-    pass "22 v2_functions: change_point_detect rejects a malformed series"
+    pass "22 new_primitives: change_point_detect rejects a malformed series"
   else
-    fail "22 v2_functions: change_point_detect accepted a malformed series"
+    fail "22 new_primitives: change_point_detect accepted a malformed series"
   fi
   if expect_err "malformed node_coords/edges/edge_arc_length" \
       "SELECT fractal_vascular_network('bad!vec','0,1','1.0');"; then
-    pass "22 v2_functions: vascular rejects a malformed node_coords"
+    pass "22 new_primitives: vascular rejects a malformed node_coords"
   else
-    fail "22 v2_functions: vascular accepted a malformed node_coords"
+    fail "22 new_primitives: vascular accepted a malformed node_coords"
   fi
   if expect_err "malformed vertices/faces" \
       "SELECT fractal_cortical_folding('bad!vec','0,1,2');"; then
-    pass "22 v2_functions: cortical rejects malformed vertices"
+    pass "22 new_primitives: cortical rejects malformed vertices"
   else
-    fail "22 v2_functions: cortical accepted malformed vertices"
+    fail "22 new_primitives: cortical accepted malformed vertices"
   fi
   if expect_err "malformed node_coords/edges" \
       "SELECT fractal_nerve_plexus_metric('bad!vec',2,'0,1');"; then
-    pass "22 v2_functions: nerve rejects malformed node_coords"
+    pass "22 new_primitives: nerve rejects malformed node_coords"
   else
-    fail "22 v2_functions: nerve accepted malformed node_coords"
+    fail "22 new_primitives: nerve accepted malformed node_coords"
   fi
   if expect_err "malformed points" \
       "SELECT fractal_morphological_complexity('bad!vec',2);"; then
-    pass "22 v2_functions: morphology rejects malformed points"
+    pass "22 new_primitives: morphology rejects malformed points"
   else
-    fail "22 v2_functions: morphology accepted malformed points"
+    fail "22 new_primitives: morphology accepted malformed points"
   fi
   # periodogram: the same 32-point sin(i/4) series -> peak lists.
   r=$(sqlq "SELECT fractal_periodogram('$s32', 3);")
   if [[ $? -eq 0 ]] && grep <<< "$r" -q '"freqs"' \
       && grep <<< "$r" -q '"power"'; then
-    pass "22 v2_functions: periodogram returns the peak lists"
+    pass "22 new_primitives: periodogram returns the peak lists"
   else
-    fail "22 v2_functions: periodogram: $r"
+    fail "22 new_primitives: periodogram: $r"
   fi
   # the document is exactly {"freqs": [...], "power": [...]}, the two lists the same length (every FractalSQL host that returns JSON pins this)
   r=$(sqlq "SELECT (SELECT group_concat(key) FROM json_each(fractal_periodogram('$s32', 3))) || '|' || (json_array_length(fractal_periodogram('$s32', 3), '\$.freqs') = json_array_length(fractal_periodogram('$s32', 3), '\$.power'));" | tail -n1)
   [[ "$r" == "freqs,power|1" ]] \
-    && pass "22 v2_functions: periodogram document has exactly the keys freqs and power, with lists of the same length" \
-    || fail "22 v2_functions: periodogram document shape, got: $r"
+    && pass "22 new_primitives: periodogram document has exactly the keys freqs and power, with lists of the same length" \
+    || fail "22 new_primitives: periodogram document shape, got: $r"
   if expect_err "max_peaks must be > 0" \
       "SELECT fractal_periodogram('$s32', 0);"; then
-    pass "22 v2_functions: periodogram rejects max_peaks<=0"
+    pass "22 new_primitives: periodogram rejects max_peaks<=0"
   else
-    fail "22 v2_functions: periodogram accepted max_peaks<=0"
+    fail "22 new_primitives: periodogram accepted max_peaks<=0"
   fi
   if expect_err "malformed series" \
       "SELECT fractal_periodogram('bad!vec');"; then
-    pass "22 v2_functions: periodogram rejects a malformed series"
+    pass "22 new_primitives: periodogram rejects a malformed series"
   else
-    fail "22 v2_functions: periodogram accepted a malformed series"
+    fail "22 new_primitives: periodogram accepted a malformed series"
   fi
   if expect_err "need n >= 4" \
       "SELECT fractal_periodogram('1,2,3');"; then
-    pass "22 v2_functions: periodogram rejects a too-short series"
+    pass "22 new_primitives: periodogram rejects a too-short series"
   else
-    fail "22 v2_functions: periodogram accepted a too-short series"
+    fail "22 new_primitives: periodogram accepted a too-short series"
   fi
   # spectrogram_entropy: a period-4 tone (low entropy, constant per frame)
   # vs an LCG noise series (high entropy), built in SQL so no external
@@ -3258,39 +3274,39 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
   se_noise="(WITH RECURSIVE g(t,x) AS (VALUES(0,12345) UNION ALL SELECT t+1,(x*1103515245+12345)%2147483648 FROM g WHERE t<127) SELECT group_concat((x/65536)%1000) FROM (SELECT t,x FROM g ORDER BY t))"
   r=$(sqlq "SELECT json_array_length(fractal_spectrogram_entropy($se_tone,32,16));")
   if [[ $? -eq 0 && "$r" == "7" ]]; then
-    pass "22 v2_functions: spectrogram_entropy returns one value per frame"
+    pass "22 new_primitives: spectrogram_entropy returns one value per frame"
   else
-    fail "22 v2_functions: spectrogram_entropy frame count: $r"
+    fail "22 new_primitives: spectrogram_entropy frame count: $r"
   fi
   r=$(sqlq "SELECT max(value) < 0.5 AND min(value) >= 0.0 FROM json_each(fractal_spectrogram_entropy($se_tone,32,16));")
   if [[ $? -eq 0 && "$r" == "1" ]]; then
-    pass "22 v2_functions: spectrogram_entropy reads a pure tone as ordered (< 0.5)"
+    pass "22 new_primitives: spectrogram_entropy reads a pure tone as ordered (< 0.5)"
   else
-    fail "22 v2_functions: spectrogram_entropy tone: $r"
+    fail "22 new_primitives: spectrogram_entropy tone: $r"
   fi
   r=$(sqlq "SELECT avg(value) > 0.7 AND max(value) <= 1.0 FROM json_each(fractal_spectrogram_entropy($se_noise,32,32));")
   if [[ $? -eq 0 && "$r" == "1" ]]; then
-    pass "22 v2_functions: spectrogram_entropy reads noise as disordered (> 0.7, <= 1)"
+    pass "22 new_primitives: spectrogram_entropy reads noise as disordered (> 0.7, <= 1)"
   else
-    fail "22 v2_functions: spectrogram_entropy noise: $r"
+    fail "22 new_primitives: spectrogram_entropy noise: $r"
   fi
   r=$(sqlq "SELECT fractal_spectrogram_entropy('2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2',8,8);")
   if [[ $? -eq 0 && "$r" == "[0.0000000000,0.0000000000]" ]]; then
-    pass "22 v2_functions: spectrogram_entropy reports a constant frame as 0.0, not NaN"
+    pass "22 new_primitives: spectrogram_entropy reports a constant frame as 0.0, not NaN"
   else
-    fail "22 v2_functions: spectrogram_entropy constant frame: $r"
+    fail "22 new_primitives: spectrogram_entropy constant frame: $r"
   fi
   r=$(sqlq "SELECT json_array_length(fractal_spectrogram_entropy($se_tone,32,16,2));")
   if [[ $? -eq 0 && "$r" == "2" ]]; then
-    pass "22 v2_functions: spectrogram_entropy honours max_frames"
+    pass "22 new_primitives: spectrogram_entropy honours max_frames"
   else
-    fail "22 v2_functions: spectrogram_entropy max_frames: $r"
+    fail "22 new_primitives: spectrogram_entropy max_frames: $r"
   fi
   r=$(sqlq "SELECT fractal_spectrogram_entropy(NULL);")
   if [[ $? -eq 0 && -z "$r" ]]; then
-    pass "22 v2_functions: spectrogram_entropy(NULL) is NULL"
+    pass "22 new_primitives: spectrogram_entropy(NULL) is NULL"
   else
-    fail "22 v2_functions: spectrogram_entropy(NULL): $r"
+    fail "22 new_primitives: spectrogram_entropy(NULL): $r"
   fi
   # Regime change: 64 tone samples then 64 noise samples -> the entropy
   # series steps up, and change_point_detect localizes it from the bare
@@ -3299,59 +3315,59 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
               s(v) AS (SELECT group_concat(CASE WHEN t<64 THEN (CASE t%4 WHEN 0 THEN 1 WHEN 2 THEN -1 ELSE 0 END) ELSE (x/65536)%1000 END) FROM (SELECT t,x FROM g ORDER BY t))
             SELECT fractal_change_point_detect(fractal_spectrogram_entropy(v,16,8),3,1.0) FROM s;")
   if [[ $? -eq 0 ]] && grep <<< "$r" -qE '"indices":\[[0-9]'; then
-    pass "22 v2_functions: spectrogram_entropy -> change_point_detect localizes a regime change"
+    pass "22 new_primitives: spectrogram_entropy -> change_point_detect localizes a regime change"
   else
-    fail "22 v2_functions: spectrogram_entropy regime change: $r"
+    fail "22 new_primitives: spectrogram_entropy regime change: $r"
   fi
   for bad in "'$s32',4|window < 8" "'$s32',600|window > 512" "'$s32',16,0|hop < 1" \
              "'$s32',16,8,0|max_frames < 1" "'$s32',16,8,5000|max_frames > 4096" \
              "'1,2,3'|series shorter than window"; do
     if expect_err "needs window in" "SELECT fractal_spectrogram_entropy(${bad%%|*});"; then
-      pass "22 v2_functions: spectrogram_entropy rejects ${bad##*|}"
+      pass "22 new_primitives: spectrogram_entropy rejects ${bad##*|}"
     else
-      fail "22 v2_functions: spectrogram_entropy accepted ${bad##*|}"
+      fail "22 new_primitives: spectrogram_entropy accepted ${bad##*|}"
     fi
   done
   if expect_err "malformed series" \
       "SELECT fractal_spectrogram_entropy('bad!vec',16);"; then
-    pass "22 v2_functions: spectrogram_entropy rejects a malformed series"
+    pass "22 new_primitives: spectrogram_entropy rejects a malformed series"
   else
-    fail "22 v2_functions: spectrogram_entropy accepted a malformed series"
+    fail "22 new_primitives: spectrogram_entropy accepted a malformed series"
   fi
   # TDA: an 8-point square ring at spacing 2 (threshold 2.5 admits the
   # 8 ring edges, excludes the 2.83 corner diagonals) -> E-V+C = 1.
   r=$(sqlq "SELECT fractal_tda_persistence_diagram(
               '0,0,2,0,4,0,4,2,4,4,2,4,0,4,0,2', 2, 1, 2.5);")
   if [[ $? -eq 0 ]] && grep <<< "$r" -q '"betti1":1'; then
-    pass "22 v2_functions: TDA flags the single ring cycle (betti1=1)"
+    pass "22 new_primitives: TDA flags the single ring cycle (betti1=1)"
   else
-    fail "22 v2_functions: TDA: $r"
+    fail "22 new_primitives: TDA: $r"
   fi
   r=$(sqlq "SELECT fractal_tda_persistence_diagram(
               '0,0,2,0,4,0,4,2,4,4,2,4,0,4,0,2', 2, 0, 2.5);")
   if [[ $? -eq 0 ]] && grep <<< "$r" -Fq '"betti1":null'; then
-    pass "22 v2_functions: TDA max_dim=0 reports betti1:null (H1 not computed)"
+    pass "22 new_primitives: TDA max_dim=0 reports betti1:null (H1 not computed)"
   else
-    fail "22 v2_functions: TDA max_dim=0: $r"
+    fail "22 new_primitives: TDA max_dim=0: $r"
   fi
   # state_fingerprint: 64 bits -> (64+7)/8 = 8 bytes -> 16 hex chars.
   r=$(sqlq "SELECT length(hex(fractal_state_fingerprint('1.0,0.0,0.0', 64)));")
   if [[ "$r" == "16" ]]; then
-    pass "22 v2_functions: state_fingerprint returns a 64-bit (16-hex-char) BLOB"
+    pass "22 new_primitives: state_fingerprint returns a 64-bit (16-hex-char) BLOB"
   else
-    fail "22 v2_functions: state_fingerprint: $r"
+    fail "22 new_primitives: state_fingerprint: $r"
   fi
   if expect_err "n_bits must be between 1 and" \
       "SELECT fractal_state_fingerprint('1.0,0.0,0.0', 0);"; then
-    pass "22 v2_functions: state_fingerprint rejects n_bits<=0"
+    pass "22 new_primitives: state_fingerprint rejects n_bits<=0"
   else
-    fail "22 v2_functions: state_fingerprint accepted n_bits<=0"
+    fail "22 new_primitives: state_fingerprint accepted n_bits<=0"
   fi
   if expect_err "malformed vec" \
       "SELECT fractal_state_fingerprint('bad!vec', 64);"; then
-    pass "22 v2_functions: state_fingerprint rejects a malformed vector"
+    pass "22 new_primitives: state_fingerprint rejects a malformed vector"
   else
-    fail "22 v2_functions: state_fingerprint accepted a malformed vector"
+    fail "22 new_primitives: state_fingerprint accepted a malformed vector"
   fi
   # cycle_detect: a clean period-2 one-hot fingerprint stream closes
   # (one-hot states, so the two directions are distinguishable).
@@ -3364,15 +3380,15 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
               FROM g)),
         64) AS cycle_detect;")
   if [[ $? -eq 0 ]] && grep <<< "$r" -q '"detected":true'; then
-    pass "22 v2_functions: cycle_detect closes the period-2 fingerprint stream"
+    pass "22 new_primitives: cycle_detect closes the period-2 fingerprint stream"
   else
-    fail "22 v2_functions: cycle_detect: $r"
+    fail "22 new_primitives: cycle_detect: $r"
   fi
   if expect_err "n_bits must be between 1 and" \
       "SELECT fractal_cycle_detect('[]', 0);"; then
-    pass "22 v2_functions: cycle_detect rejects n_bits<=0"
+    pass "22 new_primitives: cycle_detect rejects n_bits<=0"
   else
-    fail "22 v2_functions: cycle_detect accepted n_bits<=0"
+    fail "22 new_primitives: cycle_detect accepted n_bits<=0"
   fi
   # optimize_subset: best 5 of 10 scored items (bounds <= 1.0).
   r=$(sqlq "SELECT fractal_optimize_subset(
@@ -3380,30 +3396,30 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
               '1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0',
               5);")
   if [[ $? -eq 0 ]] && grep <<< "$r" -q '"weights"'; then
-    pass "22 v2_functions: optimize_subset returns the value-weighted allocation"
+    pass "22 new_primitives: optimize_subset returns the value-weighted allocation"
   else
-    fail "22 v2_functions: optimize_subset: $r"
+    fail "22 new_primitives: optimize_subset: $r"
   fi
   # Vector math quartet (registered in the common TU -- both builds).
   r=$(sqlq "SELECT fractal_vector_lp_distance('1,0,0', '0.5,0,0', 2.0) AS lp2;" \
             "SELECT fractal_vector_lp_distance('1,0,0', '0.5,0,0', 0.5) AS lp05;")
   if [[ $? -eq 0 ]]; then
-    pass "22 v2_functions: fractal_vector_lp_distance (p=2 and fractional p=0.5)"
+    pass "22 new_primitives: fractal_vector_lp_distance (p=2 and fractional p=0.5)"
   else
-    fail "22 v2_functions: lp_distance: $r"
+    fail "22 new_primitives: lp_distance: $r"
   fi
   r=$(sqlq "SELECT fractal_vector_quantize_int8('0.5,-0.25,0.75,0.0');")
   if [[ $? -eq 0 ]] && grep <<< "$r" -q '"scale"'; then
-    pass "22 v2_functions: quantize_int8 returns the scale+codes document"
+    pass "22 new_primitives: quantize_int8 returns the scale+codes document"
   else
-    fail "22 v2_functions: quantize_int8: $r"
+    fail "22 new_primitives: quantize_int8: $r"
   fi
   r=$(sqlq "SELECT length(fractal_vector_quantize_binary(
            '1,-1,1,1,-1,1,-1,-1,1,1'));")
   if [[ "$r" == "2" ]]; then   # (10 + 7) / 8 = 2 sign bytes
-    pass "22 v2_functions: quantize_binary returns (dim+7)/8 sign bytes"
+    pass "22 new_primitives: quantize_binary returns (dim+7)/8 sign bytes"
   else
-    fail "22 v2_functions: quantize_binary: $r"
+    fail "22 new_primitives: quantize_binary: $r"
   fi
   r=$(sqlq "SELECT fractal_vector_hamming_distance(
            fractal_vector_quantize_binary('1,-1,1,1,-1,1,-1,-1,1,1'),
@@ -3413,242 +3429,242 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
            fractal_vector_quantize_binary('-1,-1,1,1,-1,1,-1,-1,1,1'));")
   if [[ "$r" == "0
 1" ]]; then
-    pass "22 v2_functions: hamming_distance (same pair=0, one bit=1)"
+    pass "22 new_primitives: hamming_distance (same pair=0, one bit=1)"
   else
-    fail "22 v2_functions: hamming_distance: $r"
+    fail "22 new_primitives: hamming_distance: $r"
   fi
 
   # --- fractal_vector / from_text / to_json round-trip ----------------
   r=$(sqlq "SELECT fractal_vector_to_json(fractal_vector(3));")
   [[ "$r" == "[0,0,0]" ]] \
-    && pass "22 v2_functions: fractal_vector(dim) constructs a zero vector" \
-    || fail "22 v2_functions: fractal_vector(3): $r"
+    && pass "22 new_primitives: fractal_vector(dim) constructs a zero vector" \
+    || fail "22 new_primitives: fractal_vector(3): $r"
   if expect_err "dim must be" \
       "SELECT fractal_vector(0);"; then
-    pass "22 v2_functions: fractal_vector rejects dim <= 0"
+    pass "22 new_primitives: fractal_vector rejects dim <= 0"
   else
-    fail "22 v2_functions: fractal_vector(0) accepted"
+    fail "22 new_primitives: fractal_vector(0) accepted"
   fi
   if expect_err "dim must be 1..32767, got 32768" \
       "SELECT fractal_vector(32768);"; then
-    pass "22 v2_functions: fractal_vector rejects dim > FSQL_VEC_MAX_DIM"
+    pass "22 new_primitives: fractal_vector rejects dim > FSQL_VEC_MAX_DIM"
   else
-    fail "22 v2_functions: fractal_vector(32768) accepted"
+    fail "22 new_primitives: fractal_vector(32768) accepted"
   fi
   r=$(sqlq "SELECT fractal_vector_to_json(fractal_vector_from_text('1,2,3'));")
   [[ "$r" == "[1,2,3]" ]] \
-    && pass "22 v2_functions: from_text canonicalizes a CSV vector" \
-    || fail "22 v2_functions: from_text: $r"
+    && pass "22 new_primitives: from_text canonicalizes a CSV vector" \
+    || fail "22 new_primitives: from_text: $r"
   if expect_err "malformed vector" \
       "SELECT fractal_vector_from_text('not,a,vector,[');"; then
-    pass "22 v2_functions: from_text rejects malformed input"
+    pass "22 new_primitives: from_text rejects malformed input"
   else
-    fail "22 v2_functions: from_text accepted malformed input"
+    fail "22 new_primitives: from_text accepted malformed input"
   fi
   r=$(sqlq "SELECT fractal_vector_to_json('1.5,2.5,3.5');")
   [[ "$r" == "[1.5,2.5,3.5]" ]] \
-    && pass "22 v2_functions: to_json renders a JSON array" \
-    || fail "22 v2_functions: to_json: $r"
+    && pass "22 new_primitives: to_json renders a JSON array" \
+    || fail "22 new_primitives: to_json: $r"
 
   # --- fractal_vector_add / fractal_vector_sub (fv_binary_vec_fn) -----
   r=$(sqlq "SELECT fractal_vector_to_json(fractal_vector_add('1,2,3','1,1,1'));")
   [[ "$r" == "[2,3,4]" ]] \
-    && pass "22 v2_functions: add([1,2,3],[1,1,1])=[2,3,4]" \
-    || fail "22 v2_functions: add: $r"
+    && pass "22 new_primitives: add([1,2,3],[1,1,1])=[2,3,4]" \
+    || fail "22 new_primitives: add: $r"
   r=$(sqlq "SELECT fractal_vector_to_json(fractal_vector_sub('3,4,5','1,1,1'));")
   [[ "$r" == "[2,3,4]" ]] \
-    && pass "22 v2_functions: sub([3,4,5],[1,1,1])=[2,3,4]" \
-    || fail "22 v2_functions: sub: $r"
+    && pass "22 new_primitives: sub([3,4,5],[1,1,1])=[2,3,4]" \
+    || fail "22 new_primitives: sub: $r"
   if expect_err "vector dim mismatch" \
       "SELECT fractal_vector_add('1,2,3','1,1');"; then
-    pass "22 v2_functions: add rejects mismatched dims"
+    pass "22 new_primitives: add rejects mismatched dims"
   else
-    fail "22 v2_functions: add accepted mismatched dims"
+    fail "22 new_primitives: add accepted mismatched dims"
   fi
   if expect_err "malformed vector" \
       "SELECT fractal_vector_add('bad!vec','1,1,1');"; then
-    pass "22 v2_functions: add rejects a malformed vector"
+    pass "22 new_primitives: add rejects a malformed vector"
   else
-    fail "22 v2_functions: add accepted a malformed vector"
+    fail "22 new_primitives: add accepted a malformed vector"
   fi
 
   # --- fractal_vector_scale / norm / normalize ------------------------
   r=$(sqlq "SELECT fractal_vector_to_json(fractal_vector_scale('1,2,3',2));")
   [[ "$r" == "[2,4,6]" ]] \
-    && pass "22 v2_functions: scale([1,2,3],2)=[2,4,6]" \
-    || fail "22 v2_functions: scale: $r"
+    && pass "22 new_primitives: scale([1,2,3],2)=[2,4,6]" \
+    || fail "22 new_primitives: scale: $r"
   r=$(sqlq "SELECT fractal_vector_norm('3,4,0');")
   [[ "$r" == "5.0" || "$r" == "5" ]] \
-    && pass "22 v2_functions: norm([3,4,0])=5" \
-    || fail "22 v2_functions: norm: $r"
+    && pass "22 new_primitives: norm([3,4,0])=5" \
+    || fail "22 new_primitives: norm: $r"
   # float32 storage round-trips 0.6/0.8 as 0.600000024/0.800000012 at
   # %.9g -- match on precision, not exact string equality.
   r=$(sqlq "SELECT fractal_vector_to_json(fractal_vector_normalize('3,4,0'));")
   grep <<< "$r" -Eq '^\[0\.6[0-9]*,0\.8[0-9]*,0\]$' \
-    && pass "22 v2_functions: normalize([3,4,0]) -> unit vector [0.6,0.8,0]" \
-    || fail "22 v2_functions: normalize: $r"
+    && pass "22 new_primitives: normalize([3,4,0]) -> unit vector [0.6,0.8,0]" \
+    || fail "22 new_primitives: normalize: $r"
   r=$(sqlq "SELECT fractal_vector_normalize(NULL);")
   [[ -z "$r" ]] \
-    && pass "22 v2_functions: normalize(NULL) -> NULL" \
-    || fail "22 v2_functions: normalize(NULL): $r"
+    && pass "22 new_primitives: normalize(NULL) -> NULL" \
+    || fail "22 new_primitives: normalize(NULL): $r"
 
   # --- self-contained sin/sqrt/cos (hosts missing
   # SQLITE_ENABLE_MATH_FUNCTIONS) -----------------------------------
   r=$(sqlq "SELECT sin(0.0);")
   [[ "$r" = "0.0" ]] \
-    && pass "22 v2_functions: sin(0)=0" \
-    || fail "22 v2_functions: sin(0): $r"
+    && pass "22 new_primitives: sin(0)=0" \
+    || fail "22 new_primitives: sin(0): $r"
   r=$(sqlq "SELECT cos(0.0);")
   [[ "$r" = "1.0" ]] \
-    && pass "22 v2_functions: cos(0)=1" \
-    || fail "22 v2_functions: cos(0): $r"
+    && pass "22 new_primitives: cos(0)=1" \
+    || fail "22 new_primitives: cos(0): $r"
   r=$(sqlq "SELECT sqrt(4.0);")
   [[ "$r" = "2.0" ]] \
-    && pass "22 v2_functions: sqrt(4)=2" \
-    || fail "22 v2_functions: sqrt(4): $r"
+    && pass "22 new_primitives: sqrt(4)=2" \
+    || fail "22 new_primitives: sqrt(4): $r"
   r=$(sqlq "SELECT sqrt(-1.0);")
   [[ -z "$r" ]] \
-    && pass "22 v2_functions: sqrt(negative) -> NULL" \
-    || fail "22 v2_functions: sqrt(-1): $r"
+    && pass "22 new_primitives: sqrt(negative) -> NULL" \
+    || fail "22 new_primitives: sqrt(-1): $r"
   r=$(sqlq "SELECT sin(NULL);")
   [[ -z "$r" ]] \
-    && pass "22 v2_functions: sin(NULL) -> NULL" \
-    || fail "22 v2_functions: sin(NULL): $r"
+    && pass "22 new_primitives: sin(NULL) -> NULL" \
+    || fail "22 new_primitives: sin(NULL): $r"
 
   # --- fractal_config_get -------------------------------------------------
   r=$(sqlq "SELECT fractal_config_set('reasoning_plugin','$MOCK');" \
            "SELECT fractal_config_get('reasoning_plugin');" | tail -n1)
   [[ "$r" = "$MOCK" ]] \
-    && pass "22 v2_functions: fractal_config_get round-trips a string key" \
-    || fail "22 v2_functions: fractal_config_get: $r"
+    && pass "22 new_primitives: fractal_config_get round-trips a string key" \
+    || fail "22 new_primitives: fractal_config_get: $r"
   if expect_err "unknown config key" \
       "SELECT fractal_config_get('not_a_real_key');"; then
-    pass "22 v2_functions: fractal_config_get rejects an unknown key"
+    pass "22 new_primitives: fractal_config_get rejects an unknown key"
   else
-    fail "22 v2_functions: fractal_config_get accepted an unknown key"
+    fail "22 new_primitives: fractal_config_get accepted an unknown key"
   fi
   if expect_err "expects TEXT" \
       "SELECT fractal_config_get(123);"; then
-    pass "22 v2_functions: fractal_config_get rejects a non-TEXT name"
+    pass "22 new_primitives: fractal_config_get rejects a non-TEXT name"
   else
-    fail "22 v2_functions: fractal_config_get accepted a non-TEXT name"
+    fail "22 new_primitives: fractal_config_get accepted a non-TEXT name"
   fi
 
   # --- scattered argument-validation guards, each otherwise dead ------
   sqlq "CREATE TABLE bt_v22_empty(id INTEGER PRIMARY KEY, emb TEXT);" >/dev/null 2>&1
   if expect_err "k must be > 0" \
       "SELECT fractal_search_telemetry('bt_v22_empty','emb','1.0,2.0',0);"; then
-    pass "22 v2_functions: search_telemetry rejects k<=0"
+    pass "22 new_primitives: search_telemetry rejects k<=0"
   else
-    fail "22 v2_functions: search_telemetry accepted k<=0"
+    fail "22 new_primitives: search_telemetry accepted k<=0"
   fi
   if expect_err "doc_id must be >= 0" \
       "SELECT fractal_store_morphology(-1, '1.0,2.0,3.0');"; then
-    pass "22 v2_functions: store_morphology rejects a negative doc_id"
+    pass "22 new_primitives: store_morphology rejects a negative doc_id"
   else
-    fail "22 v2_functions: store_morphology accepted a negative doc_id"
+    fail "22 new_primitives: store_morphology accepted a negative doc_id"
   fi
   if expect_err "dim must be > 0" \
       "SELECT fractal_agent_detect_loop('a','1.0,2.0',0);"; then
-    pass "22 v2_functions: detect_loop rejects dim<=0"
+    pass "22 new_primitives: detect_loop rejects dim<=0"
   else
-    fail "22 v2_functions: detect_loop accepted dim<=0"
+    fail "22 new_primitives: detect_loop accepted dim<=0"
   fi
   if [[ -f "$(wpath "$MOCKEMB")" ]]; then
     if expect_err "no rows found in the corpus" \
         "SELECT fractal_config_set('reasoning_plugin','$MOCKEMB');" \
         "SELECT fractal_config_set('http_embed_url','https://embed.invalid/v1');" \
         "SELECT fractal_agent_plan_explore('1.0,2.0,3.0','bt_v22_empty','emb',5);"; then
-      pass "22 v2_functions: plan_explore raises a clean ERROR when the corpus table is empty"
+      pass "22 new_primitives: plan_explore raises a clean ERROR when the corpus table is empty"
     else
-      fail "22 v2_functions: plan_explore accepted an empty corpus table"
+      fail "22 new_primitives: plan_explore accepted an empty corpus table"
     fi
   else
-    skip "22 v2_functions: plan_explore empty-corpus (mock_embed_plugin did not build)"
+    skip "22 new_primitives: plan_explore empty-corpus (mock_embed_plugin did not build)"
   fi
   sqlq "DROP TABLE IF EXISTS bt_v22_empty;" >/dev/null 2>&1
 
   # --- argument-validation rejections not exercised above ------------
   if expect_err "hamming_threshold must be >= 0" \
       "SELECT fractal_cycle_detect('[]', 64, -1);"; then
-    pass "22 v2_functions: cycle_detect rejects hamming_threshold<0"
+    pass "22 new_primitives: cycle_detect rejects hamming_threshold<0"
   else
-    fail "22 v2_functions: cycle_detect accepted hamming_threshold<0"
+    fail "22 new_primitives: cycle_detect accepted hamming_threshold<0"
   fi
   if expect_err "malformed fingerprints_json" \
       "SELECT fractal_cycle_detect('not valid json', 8);"; then
-    pass "22 v2_functions: cycle_detect rejects non-JSON fingerprints_json"
+    pass "22 new_primitives: cycle_detect rejects non-JSON fingerprints_json"
   else
-    fail "22 v2_functions: cycle_detect accepted non-JSON fingerprints_json"
+    fail "22 new_primitives: cycle_detect accepted non-JSON fingerprints_json"
   fi
   if expect_err "is not 1 bytes of hex text" \
       "SELECT fractal_cycle_detect('[\"zz\"]', 8);"; then
-    pass "22 v2_functions: cycle_detect rejects a non-hex fingerprint element"
+    pass "22 new_primitives: cycle_detect rejects a non-hex fingerprint element"
   else
-    fail "22 v2_functions: cycle_detect accepted a non-hex fingerprint element"
+    fail "22 new_primitives: cycle_detect accepted a non-hex fingerprint element"
   fi
   if expect_err "k must satisfy 1 <= k" \
       "SELECT fractal_optimize_subset('10,9','1.0,1.0',0);"; then
-    pass "22 v2_functions: optimize_subset rejects k<=0"
+    pass "22 new_primitives: optimize_subset rejects k<=0"
   else
-    fail "22 v2_functions: optimize_subset accepted k<=0"
+    fail "22 new_primitives: optimize_subset accepted k<=0"
   fi
   if expect_err "k must satisfy 1 <= k" \
       "SELECT fractal_optimize_subset('10,9','1.0,1.0',5);"; then
-    pass "22 v2_functions: optimize_subset rejects k>item_values length"
+    pass "22 new_primitives: optimize_subset rejects k>item_values length"
   else
-    fail "22 v2_functions: optimize_subset accepted k>item_values length"
+    fail "22 new_primitives: optimize_subset accepted k>item_values length"
   fi
   if expect_err "upper_bounds length must match" \
       "SELECT fractal_optimize_subset('10,9,8','1.0,1.0',1);"; then
-    pass "22 v2_functions: optimize_subset rejects mismatched upper_bounds length"
+    pass "22 new_primitives: optimize_subset rejects mismatched upper_bounds length"
   else
-    fail "22 v2_functions: optimize_subset accepted mismatched upper_bounds length"
+    fail "22 new_primitives: optimize_subset accepted mismatched upper_bounds length"
   fi
   r=$(sqlq "SELECT fractal_optimize_subset(
               '10,9,8,7,6','1.0,1.0,1.0,1.0,1.0',3,'0.1,0.1,0.1,0.1,0.1',0.1,42);")
   if [[ $? -eq 0 ]] && grep <<< "$r" -q '"weights"'; then
-    pass "22 v2_functions: optimize_subset succeeds with all optional args (prev_weights/turnover/seed)"
+    pass "22 new_primitives: optimize_subset succeeds with all optional args (prev_weights/turnover/seed)"
   else
-    fail "22 v2_functions: optimize_subset full-args call: $r"
+    fail "22 new_primitives: optimize_subset full-args call: $r"
   fi
   if expect_err "malformed prev_weights" \
       "SELECT fractal_optimize_subset('10,9,8,7,6','1.0,1.0,1.0,1.0,1.0',3,'bad!vec');"; then
-    pass "22 v2_functions: optimize_subset rejects a malformed prev_weights"
+    pass "22 new_primitives: optimize_subset rejects a malformed prev_weights"
   else
-    fail "22 v2_functions: optimize_subset accepted a malformed prev_weights"
+    fail "22 new_primitives: optimize_subset accepted a malformed prev_weights"
   fi
   if expect_err "malformed prev_weights, or length does not match" \
       "SELECT fractal_optimize_subset('1.0,2.0,3.0','1.0,1.0,1.0',2,'0.1,0.2');"; then
-    pass "22 v2_functions: optimize_subset rejects a well-formed but wrong-length prev_weights"
+    pass "22 new_primitives: optimize_subset rejects a well-formed but wrong-length prev_weights"
   else
-    fail "22 v2_functions: optimize_subset accepted a wrong-length prev_weights"
+    fail "22 new_primitives: optimize_subset accepted a wrong-length prev_weights"
   fi
   if expect_err "invalid input" \
       "SELECT fractal_tda_persistence_diagram(
          '0,0,2,0,4,0,4,2,4,4,2,4,0,4,0,2', 2, 2, 2.5);"; then
-    pass "22 v2_functions: TDA rejects an invalid max_dim (not 0 or 1)"
+    pass "22 new_primitives: TDA rejects an invalid max_dim (not 0 or 1)"
   else
-    fail "22 v2_functions: TDA accepted an invalid max_dim"
+    fail "22 new_primitives: TDA accepted an invalid max_dim"
   fi
   r=$(sqlq "SELECT fractal_tda_persistence_diagram(
               '0,0,2,0,4,0,4,2,4,4,2,4,0,4,0,2', 2, 1, 2.5, 16);")
   if [[ $? -eq 0 ]] && grep <<< "$r" -q 'betti1'; then
-    pass "22 v2_functions: TDA succeeds with max_h0_bars explicitly supplied"
+    pass "22 new_primitives: TDA succeeds with max_h0_bars explicitly supplied"
   else
-    fail "22 v2_functions: TDA max_h0_bars call: $r"
+    fail "22 new_primitives: TDA max_h0_bars call: $r"
   fi
   if expect_err "malformed points" \
       "SELECT fractal_tda_persistence_diagram('bad!vec', 2, 1, 2.5);"; then
-    pass "22 v2_functions: TDA rejects a malformed points vector"
+    pass "22 new_primitives: TDA rejects a malformed points vector"
   else
-    fail "22 v2_functions: TDA accepted a malformed points vector"
+    fail "22 new_primitives: TDA accepted a malformed points vector"
   fi
   if expect_err "need 2 <= n_points" \
       "SELECT fractal_tda_persistence_diagram('0,0', 2, 1, 2.5);"; then
-    pass "22 v2_functions: TDA rejects too few points"
+    pass "22 new_primitives: TDA rejects too few points"
   else
-    fail "22 v2_functions: TDA accepted too few points"
+    fail "22 new_primitives: TDA accepted too few points"
   fi
   # Portfolio multimodal/pareto argument validation runs BEFORE the
   # enterprise-tier gate, so these reject cleanly with no enterprise
@@ -3656,259 +3672,259 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
   # test above).
   if expect_err "n_restarts must satisfy" \
       "SELECT fractal_optimize_portfolio_multimodal('0.05,0.1','1.0,0.0,0.0,1.0',1,0);"; then
-    pass "22 v2_functions: portfolio_multimodal rejects n_restarts<=0"
+    pass "22 new_primitives: portfolio_multimodal rejects n_restarts<=0"
   else
-    fail "22 v2_functions: portfolio_multimodal accepted n_restarts<=0"
+    fail "22 new_primitives: portfolio_multimodal accepted n_restarts<=0"
   fi
   if expect_err "n_restarts must satisfy" \
       "SELECT fractal_optimize_portfolio_multimodal('0.05,0.1','1.0,0.0,0.0,1.0',1,65);"; then
-    pass "22 v2_functions: portfolio_multimodal rejects n_restarts>64"
+    pass "22 new_primitives: portfolio_multimodal rejects n_restarts>64"
   else
-    fail "22 v2_functions: portfolio_multimodal accepted n_restarts>64"
+    fail "22 new_primitives: portfolio_multimodal accepted n_restarts>64"
   fi
   if expect_err "n_restarts must satisfy" \
       "SELECT fractal_optimize_portfolio_multimodal_pareto('0.05,0.1','1.0,0.0,0.0,1.0',1,0);"; then
-    pass "22 v2_functions: portfolio_multimodal_pareto rejects n_restarts<=0"
+    pass "22 new_primitives: portfolio_multimodal_pareto rejects n_restarts<=0"
   else
-    fail "22 v2_functions: portfolio_multimodal_pareto accepted n_restarts<=0"
+    fail "22 new_primitives: portfolio_multimodal_pareto accepted n_restarts<=0"
   fi
   if expect_err "max_front must satisfy" \
       "SELECT fractal_optimize_portfolio_multimodal_pareto('0.05,0.1','1.0,0.0,0.0,1.0',1,8,0);"; then
-    pass "22 v2_functions: portfolio_multimodal_pareto rejects max_front<=0"
+    pass "22 new_primitives: portfolio_multimodal_pareto rejects max_front<=0"
   else
-    fail "22 v2_functions: portfolio_multimodal_pareto accepted max_front<=0"
+    fail "22 new_primitives: portfolio_multimodal_pareto accepted max_front<=0"
   fi
   if expect_err "max_front must satisfy" \
       "SELECT fractal_optimize_portfolio_multimodal_pareto('0.05,0.1','1.0,0.0,0.0,1.0',1,8,9);"; then
-    pass "22 v2_functions: portfolio_multimodal_pareto rejects max_front>n_restarts"
+    pass "22 new_primitives: portfolio_multimodal_pareto rejects max_front>n_restarts"
   else
-    fail "22 v2_functions: portfolio_multimodal_pareto accepted max_front>n_restarts"
+    fail "22 new_primitives: portfolio_multimodal_pareto accepted max_front>n_restarts"
   fi
   if expect_err "diffusion_mode" \
       "SELECT fractal_optimize_portfolio_multimodal('0.05,0.1','1.0,0.0,0.0,1.0',1,8,0.15,0.9,42,0,'bogus-mode');"; then
-    pass "22 v2_functions: portfolio_multimodal rejects an unknown diffusion_mode"
+    pass "22 new_primitives: portfolio_multimodal rejects an unknown diffusion_mode"
   else
-    fail "22 v2_functions: portfolio_multimodal accepted an unknown diffusion_mode"
+    fail "22 new_primitives: portfolio_multimodal accepted an unknown diffusion_mode"
   fi
   if expect_err "diffusion_mode" \
       "SELECT fractal_optimize_portfolio_multimodal_pareto('0.05,0.1','1.0,0.0,0.0,1.0',1,8,8,42,0,'bogus-mode');"; then
-    pass "22 v2_functions: portfolio_multimodal_pareto rejects an unknown diffusion_mode"
+    pass "22 new_primitives: portfolio_multimodal_pareto rejects an unknown diffusion_mode"
   else
-    fail "22 v2_functions: portfolio_multimodal_pareto accepted an unknown diffusion_mode"
+    fail "22 new_primitives: portfolio_multimodal_pareto accepted an unknown diffusion_mode"
   fi
 
   if expect_err "must be a positive multiple of dim" \
       "SELECT fractal_dimension_boxcount('0,0,1,0,1', 2);"; then
-    pass "22 v2_functions: boxcount rejects a points length not a multiple of dim"
+    pass "22 new_primitives: boxcount rejects a points length not a multiple of dim"
   else
-    fail "22 v2_functions: boxcount accepted a points length not a multiple of dim"
+    fail "22 new_primitives: boxcount accepted a points length not a multiple of dim"
   fi
   if expect_err "must be a positive multiple of dim" \
       "SELECT fractal_morphological_complexity('0,0,1,0,1', 2);"; then
-    pass "22 v2_functions: morphology rejects a points length not a multiple of dim"
+    pass "22 new_primitives: morphology rejects a points length not a multiple of dim"
   else
-    fail "22 v2_functions: morphology accepted a points length not a multiple of dim"
+    fail "22 new_primitives: morphology accepted a points length not a multiple of dim"
   fi
   if expect_err "mu, cov and k must not be NULL" \
       "SELECT fractal_optimize_portfolio(NULL,'1.0,0.0,0.0,1.0',1,42);"; then
-    pass "22 v2_functions: portfolio rejects a NULL mu"
+    pass "22 new_primitives: portfolio rejects a NULL mu"
   else
-    fail "22 v2_functions: portfolio accepted a NULL mu"
+    fail "22 new_primitives: portfolio accepted a NULL mu"
   fi
   if expect_err "k must satisfy 1 <= k" \
       "SELECT fractal_optimize_portfolio('0.1,0.1','1.0,0.0,0.0,1.0',0,42);"; then
-    pass "22 v2_functions: portfolio rejects k<=0"
+    pass "22 new_primitives: portfolio rejects k<=0"
   else
-    fail "22 v2_functions: portfolio accepted k<=0"
+    fail "22 new_primitives: portfolio accepted k<=0"
   fi
   local dspn; dspn=$(sqlq "SELECT fractal_diversify_set_params(NULL);")
   [[ -z "$dspn" ]] \
-    && pass "22 v2_functions: diversify_set_params(NULL) is a clean no-op NULL" \
-    || fail "22 v2_functions: diversify_set_params(NULL) expected NULL, got: $dspn"
+    && pass "22 new_primitives: diversify_set_params(NULL) is a clean no-op NULL" \
+    || fail "22 new_primitives: diversify_set_params(NULL) expected NULL, got: $dspn"
   if expect_err "params must be a JSON object text" \
       "SELECT fractal_diversify_set_params(123);"; then
-    pass "22 v2_functions: diversify_set_params rejects a non-TEXT params arg"
+    pass "22 new_primitives: diversify_set_params rejects a non-TEXT params arg"
   else
-    fail "22 v2_functions: diversify_set_params accepted a non-TEXT params arg"
+    fail "22 new_primitives: diversify_set_params accepted a non-TEXT params arg"
   fi
   r=$(sqlq "SELECT fractal_diversify_set_params(
               '{\"max_shadows_considered\":5,\"tail_buffer_cap\":10,\"stall_threshold\":0.5}');")
   if [[ $? -eq 0 ]]; then
-    pass "22 v2_functions: diversify_set_params applies max_shadows_considered/tail_buffer_cap/stall_threshold"
+    pass "22 new_primitives: diversify_set_params applies max_shadows_considered/tail_buffer_cap/stall_threshold"
   else
-    fail "22 v2_functions: diversify_set_params field-set call: $r"
+    fail "22 new_primitives: diversify_set_params field-set call: $r"
   fi
   r=$(sqlq "SELECT fractal_feedback_report(1,'negative');")
   if [[ $? -eq 0 ]]; then
-    pass "22 v2_functions: feedback_report accepts kind='negative'"
+    pass "22 new_primitives: feedback_report accepts kind='negative'"
   else
-    fail "22 v2_functions: feedback_report negative kind: $r"
+    fail "22 new_primitives: feedback_report negative kind: $r"
   fi
   r=$(sqlq "SELECT fractal_isolate_background(1);")
   if [[ $? -eq 0 ]]; then
-    pass "22 v2_functions: isolate_background succeeds"
+    pass "22 new_primitives: isolate_background succeeds"
   else
-    fail "22 v2_functions: isolate_background: $r"
+    fail "22 new_primitives: isolate_background: $r"
   fi
   r=$(sqlq "SELECT fractal_feedback_report(1,'dwell',50);")
   if [[ $? -eq 0 ]]; then
-    pass "22 v2_functions: feedback_report accepts kind='dwell'"
+    pass "22 new_primitives: feedback_report accepts kind='dwell'"
   else
-    fail "22 v2_functions: feedback_report dwell kind: $r"
+    fail "22 new_primitives: feedback_report dwell kind: $r"
   fi
   r=$(sqlq "SELECT fractal_feedback_report('5','positive');")
   if [[ $? -eq 0 ]]; then
-    pass "22 v2_functions: feedback_report accepts a TEXT result_handle"
+    pass "22 new_primitives: feedback_report accepts a TEXT result_handle"
   else
-    fail "22 v2_functions: feedback_report TEXT handle: $r"
+    fail "22 new_primitives: feedback_report TEXT handle: $r"
   fi
   if expect_err "result_handle must be >= 0" \
       "SELECT fractal_feedback_report('-1','positive');"; then
-    pass "22 v2_functions: feedback_report rejects a negative TEXT result_handle"
+    pass "22 new_primitives: feedback_report rejects a negative TEXT result_handle"
   else
-    fail "22 v2_functions: feedback_report accepted a negative TEXT result_handle"
+    fail "22 new_primitives: feedback_report accepted a negative TEXT result_handle"
   fi
   if expect_err "result_handle must be >= 0" \
       "SELECT fractal_feedback_report(-1,'positive');"; then
-    pass "22 v2_functions: feedback_report rejects a negative INTEGER result_handle"
+    pass "22 new_primitives: feedback_report rejects a negative INTEGER result_handle"
   else
-    fail "22 v2_functions: feedback_report accepted a negative INTEGER result_handle"
+    fail "22 new_primitives: feedback_report accepted a negative INTEGER result_handle"
   fi
   r=$(sqlq "SELECT fractal_isolate_background('5');")
   if [[ $? -eq 0 ]]; then
-    pass "22 v2_functions: isolate_background accepts a TEXT result_handle"
+    pass "22 new_primitives: isolate_background accepts a TEXT result_handle"
   else
-    fail "22 v2_functions: isolate_background TEXT handle: $r"
+    fail "22 new_primitives: isolate_background TEXT handle: $r"
   fi
   if expect_err "result_handle must be >= 0" \
       "SELECT fractal_isolate_background('-1');"; then
-    pass "22 v2_functions: isolate_background rejects a negative TEXT result_handle"
+    pass "22 new_primitives: isolate_background rejects a negative TEXT result_handle"
   else
-    fail "22 v2_functions: isolate_background accepted a negative TEXT result_handle"
+    fail "22 new_primitives: isolate_background accepted a negative TEXT result_handle"
   fi
   if expect_err "result_handle must be >= 0" \
       "SELECT fractal_isolate_background(-1);"; then
-    pass "22 v2_functions: isolate_background rejects a negative INTEGER result_handle"
+    pass "22 new_primitives: isolate_background rejects a negative INTEGER result_handle"
   else
-    fail "22 v2_functions: isolate_background accepted a negative INTEGER result_handle"
+    fail "22 new_primitives: isolate_background accepted a negative INTEGER result_handle"
   fi
   if expect_err "must be >= 0" \
       "SELECT fractal_vascular_network('0,0,0,1,0,0','-1,0','1.0');"; then
-    pass "22 v2_functions: vascular rejects a negative edge index"
+    pass "22 new_primitives: vascular rejects a negative edge index"
   else
-    fail "22 v2_functions: vascular accepted a negative edge index"
+    fail "22 new_primitives: vascular accepted a negative edge index"
   fi
   if expect_err "must be <= 2147483647" \
       "SELECT fractal_vascular_network('0,0,0,1,0,0','2200000000,0','1.0');"; then
-    pass "22 v2_functions: vascular rejects an out-of-range edge index"
+    pass "22 new_primitives: vascular rejects an out-of-range edge index"
   else
-    fail "22 v2_functions: vascular accepted an out-of-range edge index"
+    fail "22 new_primitives: vascular accepted an out-of-range edge index"
   fi
 
   # --- fsql_vector.c surfaces not exercised above --------------------
   if [[ -z "$(sqlq "SELECT fractal_vector_lp_distance(NULL,'1,0,0',2.0);")" ]]; then
-    pass "22 v2_functions: lp_distance(NULL,...) -> NULL (STRICT)"
+    pass "22 new_primitives: lp_distance(NULL,...) -> NULL (STRICT)"
   else
-    fail "22 v2_functions: lp_distance NULL arg did not yield NULL"
+    fail "22 new_primitives: lp_distance NULL arg did not yield NULL"
   fi
   if expect_err "vector dim mismatch" \
       "SELECT fractal_vector_lp_distance('1,0,0','1,0',2.0);"; then
-    pass "22 v2_functions: lp_distance rejects mismatched dims"
+    pass "22 new_primitives: lp_distance rejects mismatched dims"
   else
-    fail "22 v2_functions: lp_distance accepted mismatched dims"
+    fail "22 new_primitives: lp_distance accepted mismatched dims"
   fi
   if expect_err "malformed vector" \
       "SELECT fractal_vector_lp_distance('bad!vec','1,0,0',2.0);"; then
-    pass "22 v2_functions: lp_distance rejects a malformed vector"
+    pass "22 new_primitives: lp_distance rejects a malformed vector"
   else
-    fail "22 v2_functions: lp_distance accepted a malformed vector"
+    fail "22 new_primitives: lp_distance accepted a malformed vector"
   fi
   if expect_err "p must be > 0" \
       "SELECT fractal_vector_lp_distance('1,0,0','0,1,0',0.0);"; then
-    pass "22 v2_functions: lp_distance rejects p<=0"
+    pass "22 new_primitives: lp_distance rejects p<=0"
   else
-    fail "22 v2_functions: lp_distance accepted p<=0"
+    fail "22 new_primitives: lp_distance accepted p<=0"
   fi
   if expect_err "vector dim mismatch" \
       "SELECT fractal_vector_cosine_distance('1,0,0','1,0');"; then
-    pass "22 v2_functions: cosine_distance rejects mismatched dims"
+    pass "22 new_primitives: cosine_distance rejects mismatched dims"
   else
-    fail "22 v2_functions: cosine_distance accepted mismatched dims"
+    fail "22 new_primitives: cosine_distance accepted mismatched dims"
   fi
   if expect_err "malformed vector" \
       "SELECT fractal_vector_cosine_distance('bad!vec','1,0,0');"; then
-    pass "22 v2_functions: cosine_distance rejects a malformed vector"
+    pass "22 new_primitives: cosine_distance rejects a malformed vector"
   else
-    fail "22 v2_functions: cosine_distance accepted a malformed vector"
+    fail "22 new_primitives: cosine_distance accepted a malformed vector"
   fi
   if expect_err "malformed vector" \
       "SELECT fractal_vector_quantize_int8('bad!vec');"; then
-    pass "22 v2_functions: quantize_int8 rejects a malformed vector"
+    pass "22 new_primitives: quantize_int8 rejects a malformed vector"
   else
-    fail "22 v2_functions: quantize_int8 accepted a malformed vector"
+    fail "22 new_primitives: quantize_int8 accepted a malformed vector"
   fi
   if expect_err "malformed vector" \
       "SELECT fractal_vector_quantize_binary('bad!vec');"; then
-    pass "22 v2_functions: quantize_binary rejects a malformed vector"
+    pass "22 new_primitives: quantize_binary rejects a malformed vector"
   else
-    fail "22 v2_functions: quantize_binary accepted a malformed vector"
+    fail "22 new_primitives: quantize_binary accepted a malformed vector"
   fi
   if [[ -z "$(sqlq "SELECT fractal_vector_quantize_binary(NULL);")" ]]; then
-    pass "22 v2_functions: quantize_binary(NULL) -> NULL (STRICT)"
+    pass "22 new_primitives: quantize_binary(NULL) -> NULL (STRICT)"
   else
-    fail "22 v2_functions: quantize_binary NULL arg did not yield NULL"
+    fail "22 new_primitives: quantize_binary NULL arg did not yield NULL"
   fi
   if [[ -z "$(sqlq "SELECT fractal_vector_hamming_distance(NULL,x'00');")" ]]; then
-    pass "22 v2_functions: hamming_distance(NULL,...) -> NULL (STRICT)"
+    pass "22 new_primitives: hamming_distance(NULL,...) -> NULL (STRICT)"
   else
-    fail "22 v2_functions: hamming_distance NULL arg did not yield NULL"
+    fail "22 new_primitives: hamming_distance NULL arg did not yield NULL"
   fi
   if expect_err "expects two packed-bit BLOBs" \
       "SELECT fractal_vector_hamming_distance('1,0,0','1,0,0');"; then
-    pass "22 v2_functions: hamming_distance rejects non-BLOB args"
+    pass "22 new_primitives: hamming_distance rejects non-BLOB args"
   else
-    fail "22 v2_functions: hamming_distance accepted non-BLOB args"
+    fail "22 new_primitives: hamming_distance accepted non-BLOB args"
   fi
   if expect_err "must be non-empty and the same length" \
       "SELECT fractal_vector_hamming_distance(x'00',x'0000');"; then
-    pass "22 v2_functions: hamming_distance rejects mismatched-length BLOBs"
+    pass "22 new_primitives: hamming_distance rejects mismatched-length BLOBs"
   else
-    fail "22 v2_functions: hamming_distance accepted mismatched-length BLOBs"
+    fail "22 new_primitives: hamming_distance accepted mismatched-length BLOBs"
   fi
   if expect_err "malformed vector" \
       "SELECT fractal_vector_to_json('bad!vec');"; then
-    pass "22 v2_functions: to_json rejects a malformed vector"
+    pass "22 new_primitives: to_json rejects a malformed vector"
   else
-    fail "22 v2_functions: to_json accepted a malformed vector"
+    fail "22 new_primitives: to_json accepted a malformed vector"
   fi
   if [[ -z "$(sqlq "SELECT fractal_vector_dims(NULL);")" ]]; then
-    pass "22 v2_functions: dims(NULL) -> NULL (STRICT)"
+    pass "22 new_primitives: dims(NULL) -> NULL (STRICT)"
   else
-    fail "22 v2_functions: dims NULL arg did not yield NULL"
+    fail "22 new_primitives: dims NULL arg did not yield NULL"
   fi
   if expect_err "fractal_vector_dims: malformed vector" \
       "SELECT fractal_vector_dims('bad!vec');"; then
-    pass "22 v2_functions: dims rejects a malformed vector"
+    pass "22 new_primitives: dims rejects a malformed vector"
   else
-    fail "22 v2_functions: dims accepted a malformed vector"
+    fail "22 new_primitives: dims accepted a malformed vector"
   fi
   if expect_err "malformed vector" \
       "SELECT fractal_vector_scale('bad!vec', 2.0);"; then
-    pass "22 v2_functions: scale rejects a malformed vector"
+    pass "22 new_primitives: scale rejects a malformed vector"
   else
-    fail "22 v2_functions: scale accepted a malformed vector"
+    fail "22 new_primitives: scale accepted a malformed vector"
   fi
   if expect_err "malformed vector" \
       "SELECT fractal_vector_norm('bad!vec');"; then
-    pass "22 v2_functions: norm rejects a malformed vector"
+    pass "22 new_primitives: norm rejects a malformed vector"
   else
-    fail "22 v2_functions: norm accepted a malformed vector"
+    fail "22 new_primitives: norm accepted a malformed vector"
   fi
   if expect_err "malformed vector" \
       "SELECT fractal_vector_normalize('bad!vec');"; then
-    pass "22 v2_functions: normalize rejects a malformed vector"
+    pass "22 new_primitives: normalize rejects a malformed vector"
   else
-    fail "22 v2_functions: normalize accepted a malformed vector"
+    fail "22 new_primitives: normalize accepted a malformed vector"
   fi
 
   # --- fsql_config.c surfaces not exercised above --------------------
@@ -3928,9 +3944,9 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
     "SELECT fractal_config_get('enterprise_lib');" \
     "SELECT fractal_config_get('enterprise_ledger_key');")
   if [[ $? -eq 0 ]]; then
-    pass "22 v2_functions: fractal_config_get reads every string-typed config key"
+    pass "22 new_primitives: fractal_config_get reads every string-typed config key"
   else
-    fail "22 v2_functions: fractal_config_get string-key sweep: $r"
+    fail "22 new_primitives: fractal_config_get string-key sweep: $r"
   fi
   # Empty-string reset: a previously-set key goes back to unset (NULL).
   local cfgreset; cfgreset=$(sqlq \
@@ -3938,29 +3954,29 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
     "SELECT fractal_config_set('http_token','');" \
     "SELECT fractal_config_get('http_token');" | tail -n1)
   [[ -z "$cfgreset" ]] \
-    && pass "22 v2_functions: an empty-string set resets a config key to unset" \
-    || fail "22 v2_functions: expected NULL after empty-string reset, got: $cfgreset"
+    && pass "22 new_primitives: an empty-string set resets a config key to unset" \
+    || fail "22 new_primitives: expected NULL after empty-string reset, got: $cfgreset"
   # Over-length URL key (2048 cap) and over-length plain string key
   # (8192 cap).
   local longurl; longurl=$(printf 'a%.0s' $(seq 1 2100))
   if expect_err "too long" \
       "SELECT fractal_config_set('http_embed_url','https://x/$longurl');"; then
-    pass "22 v2_functions: config rejects an over-2048-char URL key"
+    pass "22 new_primitives: config rejects an over-2048-char URL key"
   else
-    fail "22 v2_functions: config accepted an over-2048-char URL key"
+    fail "22 new_primitives: config accepted an over-2048-char URL key"
   fi
   local longstr; longstr=$(printf 'a%.0s' $(seq 1 8200))
   if expect_err "too long" \
       "SELECT fractal_config_set('enterprise_ledger_key','$longstr');"; then
-    pass "22 v2_functions: config rejects an over-8192-char plain string key"
+    pass "22 new_primitives: config rejects an over-8192-char plain string key"
   else
-    fail "22 v2_functions: config accepted an over-8192-char plain string key"
+    fail "22 new_primitives: config accepted an over-8192-char plain string key"
   fi
   if expect_err "must be one of" \
       "SELECT fractal_config_set('text_to_sql_allowed_statements','bogus');"; then
-    pass "22 v2_functions: config rejects an unknown enum value"
+    pass "22 new_primitives: config rejects an unknown enum value"
   else
-    fail "22 v2_functions: config accepted an unknown enum value"
+    fail "22 new_primitives: config accepted an unknown enum value"
   fi
   r=$(sqlq \
     "SELECT fractal_config_set('agent_partial_reasoning_fail','1');" \
@@ -3971,57 +3987,57 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
     "SELECT fractal_config_set('agent_partial_reasoning_fail','true');" \
     "SELECT fractal_config_set('agent_partial_reasoning_fail','false');")
   if [[ $? -eq 0 ]]; then
-    pass "22 v2_functions: config bool setter accepts 1/yes/0/no/true/false spellings"
+    pass "22 new_primitives: config bool setter accepts 1/yes/0/no/true/false spellings"
   else
-    fail "22 v2_functions: config bool spellings: $r"
+    fail "22 new_primitives: config bool spellings: $r"
   fi
   sqlq "SELECT fractal_config_set('agent_partial_reasoning_fail','off');" >/dev/null 2>&1
   if expect_err "expects an integer" \
       "SELECT fractal_config_set('text_to_sql_max_attempts','bogus');"; then
-    pass "22 v2_functions: config int setter rejects a non-numeric value"
+    pass "22 new_primitives: config int setter rejects a non-numeric value"
   else
-    fail "22 v2_functions: config int setter accepted a non-numeric value"
+    fail "22 new_primitives: config int setter accepted a non-numeric value"
   fi
   if expect_err "expects an integer" \
       "SELECT fractal_config_set('text_to_sql_max_attempts','3abc');"; then
-    pass "22 v2_functions: config int setter rejects a value with trailing junk"
+    pass "22 new_primitives: config int setter rejects a value with trailing junk"
   else
-    fail "22 v2_functions: config int setter accepted trailing junk"
+    fail "22 new_primitives: config int setter accepted trailing junk"
   fi
   if expect_err "must be 1..10" \
       "SELECT fractal_config_set('text_to_sql_max_attempts','0');"; then
-    pass "22 v2_functions: config int setter rejects a below-range value"
+    pass "22 new_primitives: config int setter rejects a below-range value"
   else
-    fail "22 v2_functions: config int setter accepted a below-range value"
+    fail "22 new_primitives: config int setter accepted a below-range value"
   fi
   if expect_err "must be 1..10" \
       "SELECT fractal_config_set('text_to_sql_max_attempts','11');"; then
-    pass "22 v2_functions: config int setter rejects an above-range value"
+    pass "22 new_primitives: config int setter rejects an above-range value"
   else
-    fail "22 v2_functions: config int setter accepted an above-range value"
+    fail "22 new_primitives: config int setter accepted an above-range value"
   fi
   if expect_err "expects true/false/on/off/1/0" \
       "SELECT fractal_config_set('agent_partial_reasoning_fail','bogus');"; then
-    pass "22 v2_functions: config bool setter rejects an unknown spelling"
+    pass "22 new_primitives: config bool setter rejects an unknown spelling"
   else
-    fail "22 v2_functions: config bool setter accepted an unknown spelling"
+    fail "22 new_primitives: config bool setter accepted an unknown spelling"
   fi
   if expect_err "unknown config key" \
       "SELECT fractal_config_set('not_a_real_key','x');"; then
-    pass "22 v2_functions: fractal_config_set rejects an unknown config key"
+    pass "22 new_primitives: fractal_config_set rejects an unknown config key"
   else
-    fail "22 v2_functions: fractal_config_set accepted an unknown config key"
+    fail "22 new_primitives: fractal_config_set accepted an unknown config key"
   fi
 
   # --- fractalsql_sqlite.c surfaces not exercised above --------------
   local sqrtn; sqrtn=$(sqlq "SELECT sqrt(NULL);")
   [[ -z "$sqrtn" ]] \
-    && pass "22 v2_functions: sqrt(NULL) -> NULL" \
-    || fail "22 v2_functions: sqrt(NULL) expected NULL, got: $sqrtn"
+    && pass "22 new_primitives: sqrt(NULL) -> NULL" \
+    || fail "22 new_primitives: sqrt(NULL) expected NULL, got: $sqrtn"
   local cosn; cosn=$(sqlq "SELECT cos(NULL);")
   [[ -z "$cosn" ]] \
-    && pass "22 v2_functions: cos(NULL) -> NULL" \
-    || fail "22 v2_functions: cos(NULL) expected NULL, got: $cosn"
+    && pass "22 new_primitives: cos(NULL) -> NULL" \
+    || fail "22 new_primitives: cos(NULL) expected NULL, got: $cosn"
   # fractal_sfs_converge's own argc!=2 check is unreachable via SQL: it is
   # registered at fixed arity 2, so SQLite's own prepare-time arity
   # check ("wrong number of arguments") fires first, every time --
@@ -4029,12 +4045,12 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
   # coverage gap; no test can reach the function's own branch.
   local fsn; fsn=$(sqlq "SELECT fractal_sfs_converge(NULL,'1.0,0.0,0.0');")
   [[ -z "$fsn" ]] \
-    && pass "22 v2_functions: fractal_sfs_converge(NULL, ...) -> NULL (STRICT)" \
-    || fail "22 v2_functions: fractal_sfs_converge NULL arg did not yield NULL"
+    && pass "22 new_primitives: fractal_sfs_converge(NULL, ...) -> NULL (STRICT)" \
+    || fail "22 new_primitives: fractal_sfs_converge NULL arg did not yield NULL"
   r=$(sqlq "SELECT fractal_sfs_converge('0.0,0.0,0.0','1.0,0.0,0.0');")
   [[ "$r" == "1.0" ]] \
-    && pass "22 v2_functions: fractal_sfs_converge cosine_distance's zero-norm fallback (distance=1.0)" \
-    || fail "22 v2_functions: expected distance=1.0 for a zero vector, got: $r"
+    && pass "22 new_primitives: fractal_sfs_converge cosine_distance's zero-norm fallback (distance=1.0)" \
+    || fail "22 new_primitives: expected distance=1.0 for a zero vector, got: $r"
 
   sqlq "
     CREATE TABLE bt_v22_explore(id INTEGER PRIMARY KEY, embedding TEXT);
@@ -4042,19 +4058,19 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
       (NULL),('1.0,0.05,0.0,0.0'),('0.9,0.1,0.0,0.0'),('0.2,0.9,0.0,0.0'),
       ('0.1,0.1,0.9,0.0'),('0.0,0.0,0.0,1.0'),('0.5,0.5,0.0,0.0'),
       ('0.3,0.3,0.3,0.1');
-  " >/dev/null 2>&1 || fail "22 v2_functions: bt_v22_explore fixture setup failed"
+  " >/dev/null 2>&1 || fail "22 new_primitives: bt_v22_explore fixture setup failed"
   if expect_err "fractal_search_explore(emb, query [, params]) expects" \
       "SELECT fractal_search_explore(embedding) FROM bt_v22_explore;"; then
-    pass "22 v2_functions: search_explore rejects the wrong arg count"
+    pass "22 new_primitives: search_explore rejects the wrong arg count"
   else
-    fail "22 v2_functions: search_explore accepted the wrong arg count"
+    fail "22 new_primitives: search_explore accepted the wrong arg count"
   fi
   r=$(sqlq "SELECT fractal_search_explore(embedding, '1.0,0.05,0.0,0.0',
               '{\"population_size\":16,\"iterations\":8}') FROM bt_v22_explore;")
   if [[ $? -eq 0 ]]; then
-    pass "22 v2_functions: search_explore succeeds with a 3rd TEXT params arg"
+    pass "22 new_primitives: search_explore succeeds with a 3rd TEXT params arg"
   else
-    fail "22 v2_functions: search_explore 3-arg params call: $r"
+    fail "22 new_primitives: search_explore 3-arg params call: $r"
   fi
   # Below-floor params (population_size/iterations/diffusion_factor all
   # 0) clamp up to the floor (2/1/1) rather than erroring.
@@ -4062,21 +4078,21 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
               '{\"population_size\":0,\"iterations\":0,\"diffusion_factor\":0}')
               FROM bt_v22_explore;")
   if [[ $? -eq 0 ]]; then
-    pass "22 v2_functions: search_explore clamps below-floor params up instead of erroring"
+    pass "22 new_primitives: search_explore clamps below-floor params up instead of erroring"
   else
-    fail "22 v2_functions: search_explore below-floor params: $r"
+    fail "22 new_primitives: search_explore below-floor params: $r"
   fi
   if expect_err "fractal_search_explore input error" \
       "SELECT fractal_search_explore(embedding, NULL) FROM bt_v22_explore;"; then
-    pass "22 v2_functions: search_explore rejects a NULL query (bad aggregate)"
+    pass "22 new_primitives: search_explore rejects a NULL query (bad aggregate)"
   else
-    fail "22 v2_functions: search_explore accepted a NULL query"
+    fail "22 new_primitives: search_explore accepted a NULL query"
   fi
   if expect_err "fractal_search_explore input error" \
       "SELECT fractal_search_explore(embedding, '1.0,0.0,0.0,0.0,0.0') FROM bt_v22_explore;"; then
-    pass "22 v2_functions: search_explore rejects a row whose embedding dim mismatches the query"
+    pass "22 new_primitives: search_explore rejects a row whose embedding dim mismatches the query"
   else
-    fail "22 v2_functions: search_explore accepted a dim-mismatched row"
+    fail "22 new_primitives: search_explore accepted a dim-mismatched row"
   fi
   sqlq "DROP TABLE IF EXISTS bt_v22_explore;" >/dev/null 2>&1
 
@@ -4111,67 +4127,67 @@ print(','.join('%.6f' % math.sin(i/4.0) for i in range(32)))")
     fi
   done
   if [[ ${#wrap_bad[@]} -eq 0 ]]; then
-    pass "22 v2_functions: ${#wrap_rows[@]} integer arguments reject a value that wraps back into range"
+    pass "22 new_primitives: ${#wrap_rows[@]} integer arguments reject a value that wraps back into range"
   else
-    fail "22 v2_functions: integer arguments past int range: ${wrap_bad[*]}"
+    fail "22 new_primitives: integer arguments past int range: ${wrap_bad[*]}"
   fi
   if expect_err "n_bits must be between 1 and 33554424" \
       "SELECT fractal_state_fingerprint('1.0,0.0,0.0', 33554425);"; then
-    pass "22 v2_functions: state_fingerprint refuses an n_bits past the 4 MiB ceiling"
+    pass "22 new_primitives: state_fingerprint refuses an n_bits past the 4 MiB ceiling"
   else
-    fail "22 v2_functions: state_fingerprint accepted an n_bits past the ceiling"
+    fail "22 new_primitives: state_fingerprint accepted an n_bits past the ceiling"
   fi
   # The cost is n_bits x vector length, so that product is bounded as well.
   if expect_err "n_bits x vector length must not exceed 268435456" \
       "SELECT fractal_state_fingerprint('1,2,3,4,5,6,7,8,9', 33554424);"; then
-    pass "22 v2_functions: state_fingerprint refuses a fingerprint whose n_bits x length is past the work bound"
+    pass "22 new_primitives: state_fingerprint refuses a fingerprint whose n_bits x length is past the work bound"
   else
-    fail "22 v2_functions: state_fingerprint accepted n_bits x length past the work bound"
+    fail "22 new_primitives: state_fingerprint accepted n_bits x length past the work bound"
   fi
   if expect_err "n_bits must be between 1 and 33554424" \
       "SELECT fractal_agent_detect_loop('a','1,2,3,4,5,6',3,33554425);"; then
-    pass "22 v2_functions: agent_detect_loop refuses an n_bits past the ceiling"
+    pass "22 new_primitives: agent_detect_loop refuses an n_bits past the ceiling"
   else
-    fail "22 v2_functions: agent_detect_loop accepted an n_bits past the ceiling"
+    fail "22 new_primitives: agent_detect_loop accepted an n_bits past the ceiling"
   fi
   if expect_err "item count x k must not exceed 16777216" \
       "WITH RECURSIVE g(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM g WHERE i<6000) SELECT fractal_optimize_subset((SELECT group_concat(5,',') FROM g), (SELECT group_concat(1,',') FROM g), 3000);"; then
-    pass "22 v2_functions: optimize_subset refuses items x k past the work bound"
+    pass "22 new_primitives: optimize_subset refuses items x k past the work bound"
   else
-    fail "22 v2_functions: optimize_subset accepted items x k past the work bound"
+    fail "22 new_primitives: optimize_subset accepted items x k past the work bound"
   fi
   if expect_err "series longer than 1048576 samples" \
       "WITH RECURSIVE g(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM g WHERE i<1048577) SELECT fractal_periodogram((SELECT group_concat(i%7,',') FROM g), 3);"; then
-    pass "22 v2_functions: periodogram refuses a series past 1048576 samples"
+    pass "22 new_primitives: periodogram refuses a series past 1048576 samples"
   else
-    fail "22 v2_functions: periodogram accepted a series past 1048576 samples"
+    fail "22 new_primitives: periodogram accepted a series past 1048576 samples"
   fi
   if expect_err "malformed points" \
       "WITH RECURSIVE g(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM g WHERE i<4194306) SELECT fractal_dimension_boxcount((SELECT group_concat(i%97,',') FROM g), 2);"; then
-    pass "22 v2_functions: boxcount refuses a point cloud past the 4 MiB input cap"
+    pass "22 new_primitives: boxcount refuses a point cloud past the 4 MiB input cap"
   else
-    fail "22 v2_functions: boxcount accepted a point cloud past the 4 MiB input cap"
+    fail "22 new_primitives: boxcount accepted a point cloud past the 4 MiB input cap"
   fi
   if expect_err "fractalsql" \
       "SELECT fractal_dimension_boxcount('0,0,1,0,0,1,1,1,2,2,3,1,1,3,4,4,nan,5', 2);"; then
-    pass "22 v2_functions: boxcount refuses a non-finite coordinate"
+    pass "22 new_primitives: boxcount refuses a non-finite coordinate"
   else
-    fail "22 v2_functions: boxcount accepted a non-finite coordinate"
+    fail "22 new_primitives: boxcount accepted a non-finite coordinate"
   fi
   local big_dim; big_dim=$(awk 'BEGIN{for(i=0;i<1000;i++)printf "%s0.5",(i?",":"")}')
   if expect_err "search too large" \
       "SELECT fractal_sfs_converge_debug('$big_dim',1000,1000,8);"; then
-    pass "22 v2_functions: search_debug refuses iterations x population x diffusion x dim past the work bound"
+    pass "22 new_primitives: search_debug refuses iterations x population x diffusion x dim past the work bound"
   else
-    fail "22 v2_functions: search_debug accepted a search past the work bound"
+    fail "22 new_primitives: search_debug accepted a search past the work bound"
   fi
   if expect_err "population_size 1 out of range [2, 10000]" \
       "SELECT fractal_sfs_converge_debug('1.0,0.0,0.0',30,1,2);" \
       && expect_err "population_size 10001 out of range [2, 10000]" \
       "SELECT fractal_sfs_converge_debug('1.0,0.0,0.0',30,10001,2);"; then
-    pass "22 v2_functions: search_debug reports the core's population range (2..10000)"
+    pass "22 new_primitives: search_debug reports the core's population range (2..10000)"
   else
-    fail "22 v2_functions: search_debug population range is not the core's"
+    fail "22 new_primitives: search_debug population range is not the core's"
   fi
 }
 
@@ -8275,7 +8291,7 @@ gate_37_mcp_smoke() {
   if [[ $rc -ne 0 ]]; then
     fail "37 mcp_smoke: client driver exited $rc"
   else
-    pass "37 mcp_smoke: full MCP session (initialize, 87-tool catalog, discovery/cognition/agency round trips, enterprise clean-error path, \$ / cancel, resources+prompts)"
+    pass "37 mcp_smoke: full MCP session (initialize, 108-tool catalog, discovery/cognition/agency round trips, enterprise clean-error path, \$ / cancel, resources+prompts)"
   fi
 }
 
@@ -8643,15 +8659,15 @@ gate_41_db_probe() {
   rm -f "$mainobj" "$errobj" "$logobj" "$sqliteobj"
   ( cd "$HERE/mcp" && \
     env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g \
-        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.14\"" \
+        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.15\"" \
         -I../deps/sqlite -Ivendor -Isrc ${ossl_cflags[@]+"${ossl_cflags[@]}"} \
         -c tests/db_probe.cpp -o "$mainobj" \
      && env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g \
-        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.14\"" \
+        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.15\"" \
         -I../deps/sqlite -Ivendor -Isrc ${ossl_cflags[@]+"${ossl_cflags[@]}"} \
         -c src/errors.cpp -o "$errobj" \
      && env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g \
-        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.14\"" \
+        ${covflags[@]+"${covflags[@]}"} -DFSQL_MCP_VERSION="\"2.0.15\"" \
         -I../deps/sqlite -Ivendor -Isrc ${ossl_cflags[@]+"${ossl_cflags[@]}"} \
         -c src/logging.cpp -o "$logobj" \
      && env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$CC" -std=c99 -O1 -g -fPIC \
@@ -9110,13 +9126,13 @@ gate_50_ledger_unit() {
   else fail "50 ledger_unit: $bad mode(s) failed, see the output above"; fi
 }
 
-# 51 refusals: the three drivers that exercise what the extension refuses, in the real shell. test/enterprise_errors.py (every refusal of the
+# 51 refusals: the drivers that exercise what the extension refuses, in the real shell. test/enterprise_errors.py (every refusal of the
 # enterprise library: a wrong, short, long or empty .sig, a missing .sig, an unreadable library, one without the core's symbols, an attempt
 # that is not retried), test/plugin_gate.py (the same for the reasoning plugin) and test/config_matrix.py (every configuration key, accepted
 # and refused values). A valid signature needs the vendor's private key, so the accepted path is gate 26's; these are the refusals.
 gate_51_refusals() {
   local d
-  for d in enterprise_errors plugin_gate config_matrix t2s_matrix vectorizer_matrix sql_agent_matrix unicode_matrix scripted_replies id_emission ledger_payloads; do
+  for d in enterprise_errors plugin_gate config_matrix t2s_matrix vectorizer_matrix sql_agent_matrix unicode_matrix; do
     [[ -f "$HERE/test/$d.py" ]] || { skip "51 refusals (test/$d.py not present)"; return; }
   done
   if [[ "$IS_MSYS" -eq 1 ]]; then skip "51 refusals (POSIX shell and compiler only)"; return; fi
@@ -9140,7 +9156,7 @@ gate_51_refusals() {
       san_shell=""
     fi
   fi
-  for d in enterprise_errors plugin_gate config_matrix t2s_matrix vectorizer_matrix sql_agent_matrix unicode_matrix scripted_replies id_emission ledger_payloads; do
+  for d in enterprise_errors plugin_gate config_matrix t2s_matrix vectorizer_matrix sql_agent_matrix unicode_matrix; do
     local host=(); [[ -n "$san_shell" && ( "$d" == enterprise_errors || "$d" == plugin_gate ) ]] && host=(SQLITE3="$san_shell")
     # The sanitizer runtime stays preloaded into the driver: it loads the extension under test into
     # its own process (or drives the sqlite3 CLI that does), and an instrumented extension cannot be
@@ -9156,8 +9172,127 @@ gate_51_refusals() {
     else printf '%s\n' "$out" | tail -8 | sed 's/^/         /'; fi
   done
   if [[ "$bad" -eq 0 && "$refused" -gt 0 ]]; then skip "51 refusals: $refused driver(s) skipped -- the sanitizer runtime refused to start in this host process (Darwin DYLD_INSERT_LIBRARIES; not an extension failure); $total checks passed in the rest"
-  elif [[ "$bad" -eq 0 ]]; then pass "51 refusals: $total checks passed (enterprise library, reasoning plugin, configuration keys, text-to-SQL replies, the vectorizer, the SQL agent, Unicode, scripted model replies, ids in agent results, ledger payloads)"
+  elif [[ "$bad" -eq 0 ]]; then pass "51 refusals: $total checks passed (enterprise library, reasoning plugin, configuration keys, text-to-SQL replies, the vectorizer, the SQL agent, Unicode)"
   else fail "51 refusals: $bad driver(s) failed, see the output above"; fi
+}
+
+# driver_gate <number> <name> <what it proves>: run a python driver against the built extension and report it as a gate of its own.
+driver_gate() {
+  local num="$1" name="$2" what="$3" out
+  [[ -f "$HERE/test/$name.py" ]] || { skip "$num $name (test/$name.py not present)"; return; }
+  [[ -n "$PY" ]] || { skip "$num $name (no python3 on PATH)"; return; }
+  resolve_ext || { fail "$num $name: no extension found (run gate 01 or set FSQL_EXT)"; return; }
+  local ext_abs; ext_abs="$(cd "$(dirname "$EXT")" && pwd)/$(basename "$EXT")"
+  out="$(cd "$HERE" && FSQL_EXT="$ext_abs" "$PY" -I "test/$name.py" 2>&1)"
+  if [[ "$out" == *" 0 failed"* ]]; then
+    pass "$num $name: $(grep -o '[0-9]* checks passed' <<< "$out" | head -1) ($what)"
+  elif [[ "$sysname" == "Darwin" ]] && grep -qE "Interceptors are not working|loaded too late" <<< "$out"; then
+    skip "$num $name (the sanitizer runtime refused to start in this host process)"
+  else
+    printf '%s\n' "$out" | tail -8 | sed 's/^/    /' >&2; fail "$num $name: see the output above"
+  fi
+}
+
+# 59 id_emission: how the agents write a row's id into their JSON result (test/id_emission.py). The id is the caller's own data, so it
+# comes back byte for byte -- quotes, backslashes, control characters, unicode, an empty id, a 400-digit id -- and the result document
+# stays valid JSON.
+gate_59_id_emission() { driver_gate 59 id_emission "the row ids come back byte for byte"; }
+
+# 60 scripted_replies: the extension against a model that answers exactly what the test scripts (test/scripted_replies.py): the embedding
+# and text-to-SQL replies in every shape the parser takes or refuses.
+gate_60_scripted_replies() { driver_gate 60 scripted_replies "the model answers exactly what the test scripts"; }
+
+# 61 ledger_payloads: what fractal_audit_log writes into the chain for every shape of entry type, payload and actor
+# (test/ledger_payloads.py): the caller's text never breaks the JSON or the chain.
+gate_61_ledger_payloads() { driver_gate 61 ledger_payloads "every entry type, payload and actor shape"; }
+
+# 62 rename: the two-argument fractal_search was renamed fractal_sfs_converge. The old names are refused, and the refusal names the new
+# one: there are no aliases.
+gate_62_rename() {
+  if expect_err "renamed fractal_sfs_converge" "SELECT fractal_search('[0.1,0.2,0.3]','[0.1,0.2,0.3]');"; then
+    pass "62 rename: fractal_search(vector, query) is refused and the refusal names fractal_sfs_converge"
+  else
+    fail "62 rename: fractal_search(vector, query) was not refused"
+  fi
+  if expect_err "renamed fractal_sfs_converge" "SELECT fractal_search('[0.1,0.2,0.3]','[0.1,0.2,0.3]',2);"; then
+    pass "62 rename: the three-argument form is refused too"
+  else
+    fail "62 rename: fractal_search(vector, query, k) was not refused"
+  fi
+  local r; r=$(sqlq "SELECT fractal_sfs_converge('[0.1,0.2,0.3]','[0.1,0.2,0.3]');")
+  if [[ $? -eq 0 ]] && grep -Eq '^-?[0-9]' <<< "$r"; then
+    pass "62 rename: fractal_sfs_converge(vector, query) answers"
+  else
+    fail "62 rename: fractal_sfs_converge: $r"
+  fi
+}
+
+# 63 ledger_env: the ledger's environment configuration. The row cap refuses an append past the limit, and the anchor mode publishes the
+# chain head to the log it names -- an unknown mode publishes nothing.
+gate_63_ledger_env() {
+  [[ -f "$(wpath "$MOCKENT")" ]] || { skip "63 ledger_env (the mock enterprise core did not build)"; return; }
+  local out
+  out="$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 FSQL_LEDGER_MAX_ROWS=2 sqlq \
+          "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
+          "SELECT fractal_audit_log('env.test','{\"n\":1}');" \
+          "SELECT fractal_audit_log('env.test','{\"n\":2}');" \
+          "SELECT fractal_audit_log('env.test','{\"n\":3}');" 2>&1)"
+  if grep -q "chain is full" <<< "$out"; then
+    pass "63 ledger_env: the row cap refuses an append past the limit"
+  else
+    fail "63 ledger_env: the row cap did not refuse the append: $out"
+  fi
+  out="$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 FSQL_LEDGER_ANCHOR_LOG=stderr sqlq \
+          "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
+          "SELECT fractal_audit_log('env.anchor','{\"n\":1}');" 2>&1)"
+  if grep -q '"event":"ledger_head"' <<< "$out"; then
+    pass "63 ledger_env: the stderr anchor publishes the chain head"
+  else
+    fail "63 ledger_env: no chain head reached stderr: $out"
+  fi
+  out="$(FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 FSQL_LEDGER_ANCHOR_LOG=bogus sqlq \
+          "SELECT fractal_config_set('enterprise_lib','$MOCKENT');" \
+          "SELECT fractal_audit_log('env.anchor','{\"n\":1}');" 2>&1)"
+  if grep -q '"event":"ledger_head"' <<< "$out"; then
+    fail "63 ledger_env: an unknown anchor mode published a head"
+  else
+    pass "63 ledger_env: an unknown anchor mode publishes nothing"
+  fi
+}
+
+# 64 analytics: the analytics tier's surface -- the dimension, portfolio and signal functions answer on a small fixture and refuse a
+# malformed one.
+gate_64_analytics() {
+  local s32 r
+  s32=$(awk 'BEGIN{out=""; for(i=1;i<=32;i++){v=sin(i/3.0); if(i>1) out=out","; out=out v} print out}')
+  r=$(sqlq "SELECT fractal_dimension_dfa('$s32');")
+  if [[ $? -eq 0 ]] && grep -Eq '^-?[0-9]' <<< "$r"; then
+    pass "64 analytics: DFA returns a numeric exponent"
+  else
+    fail "64 analytics: DFA happy path: $r"
+  fi
+  if expect_err "malformed" "SELECT fractal_dimension_dfa('bad!vec');"; then
+    pass "64 analytics: DFA rejects a malformed series"
+  else
+    fail "64 analytics: DFA accepted a malformed series"
+  fi
+  r=$(sqlq "SELECT fractal_optimize_portfolio('0.10,0.12,0.07','0.04,0.01,0.005,0.01,0.06,0.01,0.005,0.01,0.05',2,42);")
+  if [[ $? -eq 0 ]] && grep <<< "$r" -q "{"; then
+    pass "64 analytics: the portfolio optimiser returns JSON"
+  else
+    fail "64 analytics: portfolio happy path: $r"
+  fi
+  if expect_err "malformed" "SELECT fractal_optimize_portfolio('bad!vec','1.0,0.0,0.0,1.0',1,42);"; then
+    pass "64 analytics: the portfolio optimiser rejects a malformed mu"
+  else
+    fail "64 analytics: the portfolio optimiser accepted a malformed mu"
+  fi
+  r=$(sqlq "SELECT fractal_periodogram('$s32', 3);")
+  if [[ $? -eq 0 ]] && grep <<< "$r" -q "freqs"; then
+    pass "64 analytics: the periodogram returns its frequencies"
+  else
+    fail "64 analytics: periodogram happy path: $r"
+  fi
 }
 
 # 52 audit_regress: the security regressions reachable from SQL, as asserted behaviour (test/audit_regress.py): the bearer token and
@@ -9417,7 +9552,7 @@ gate_title() {
     15) echo "embed" ;;                 16) echo "embed_authz" ;;
     17) echo "embed_soak" ;;            18) echo "embed_crash" ;;
     19) echo "sfs_bounds" ;;            20) echo "api_func" ;;
-    21) echo "fuzz_smoke" ;;            22) echo "v2_functions" ;;
+    21) echo "fuzz_smoke" ;;            22) echo "new_primitives" ;;
     23) echo "agents" ;;                24) echo "enterprise" ;;
     25) echo "enterprise_stress" ;;     26) echo "enterprise_signature" ;;
     27) echo "think" ;;                 28) echo "review_isolation" ;;
@@ -9497,6 +9632,12 @@ run_gate() {
     56) gate_56_oom_sweep ;;
     57) gate_57_edge_inputs ;;
     58) gate_58_kit_mutation ;;
+    59) gate_59_id_emission ;;
+    60) gate_60_scripted_replies ;;
+    61) gate_61_ledger_payloads ;;
+    62) gate_62_rename ;;
+    63) gate_63_ledger_env ;;
+    64) gate_64_analytics ;;
   esac
 }
 

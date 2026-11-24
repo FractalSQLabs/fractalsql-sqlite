@@ -10,22 +10,30 @@ import os, shutil, subprocess, sys, tempfile
 HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
 SQLITE3 = os.environ.get("SQLITE3") or shutil.which("sqlite3")
 EXT = os.path.abspath(os.environ.get("FSQL_EXT") or os.path.join(ROOT, "fractalsql.so"))
+# The shell's .load tokenizer splits on spaces, so a path with a space in it has to be handed in the
+# form the CLI can read (the harness knows both forms; FSQL_EXT_LOAD is the CLI-safe one).
+EXT_LOAD = os.environ.get("FSQL_EXT_LOAD") or EXT
 if not SQLITE3 or not os.path.exists(EXT):
     print("  FAIL need the sqlite3 shell and the built extension (FSQL_EXT)"); sys.exit(1)
 W = os.path.realpath(tempfile.mkdtemp(prefix="fsql_plugate_"))
-PLUG = os.path.join(W, "plug.so")
+# A harness that already built the mock plugin hands its path in, so this driver needs no compiler
+# of its own (the Windows runner builds it once and passes it down).
+PLUG = os.environ.get("FSQL_MOCK_PLUGIN")
 # The compiler runs unsanitized: this process carries the sanitizer runtime (preloaded, so the
 # instrumented extension under test can be loaded into the host), and a preloaded runtime in the
 # compiler trips the leak checker over the toolchain's own allocations.
 BUILD_ENV = {k: v for k, v in os.environ.items() if k != "LD_PRELOAD"}
-if subprocess.run(["cc", "-shared", "-fPIC", "-std=c99", "-I" + os.path.join(ROOT, "include"), os.path.join(ROOT, "tests", "mock_reasoning_plugin.c"), "-o", PLUG], capture_output=True, env=BUILD_ENV).returncode != 0:
-    print("  FAIL the mock plugin did not build"); sys.exit(1)
+CC = os.environ.get("FSQL_CC") or "cc"
+if PLUG is None:
+    PLUG = os.path.join(W, "plug.so")
+    if subprocess.run([CC, "-shared", "-fPIC", "-std=c99", "-I" + os.path.join(ROOT, "include"), os.path.join(ROOT, "tests", "mock_reasoning_plugin.c"), "-o", PLUG], capture_output=True, env=BUILD_ENV).returncode != 0:
+        print("  FAIL the mock plugin did not build"); sys.exit(1)
 passes = fails = 0
 def run(plugin, env=None, sig=None):
     if sig is not None: open(plugin + ".sig", "wb").write(sig)
     e = {k: v for k, v in os.environ.items() if not k.startswith("FSQL_REASONING") and not k.startswith("FRACTALSQL_ENTERPRISE")}
     e.update(env or {})
-    script = ".load %s\nSELECT fractal_config_set('reasoning_plugin','%s');\nSELECT fractal_reason('ping');\nSELECT fractal_reason('ping');\n" % (EXT, plugin)
+    script = ".load %s\nSELECT fractal_config_set('reasoning_plugin','%s');\nSELECT fractal_reason('ping');\nSELECT fractal_reason('ping');\n" % (EXT_LOAD, plugin)
     p = subprocess.run([SQLITE3, "-batch", ":memory:"], input=script, capture_output=True, text=True, env=e, timeout=60)
     return p.stdout + p.stderr
 def check(out, want, what, absent=False):

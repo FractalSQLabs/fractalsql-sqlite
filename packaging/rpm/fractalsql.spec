@@ -3,7 +3,7 @@
 %global mcpdocdir %{docdir}/mcp
 
 Name:           fractalsql-sqlite
-Version:        2.0.14
+Version:        2.0.15
 Release:        1%{?dist}
 Summary:        Stochastic Fractal Search SQLite loadable extension (Community)
 
@@ -25,7 +25,7 @@ fractalsql-sqlite is a SQLite loadable extension exposing the full
 FractalSQL 2.0 surface:
 
     fractal_edition()          -> 'Community'
-    fractal_version()          -> '2.0.14'
+    fractal_version()          -> '2.0.15'
     fractal_sfs_converge(vector, query) -> REAL (cosine distance to
                                           SFS-refined projection
                                           of the query vector)
@@ -126,13 +126,19 @@ Load inside any SQLite session:
 
     SELECT load_extension('/usr/local/lib/sqlite3/fractalsql');
     SELECT fractal_edition();   -- 'Community'
-    SELECT fractal_version();   -- '2.0.14'
+    SELECT fractal_version();   -- '2.0.15'
 
 See /usr/share/doc/fractalsql-sqlite/load_extension.sql for examples.
 
 EOF
 
 %changelog
+* Tue Nov 24 2026 FractalSQLabs - 2.0.15-1
+- MCP server: 14 new vector tools, all in the existing Analytics tier -- the canonical vector type (fractal_vector, fractal_vector_from_text, fractal_vector_to_json) and the algebra (fractal_vector_add, _sub, _scale, _normalize, _norm, _dims, _cosine_distance, _cosine_similarity, _l2_distance, _l2_squared, _negative_inner_product).
+- The MCP catalog is now 108 tools. Every vector tool is read-only, so an agent can call them without a write gate.
+- Documentation: the indexed-search section explains what the index does and does not do, and the tool catalog and the demo's tool counts now match the shipped server.
+- The SQLite extension itself is unchanged in this release.
+
 * Sun Nov 22 2026 FractalSQLabs - 2.0.14-1
 - Indexed vector search: fractal_index_create, _info, _list, _refresh, _rebuild, _drop, _ensure and _candidates build and maintain an IVF index (INT8, INT4, FP16 or FP32), and fractal_search(table, column, query, k) answers from it with exact, verified distances.
 - Agents can search through the index: the agent_use_index setting (off, on or auto, with agent_index_min_rows) and a meta_filter option limit what the retrieval agents scan.

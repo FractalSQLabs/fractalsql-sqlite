@@ -246,6 +246,62 @@
       "name": "fractal_vector_lp_distance"
     },
     {
+      "description": "Builds the zero vector of the given dimension, in the canonical form the vectorizer stores, handed back as a JSON array of numbers.",
+      "name": "fractal_vector"
+    },
+    {
+      "description": "Parses a vector from text -- a JSON array, or a comma-separated list of numbers -- into the canonical vector, handed back as a JSON array of numbers. Refuses text that is not a finite vector.",
+      "name": "fractal_vector_from_text"
+    },
+    {
+      "description": "Renders a vector as JSON: the array of numbers, so a client can see exactly what the engine holds.",
+      "name": "fractal_vector_to_json"
+    },
+    {
+      "description": "The vector's dimension: how many components it has. Check it before handing a vector to the vectorizer.",
+      "name": "fractal_vector_dims"
+    },
+    {
+      "description": "The vector's L2 norm (its magnitude).",
+      "name": "fractal_vector_norm"
+    },
+    {
+      "description": "The vector scaled to unit length, so a distance between two vectors reflects direction only.",
+      "name": "fractal_vector_normalize"
+    },
+    {
+      "description": "The element-wise sum of two vectors.",
+      "name": "fractal_vector_add"
+    },
+    {
+      "description": "The element-wise difference of two vectors.",
+      "name": "fractal_vector_sub"
+    },
+    {
+      "description": "The L2 (Euclidean) distance between two vectors.",
+      "name": "fractal_vector_l2_distance"
+    },
+    {
+      "description": "The squared L2 distance: the same measure without the square root.",
+      "name": "fractal_vector_l2_squared"
+    },
+    {
+      "description": "The cosine distance between two vectors: 0 when they point the same way, 1 when they are orthogonal.",
+      "name": "fractal_vector_cosine_distance"
+    },
+    {
+      "description": "The cosine similarity between two vectors: 1 when they point the same way, 0 when they are orthogonal.",
+      "name": "fractal_vector_cosine_similarity"
+    },
+    {
+      "description": "The negative inner product of two vectors.",
+      "name": "fractal_vector_negative_inner_product"
+    },
+    {
+      "description": "The vector multiplied by a scalar factor.",
+      "name": "fractal_vector_scale"
+    },
+    {
       "description": "Symmetric int8 quantization of one vector (4x compression). Returns {'scale':S,'codes':[...]}; dequantize via v[i] ~= codes[i]*scale.",
       "name": "fractal_vector_quantize_int8"
     },
@@ -362,7 +418,7 @@
       "name": "fractal_vectorizer_status"
     },
     {
-      "description": "Confirms the FractalSQL install is alive and which edition (Community/Enterprise) is active: calls fractal_version() and fractal_edition(). The one-line sanity check after installing; expect a real edition/version back (e.g. Community|2.0.14), plus a startup warning if the engine version differs from what this plugin was built against (the version-skew guard warns, never hard-fails).",
+      "description": "Confirms the FractalSQL install is alive and which edition (Community/Enterprise) is active: calls fractal_version() and fractal_edition(). The one-line sanity check after installing; expect a real edition/version back (e.g. Community|2.0.15), plus a startup warning if the engine version differs from what this plugin was built against (the version-skew guard warns, never hard-fails).",
       "name": "fractal_version"
     },
     {
@@ -382,5 +438,5 @@
       "name": "fractal_configure_reasoning"
     }
   ],
-  "version": "2.0.14"
+  "version": "2.0.15"
 }
