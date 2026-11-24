@@ -62,7 +62,10 @@ for k in URL:
 for k in PATH:
     sets(c, k, "relative/path.so", want_err="absolute path")
     sets(c, k, "/opt/a/../b.so", want_err="absolute path")
-    sets(c, k, "/opt/fsql/plugin.so", expect="/opt/fsql/plugin.so")
+    # An absolute path, in the host's own spelling: the extension accepts a drive letter or a UNC
+    # path on Windows and a leading slash elsewhere.
+    abspath = "C:\\fsql\\plugin.dll" if os.name == "nt" else "/opt/fsql/plugin.so"
+    sets(c, k, abspath, expect=abspath)
     ok, _ = one(c, "SELECT fractal_config_set(?, '')", k); check(ok, k + ": reset")
 for k in BOOL:
     for v in ("true", "on", "1", "yes", "false", "off", "0", "no", ""):
@@ -120,12 +123,33 @@ c.close()
 
 # the library path locks once an enterprise library has loaded
 W = os.path.realpath(tempfile.mkdtemp(prefix="fsql_cfgm_")); lib = os.path.join(W, "ent.so")
-if subprocess.run(["cc", "-shared", "-fPIC", "-std=c99", "-I" + os.path.join(ROOT, "include"), os.path.join(ROOT, "tests", "mock_enterprise_core.c"), "-o", lib], capture_output=True, env=BUILD_ENV).returncode == 0:
+# The operator opt-out is a PROCESS-environment control, and the environment the extension reads is
+# frozen when the extension is loaded: on Linux/macOS it shares the process environment, but the
+# Windows build links the static MSVC runtime and therefore reads a private copy taken at load
+# time. So the opt-out case runs in a child process that starts with the opt-out already in its
+# environment -- the way an operator would set it (before the host loads the extension).
+OPT_OUT_CHILD = """
+import sqlite3, sys
+ext, lib = sys.argv[1], sys.argv[2]
+c = sqlite3.connect(":memory:"); c.enable_load_extension(True); c.load_extension(ext)
+c.execute("SELECT fractal_config_set('enterprise_lib', ?)", (lib,))
+print(c.execute("SELECT fractal_ledger_truth_count()").fetchone()[0])
+"""
+if subprocess.run([os.environ.get("FSQL_CC") or "cc", "-shared", "-fPIC", "-std=c99", "-I" + os.path.join(ROOT, "include"), os.path.join(ROOT, "tests", "mock_enterprise_core.c"), "-o", lib], capture_output=True, env=BUILD_ENV).returncode == 0:
+    child_env = dict(os.environ); child_env["FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE"] = "0"
+    ch = subprocess.run([sys.executable, "-I", "-c", OPT_OUT_CHILD, EXT, lib], capture_output=True, text=True, env=child_env)
+    check(ch.returncode == 0, "the mock enterprise library loads unsigned when the operator opts out", (ch.stdout + ch.stderr)[-250:])
+    # The path locks once a library has loaded: with the opt-out in force (the child left it set for
+    # this process too), a second, different path is refused.
     os.environ["FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE"] = "0"
     c = conn()
     sets(c, "enterprise_lib", lib, expect=lib)
-    ok, r = one(c, "SELECT fractal_ledger_truth_count()"); check(ok, "the mock enterprise library loads unsigned when the operator opts out", r)
-    sets(c, "enterprise_lib", "/opt/other.so", want_err="cannot be changed after")
+    # The load itself (the opt-out is in force in this process, so the unsigned core loads) -- and with
+    # it, the path locks.
+    one(c, "SELECT fractal_ledger_truth_count()")
+    # A path the config accepts (absolute, in the host's own spelling) so the refusal under test is the
+    # scope one, not the path one.
+    sets(c, "enterprise_lib", abspath, want_err="cannot be changed after")
     sets(c, "http_model", "still-settable", expect="still-settable")
     c.close()
 else:

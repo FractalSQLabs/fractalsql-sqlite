@@ -247,7 +247,7 @@ matrix even when the patch version moves.
 
 ## Tool catalog
 
-94 tools, grouped the same way the API docs group them. Optional
+108 tools, grouped the same way the API docs group them. Optional
 arguments carry their documented defaults in each tool's schema; vector
 arguments are plain JSON arrays of numbers at the MCP boundary and are
 converted to the engine's CSV/JSON TEXT convention for you. Tool names
@@ -335,16 +335,21 @@ covered (there the reasoning call *is* the result), and an unconfigured
 | `fractal_agent_trajectory_predict` | `{predicted_state_vector, projected_drift_delta, risk_threshold_exceeded}` |
 | `fractal_agent_detect_loop` | `{agent_id, dfa_exponent, is_loop_detected[, cycle_len, at_index]}`: SimHash + Brent + DFA drift |
 
-### Analytics (24)
+### Analytics (38)
 
 Fractal dimensions (`fractal_dimension_dfa` / `_boxcount` / `_drift`),
 time-series and topology (`fractal_change_point_detect`,
 `fractal_periodogram`, `fractal_spectrogram_entropy`, `fractal_chunk_text` (split text into chunks, for embedding),
 `fractal_tda_persistence_diagram`),
 fingerprinting (`fractal_state_fingerprint`, `fractal_cycle_detect`),
-vector math (`fractal_vector_lp_distance`,
-`fractal_vector_quantize_int8`, `fractal_vector_quantize_binary`,
-`fractal_vector_hamming_distance`), domain geometry
+the vector family (the canonical vector type
+`fractal_vector`, `fractal_vector_from_text`, `fractal_vector_to_json`; the
+algebra `fractal_vector_add`, `_sub`, `_scale`, `_normalize`, `_norm`, `_dims`,
+`_cosine_distance`, `_cosine_similarity`, `_l2_distance`, `_l2_squared`,
+`_negative_inner_product`; and the quantize and distance tools
+`fractal_vector_lp_distance`, `fractal_vector_quantize_int8`,
+`fractal_vector_quantize_binary`, `fractal_vector_hamming_distance`),
+domain geometry
 (`fractal_vascular_network`, `fractal_cortical_folding`,
 `fractal_nerve_plexus_metric`, `fractal_morphological_complexity`),
 portfolio optimization (`fractal_optimize_portfolio`, the Enterprise

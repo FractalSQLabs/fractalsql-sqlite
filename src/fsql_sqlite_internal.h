@@ -104,7 +104,7 @@ static inline int fsql_clamp_to_int(sqlite3_int64 n)
 
 /* Extension version. Single source of truth for fractal_version()
  * and the smoke gate; bumped in lockstep with packaging scripts. */
-#define FSQL_SQLITE_VERSION_STR   "2.0.14"
+#define FSQL_SQLITE_VERSION_STR   "2.0.15"
 #define FSQL_SQLITE_EDITION_STR   "Community"
 
 /* SFS tuning: same values the pre-2.x path used. */

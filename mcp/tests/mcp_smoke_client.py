@@ -154,6 +154,20 @@ EXPECTED_SAFETY = {
     "fractal_tda_persistence_diagram": ("read", False),
     "fractal_text_to_sql": ("write", True),
     "fractal_vascular_network": ("read", False),
+    "fractal_vector": ("read", False),
+    "fractal_vector_add": ("read", False),
+    "fractal_vector_cosine_distance": ("read", False),
+    "fractal_vector_cosine_similarity": ("read", False),
+    "fractal_vector_dims": ("read", False),
+    "fractal_vector_from_text": ("read", False),
+    "fractal_vector_l2_distance": ("read", False),
+    "fractal_vector_l2_squared": ("read", False),
+    "fractal_vector_negative_inner_product": ("read", False),
+    "fractal_vector_norm": ("read", False),
+    "fractal_vector_normalize": ("read", False),
+    "fractal_vector_scale": ("read", False),
+    "fractal_vector_sub": ("read", False),
+    "fractal_vector_to_json": ("read", False),
     "fractal_vector_hamming_distance": ("read", False),
     "fractal_vector_lp_distance": ("read", False),
     "fractal_vector_quantize_binary": ("read", False),
@@ -359,8 +373,8 @@ def main() -> int:  # noqa: ANN201
         # the accessibility invariant, mechanically
         send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         listed = recv()["result"]["tools"]
-        check("tools/list: the full engine-filtered catalog (94 tools)",
-              len(listed) == 94)
+        check("tools/list: the full engine-filtered catalog (108 tools)",
+              len(listed) == 108)
         anonymous = [t["name"] for t in listed
                      if not (t.get("description") or "").strip()
                      or "properties" not in t["inputSchema"]]
@@ -1454,7 +1468,7 @@ def run_http_and_cli_phase() -> None:
                               input="")
     r = cli_run(["--version"])
     check("CLI: --version prints the release banner",
-          r.returncode == 0 and "2.0.14" in r.stdout)
+          r.returncode == 0 and "2.0.15" in r.stdout)
     r = cli_run(["--help"])
     check("CLI: --help prints the flag table",
           r.returncode == 0 and "--tool" in r.stdout)
@@ -1660,7 +1674,7 @@ def run_http_and_cli_phase() -> None:
         http_tools = (json.loads(b)["result"]["tools"]
                       if s == 200 and b.startswith("{") else [])
         check("HTTP: tools/list over the session matches the stdio "
-              "catalog (94)", s == 200 and len(http_tools) == 94)
+              "catalog (108)", s == 200 and len(http_tools) == 108)
         s, _, b = rpc({"jsonrpc": "2.0", "id": 6, "method": "tools/call",
                        "params": {"name": "fractal_version",
                                   "arguments": {}}}, sess=minted)

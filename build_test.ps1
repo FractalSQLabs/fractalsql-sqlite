@@ -282,7 +282,12 @@ $script:DEFAULT_GATES = @('01', '02', '03', '04', '05', '06', '07', '08', '09', 
                           '11', '12', '13', '14', '15', '16', '17', '18', '19', '20',
                           '22', '23', '24', '25', '26', '27', '28', '29', '30', '31',
                           '32', '35', '36', '37', '38', '39', '40', '41', '42', '43',
-                          '45', '52', '53', '54', '55')
+                          '45', '46', '47', '49', '50', '51', '52', '53', '54', '55',
+                          # The same six the POSIX runner runs by default (gates 59-64: the id
+                          # emission, scripted replies, ledger payloads, rename, ledger env and
+                          # analytics gates). They were wired into this runner but never
+                          # scheduled, so they never ran on Windows.
+                          '59', '60', '61', '62', '63', '64')
 $script:QUICK_GATES = @('01', '02')
 $script:FUZZ_GATES = @('21', '44')
 
@@ -955,8 +960,8 @@ function Gate-01-Build {
 
 function Gate-02-Smoke {
     $ver = Sqlq 'SELECT fractal_version();'
-    if ($ver -eq '2.0.14') { Pass "02 smoke: version=$ver" }
-    else { Fail "02 smoke: version='$ver' (want 2.0.14)" }
+    if ($ver -eq '2.0.15') { Pass "02 smoke: version=$ver" }
+    else { Fail "02 smoke: version='$ver' (want 2.0.15)" }
     # fractal_sfs_converge convergence: self-distance ~0
     $d = Sqlq "SELECT fractal_sfs_converge('0.6,0.8,0.0,0.0','0.6,0.8,0.0,0.0');"
     if ($d -eq '0.0' -or (PyAbsLt1e6 $d)) { Pass "02 smoke: fractal_sfs_converge self-distance=$d" }
@@ -4029,7 +4034,7 @@ function Gate-41-DbProbe {
     $lines = @(
         '@echo off',
         "call `"$vcvars64`" >nul 2>&1",
-        "cl.exe /nologo /std:c++17 /utf-8 /EHsc /MT /O1 /Zi /DFSQL_MCP_VERSION=`"\`"2.0.14\`"`" ^",
+        "cl.exe /nologo /std:c++17 /utf-8 /EHsc /MT /O1 /Zi /DFSQL_MCP_VERSION=`"\`"2.0.15\`"`" ^",
         "  /I `"$mcpDir\vendor`" /I `"$mcpDir\src`" /I `"$sqliteDir`" /I `"$opensslDir\include`" ^",
         "  `"$mcpDir\tests\db_probe.cpp`" `"$mcpDir\src\errors.cpp`" `"$mcpDir\src\logging.cpp`" `"$sqliteDir\sqlite3.c`" ^",
         "  /Fo`"$outDir\\`" /Fe`"$bin`" ^",
@@ -4107,7 +4112,7 @@ function Gate-Title { param([string]$G)
         '15' { 'embed' }             '16' { 'embed_authz' }
         '17' { 'embed_soak' }        '18' { 'embed_crash' }
         '19' { 'sfs_bounds' }        '20' { 'api_func' }
-        '21' { 'fuzz_smoke' }        '22' { 'v2_functions' }
+        '21' { 'fuzz_smoke' }        '22' { 'new_primitives' }
         '23' { 'agents' }            '24' { 'enterprise' }
         '25' { 'enterprise_stress' } '26' { 'enterprise_signature' }
         '27' { 'think' }             '28' { 'review_isolation' }
@@ -4117,6 +4122,9 @@ function Gate-Title { param([string]$G)
         '53' { 'precision' }
         '54' { 'index' }
         '55' { 'ledger_v2' }
+        '59' { 'id_emission' }      '60' { 'scripted_replies' }
+        '61' { 'ledger_payloads' }  '62' { 'rename' }
+        '63' { 'ledger_env' }       '64' { 'analytics' }
         '32' { 'enterprise_signature_real' }
         '35' { 'ed25519' }           '36' { 'extract_population' }
         '37' { 'mcp_smoke' }         '38' { 'mcp_https' }
@@ -4125,6 +4133,8 @@ function Gate-Title { param([string]$G)
         '41' { 'db_probe' }          '42' { 'concurrency_probe' }
         '43' { 'kits' }
         '45' { 'mcp_conformance' }
+        '46' { 'plugin_sig_vendored' } '47' { 'mcp_cli' }
+        '49' { 'redact_unit' }        '50' { 'ledger_unit' }
     }
 }
 
@@ -4307,6 +4317,293 @@ function Run-PyDriver { param([string]$Num, [string]$Name, [string]$Script, [str
     }
 }
 
+# 59 id_emission / 60 scripted_replies / 61 ledger_payloads: the python drivers that check what the extension writes into its results. They
+# load the extension through Python's sqlite3 module and need no network.
+function Run-ChecksDriver {
+    param([string]$Num, [string]$Name, [string]$Script)
+    $drv = Join-Path $script:Here "test\$Script"
+    if (-not (Test-Path -LiteralPath $drv)) { Skip "$Num $Name (test\$Script not present)"; return }
+    if (-not $script:Py) { Skip "$Num $Name (no python3 on PATH)"; return }
+    if (-not (Resolve-Ext)) { Fail "$Num ${Name}: no extension found (run gate 01 first)"; return }
+    # The fixtures are built once by this runner, so the drivers do not need a compiler of their own.
+    $env:FSQL_EXT                    = $script:ExtAbs
+    $env:FSQL_EXT_LOAD               = $script:ExtLoad
+    $env:SQLITE3                     = $script:Sqlite3
+    $env:FSQL_CC                     = $script:Cc
+    $env:FSQL_MOCK_PLUGIN            = $script:Mock
+    $env:FSQL_EMBED_THEN_FAIL_PLUGIN = $script:EmbFail
+    $env:FSQL_ENTERPRISE_CORE        = $script:MockEnt
+    $env:FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE = '0'
+    $out = & $script:Py -I $drv 2>&1 | Out-String
+    if ($out -match '(\d+) checks passed, 0 failed') {
+        Pass "$Num ${Name}: $($Matches[1]) checks passed"
+    }
+    else {
+        ($out -split "`n" | Where-Object { $_ -match 'FAIL|Traceback|Error' } | Select-Object -First 12) | ForEach-Object { Write-Host "    $_" }
+        Fail "$Num ${Name}: see the output above"
+    }
+}
+
+function Gate-59-IdEmission      { Run-ChecksDriver '59' 'id_emission' 'id_emission.py' }
+function Gate-60-ScriptedReplies { Run-ChecksDriver '60' 'scripted_replies' 'scripted_replies.py' }
+function Gate-61-LedgerPayloads  { Run-ChecksDriver '61' 'ledger_payloads' 'ledger_payloads.py' }
+
+# 62 rename: the two-argument fractal_search was renamed fractal_sfs_converge. The old names are refused, and the refusal names the new
+# one: there are no aliases.
+function Gate-62-Rename {
+    if (ExpectErr 'renamed fractal_sfs_converge' 'SELECT fractal_search(''[0.1,0.2,0.3]'',''[0.1,0.2,0.3]'');') {
+        Pass '62 rename: fractal_search(vector, query) is refused and the refusal names fractal_sfs_converge'
+    }
+    else { Fail '62 rename: fractal_search(vector, query) was not refused' }
+    if (ExpectErr 'renamed fractal_sfs_converge' 'SELECT fractal_search(''[0.1,0.2,0.3]'',''[0.1,0.2,0.3]'',2);') {
+        Pass '62 rename: the three-argument form is refused too'
+    }
+    else { Fail '62 rename: fractal_search(vector, query, k) was not refused' }
+    $r = Sqlq 'SELECT fractal_sfs_converge(''[0.1,0.2,0.3]'',''[0.1,0.2,0.3]'');'
+    if ($script:SqlqRc -eq 0 -and $r -match '^-?[0-9]') {
+        Pass '62 rename: fractal_sfs_converge(vector, query) answers'
+    }
+    else { Fail "62 rename: fractal_sfs_converge: $r" }
+}
+
+# 63 ledger_env: the ledger's environment configuration. The row cap refuses an append past the limit, and the anchor mode publishes the
+# chain head to the log it names -- an unknown mode publishes nothing.
+function Gate-63-LedgerEnv {
+    if (-not (Test-Path -LiteralPath $script:MockEnt)) { Skip '63 ledger_env (the mock enterprise core did not build)'; return }
+    $env:FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE = '0'
+    $env:FSQL_LEDGER_MAX_ROWS = '2'
+    $r = Sqlq "SELECT fractal_config_set('enterprise_lib','$($script:MockEnt)');" "SELECT fractal_audit_log('env.test','{""n"":1}');" "SELECT fractal_audit_log('env.test','{""n"":2}');" "SELECT fractal_audit_log('env.test','{""n"":3}');"
+    if ($r.Contains('chain is full')) { Pass '63 ledger_env: the row cap refuses an append past the limit' }
+    else { Fail "63 ledger_env: the row cap did not refuse the append: $r" }
+    $env:FSQL_LEDGER_MAX_ROWS = $null
+    $env:FSQL_LEDGER_ANCHOR_LOG = 'stderr'
+    $r = Sqlq "SELECT fractal_config_set('enterprise_lib','$($script:MockEnt)');" "SELECT fractal_audit_log('env.anchor','{""n"":1}');"
+    if ($r.Contains('"event":"ledger_head"')) { Pass '63 ledger_env: the stderr anchor publishes the chain head' }
+    else { Fail "63 ledger_env: no chain head reached stderr: $r" }
+    $env:FSQL_LEDGER_ANCHOR_LOG = 'bogus'
+    $r = Sqlq "SELECT fractal_config_set('enterprise_lib','$($script:MockEnt)');" "SELECT fractal_audit_log('env.anchor','{""n"":1}');"
+    if ($r.Contains('"event":"ledger_head"')) { Fail '63 ledger_env: an unknown anchor mode published a head' }
+    else { Pass '63 ledger_env: an unknown anchor mode publishes nothing' }
+    $env:FSQL_LEDGER_ANCHOR_LOG = $null
+}
+
+# 64 analytics: the analytics tier's surface -- the dimension, portfolio and signal functions answer on a small fixture and refuse a
+# malformed one.
+function Gate-64-Analytics {
+    $s32 = (1..32 | ForEach-Object { [math]::Sin($_ / 3.0) }) -join ','
+    $r = Sqlq "SELECT fractal_dimension_dfa('$s32');"
+    if ($script:SqlqRc -eq 0 -and $r -match '^-?[0-9]') { Pass '64 analytics: DFA returns a numeric exponent' }
+    else { Fail "64 analytics: DFA happy path: $r" }
+    if (ExpectErr 'malformed' "SELECT fractal_dimension_dfa('bad!vec');") { Pass '64 analytics: DFA rejects a malformed series' }
+    else { Fail '64 analytics: DFA accepted a malformed series' }
+    $r = Sqlq "SELECT fractal_optimize_portfolio('0.10,0.12,0.07','0.04,0.01,0.005,0.01,0.06,0.01,0.005,0.01,0.05',2,42);"
+    if ($script:SqlqRc -eq 0 -and $r.Contains('{')) { Pass '64 analytics: the portfolio optimiser returns JSON' }
+    else { Fail "64 analytics: portfolio happy path: $r" }
+    if (ExpectErr 'malformed' "SELECT fractal_optimize_portfolio('bad!vec','1.0,0.0,0.0,1.0',1,42);") { Pass '64 analytics: the portfolio optimiser rejects a malformed mu' }
+    else { Fail '64 analytics: the portfolio optimiser accepted a malformed mu' }
+    $r = Sqlq "SELECT fractal_periodogram('$s32', 3);"
+    if ($script:SqlqRc -eq 0 -and $r.Contains('freqs')) { Pass '64 analytics: the periodogram returns its frequencies' }
+    else { Fail "64 analytics: periodogram happy path: $r" }
+}
+
+# build_test.sh gate 46: every vendored reasoning plugin ships with a 64-byte detached signature beside it,
+# and the runtime refuses a tampered or unsigned copy. The static half is platform-agnostic; the runtime half
+# needs the host platform's own plugin, which on Windows is the DLL under include\windows-x86_64.
+function Gate-46-PluginSigVendored {
+    $n = 0; $bad = 0
+    foreach ($f in (Get-ChildItem -Path (Join-Path $script:Here 'include') -Recurse -File -ErrorAction SilentlyContinue |
+                     Where-Object { $_.Name -match '^fractalsql-reasoning-http\.(so|dll)$' })) {
+        $n++
+        $sig = "$($f.FullName).sig"
+        if (-not (Test-Path -LiteralPath $sig) -or (Get-Item -LiteralPath $sig).Length -ne 64) {
+            Write-Host "      $($f.FullName): missing or not 64 bytes: $sig"
+            $bad++
+        }
+    }
+    if ($n -eq 0) { Skip '46 plugin_sig_vendored (no vendored plugins under include/)'; return }
+    if ($bad -ne 0) { Fail "46 plugin_sig_vendored: $bad of $n vendored plugin(s) lack a valid .sig"; return }
+    Pass "46 plugin_sig_vendored: all $n vendored plugins have a 64-byte .sig beside them"
+
+    # Runtime: the genuine plugin+signature is accepted, a tampered copy and an unsigned copy are refused.
+    $plug = Join-Path $script:Here 'include\windows-x86_64\fractalsql-reasoning-http.dll'
+    if (-not (Test-Path -LiteralPath $plug)) { Skip '46 plugin_sig_vendored runtime (the windows plugin is not present)'; return }
+    if ($script:Sqlite3 -eq $null -or -not (Test-Path -LiteralPath $script:Sqlite3)) {
+        Skip '46 plugin_sig_vendored runtime (no sqlite3 CLI on this machine)'
+        return
+    }
+    $d = Join-Path $script:PlugDir 'plugsig'
+    if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath $d -Recurse -Force }
+    $null = New-Item -ItemType Directory -Path $d -Force
+    Copy-Item -LiteralPath $plug -Destination (Join-Path $d 'good.dll') -Force
+    Copy-Item -LiteralPath "$plug.sig" -Destination (Join-Path $d 'good.dll.sig') -Force
+    Copy-Item -LiteralPath $plug -Destination (Join-Path $d 'tampered.dll') -Force
+    Copy-Item -LiteralPath "$plug.sig" -Destination (Join-Path $d 'tampered.dll.sig') -Force
+    # One byte appended: the signature no longer covers the file.
+    Add-Content -LiteralPath (Join-Path $d 'tampered.dll') -Value 'x' -NoNewline
+    Copy-Item -LiteralPath $plug -Destination (Join-Path $d 'nosig.dll') -Force
+    # The plugin's own path is configured as the native backslash form: fsql_load_reasoning's anti-symlink
+    # check compares the configured string with the realpath exactly (the same rule the mock plugin paths follow).
+    $savedSig = $env:FSQL_REASONING_REQUIRE_SIGNATURE
+    $savedPlug = $env:FRACTALSQL_REASONING_PLUGIN
+    try {
+        foreach ($case in @('good', 'tampered', 'nosig')) {
+            # Unset the overrides for the call: the signature requirement and the plugin path are what this
+            # gate is about, so the gate sets them itself.
+            Remove-Item Env:\FSQL_REASONING_REQUIRE_SIGNATURE -ErrorAction SilentlyContinue
+            Remove-Item Env:\FRACTALSQL_REASONING_PLUGIN -ErrorAction SilentlyContinue
+            $p = Join-Path $d "$case.dll"
+            $out = Sqlq "SELECT fractal_config_set('reasoning_plugin','$p');" "SELECT fractal_reason('say ok');"
+            if ($case -eq 'good') {
+                # Past the signature check the plugin's own init runs and stops at "no URL set".
+                if (($out -match '(?i)signature') -or ($out -notmatch 'fsql_reasoning_init returned')) {
+                    Fail "46 plugin_sig_vendored: the genuine signed plugin did not get past the signature check: $out"
+                    return
+                }
+            }
+            elseif ($case -eq 'tampered') {
+                if ($out -notmatch 'failed signature verification') {
+                    Fail "46 plugin_sig_vendored: a tampered plugin was not refused as expected: $out"
+                    return
+                }
+            }
+            else {
+                if ($out -notmatch 'no signature found') {
+                    Fail "46 plugin_sig_vendored: a plugin without a .sig was not refused as expected: $out"
+                    return
+                }
+            }
+        }
+    }
+    finally {
+        if ($null -ne $savedSig) { $env:FSQL_REASONING_REQUIRE_SIGNATURE = $savedSig }
+        if ($null -ne $savedPlug) { $env:FRACTALSQL_REASONING_PLUGIN = $savedPlug }
+    }
+    Pass '46 plugin_sig_vendored runtime: genuine plugin+sig accepted by default; tampered and unsigned copies refused'
+}
+
+# build_test.sh gate 47: the MCP server started every way its command line, environment and database connection
+# allow (mcp\tests\mcp_cli.py), plus the HTTP transport's origin check and repeated headers
+# (mcp\tests\mcp_audit_http.py). The same two drivers the POSIX gate drives.
+function Gate-47-McpCli {
+    if (-not (Test-Path -LiteralPath (Join-Path $script:Here 'mcp\tests\mcp_cli.py')) -or
+            -not (Test-Path -LiteralPath (Join-Path $script:Here 'mcp\tests\mcp_audit_http.py')) -or
+            -not (Test-Path -LiteralPath (Join-Path $script:Here 'mcp\src\main.cpp'))) {
+        Skip '47 mcp_cli (mcp/ server code not present)'
+        return
+    }
+    if (-not $script:Py) { Skip '47 mcp_cli (no python on PATH -- the driver needs it)'; return }
+    if (-not (Resolve-Ext)) { Fail '47 mcp_cli: no extension found (run gate 01 first)'; return }
+
+    # Server binary: mcp\dist\windows-mcp (built by mcp\scripts\windows\build.bat), rebuilt when missing or
+    # stale against mcp\src -- the same rule gate 37 uses.
+    $exe = Join-Path $script:Here 'mcp\dist\windows-mcp\fractalsql-sqlite-mcp.exe'
+    $needsBuild = -not (Test-Path -LiteralPath $exe)
+    if (-not $needsBuild) {
+        $exeTime = (Get-Item -LiteralPath $exe).LastWriteTimeUtc
+        $newer = Get-ChildItem -LiteralPath (Join-Path $script:Here 'mcp\src') -Recurse -File |
+            Where-Object { $_.LastWriteTimeUtc -gt $exeTime }
+        $needsBuild = [bool]($newer)
+    }
+    if ($needsBuild) {
+        $boot = Join-Path $script:BTROOT 'fractalsql_bt_mcp47_build_cmd.bat'
+        [IO.File]::WriteAllLines($boot, @(
+            '@echo off',
+            "call `"$script:Here\mcp\scripts\windows\build.bat`"",
+            'exit /b %ERRORLEVEL%'
+        ))
+        $out = & cmd /c "call $boot" 2>&1
+        $out | ForEach-Object { Write-Host "    $_" }
+        $buildRc = $LASTEXITCODE
+        if ($buildRc -ne 0) {
+            if (($out -join "`n") -match 'no Visual Studio|OpenSSL for MSVC not found|amalgamation not found') {
+                Skip '47 mcp_cli (no toolchain for the MCP server binary build -- install VS2022 C++ + vcpkg openssl:x64-windows-static)'
+            }
+            else {
+                Fail "47 mcp_cli: the MCP server build failed (exit $buildRc)"
+            }
+            return
+        }
+        if (-not (Test-Path -LiteralPath $exe)) { Fail '47 mcp_cli: MCP server build failed'; return }
+    }
+
+    # The committed locks travel with the binary: the server is fail-closed without them.
+    $exeDir = Split-Path -Parent $exe
+    foreach ($lock in @('.mcp-schema-lock', '.mcp-safety-annotations-lock')) {
+        $src = Join-Path $script:Here "mcp\$lock"
+        if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination (Join-Path $exeDir $lock) -Force }
+    }
+
+    $cwd = Join-Path $script:PlugDir 'mcp_cli_cwd'
+    if (Test-Path -LiteralPath $cwd) { Remove-Item -LiteralPath $cwd -Recurse -Force }
+    $null = New-Item -ItemType Directory -Path $cwd -Force
+    $env:MCP_SERVER_EXE            = $exe
+    $env:MCP_SERVER_CWD            = $cwd
+    $env:SQLITE_DB_PATH            = Join-Path $cwd 'cli.db'
+    $env:FRACTALSQL_EXTENSION_PATH = $script:ExtAbs
+    $env:FSQL_MCP_SCHEMA_LOCK      = Join-Path $script:Here 'mcp\.mcp-schema-lock'
+    $env:FSQL_MCP_SAFETY_LOCK      = Join-Path $script:Here 'mcp\.mcp-safety-annotations-lock'
+
+    $out = & $script:Py -u (Join-Path $script:Here 'mcp\tests\mcp_cli.py') 2>&1
+    $rc = $LASTEXITCODE
+    $out += & $script:Py -u (Join-Path $script:Here 'mcp\tests\mcp_audit_http.py') $exe 2>&1
+    if ($LASTEXITCODE -ne 0) { $rc = 1 }
+    $out | ForEach-Object { Write-Host "    $_" }
+    if (($rc -eq 0) -and (($out -join "`n") -match 'ALL GREEN')) {
+        Pass "47 mcp_cli: the server ended in order for every start-up tried"
+    }
+    else {
+        Fail '47 mcp_cli: the server did not end in order for every start-up tried (see the output above)'
+    }
+}
+
+# build_test.sh gate 49: the header-level unit test of src\fsql_audit_redact.h -- the audit trail's redaction.
+# The test is a standalone C program: it builds here with the same compiler the plugin fixtures use.
+function Gate-49-RedactUnit {
+    if (-not (Test-Path -LiteralPath (Join-Path $script:Here 'test\redact_unit.c'))) {
+        Skip '49 redact_unit (test\redact_unit.c not present)'
+        return
+    }
+    if (-not $script:Cc) { Skip '49 redact_unit (no C compiler on PATH)'; return }
+    $obj = Join-Path $script:PlugDir 'redact_unit.o'
+    $bin = Join-Path $script:PlugDir 'redact_unit.exe'
+    $log = Join-Path $script:PlugDir 'redact_unit.log'
+    # The header under test is src\fsql_audit_redact.h, so that is the include path (the
+    # plugins' -Iinclude is a different header set) -- and both paths are absolute, so the
+    # compile does not depend on the caller's working directory.
+    # The test drives the redaction by setting and clearing an environment variable, and
+    # neither MSVC's CRT nor mingw's has setenv/unsetenv: the small POSIX shim is force-
+    # included so the test source stays portable (tests\windows\win_env_compat.h).
+    $srcDir = Join-Path $script:Here 'src'
+    $testFile = Join-Path $script:Here 'test\redact_unit.c'
+    $shim = Join-Path $script:Here 'tests\windows\win_env_compat.h'
+    & $script:Cc -std=c11 -O1 -g -Wno-unused-function "-I$srcDir" "-include" $shim -c $testFile -o $obj 1>$log 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        & $script:Cc $obj -o $bin 1>>$log 2>&1
+    }
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $bin)) {
+        Get-Content -LiteralPath $log -Tail 5 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "         $_" }
+        Fail "49 redact_unit: the unit test did not build (see $log)"
+        return
+    }
+    $out = & $bin 2>&1
+    $rc = $LASTEXITCODE
+    Remove-Item -LiteralPath $obj, $bin -Force -ErrorAction SilentlyContinue
+    if ($rc -eq 0) {
+        Pass "49 redact_unit: $(($out | Select-Object -Last 1))"
+    }
+    else {
+        $out | Select-Object -Last 12 | ForEach-Object { Write-Host "         $_" }
+        Fail '49 redact_unit: see the output above'
+    }
+}
+
+# build_test.sh gate 50: the ledger storage-layer unit test. The POSIX gate compiles the whole src\*.c against
+# the sovereign core archive and libsqlite3; the Windows build of that combination does not exist, and the POSIX
+# gate skips itself on MSYS for the same reason. So this gate skips here too -- with the reason, not silently.
+function Gate-50-LedgerUnit {
+    Skip '50 ledger_unit (POSIX only: it links the sovereign core archive and libsqlite3, which this build does not)'
+}
+
 function Gate-53-Precision { Run-PyDriver '53' 'precision' 'test_precision.py' 'test_precision: PASS' }
 function Gate-54-Index     { Run-PyDriver '54' 'index' 'test_index.py' 'test_index: PASS' }
 function Gate-55-LedgerV2 {
@@ -4322,6 +4619,73 @@ function Gate-55-LedgerV2 {
     if ($out -match 'test_ledger_roundtrip: PASS' -and $kind55 -eq 'real') { Pass '55 ledger_v2: QTL v2 through the real enterprise core' }
     elseif ($out -match 'test_ledger_roundtrip: PASS') { Pass '55 ledger_v2: flush, load, chain and retention through the mock core; the real library adds QTL v2' }
     else { Fail '55 ledger_v2: see the output' ; Write-Host $out }
+}
+
+function Gate-51-Refusals {
+    # The refusal drivers: the ten python drivers that exercise what the extension refuses, each against the
+    # built extension. They are stdlib-only (json, os, sqlite3, subprocess, tempfile), so the same files run
+    # here as on the POSIX runner -- the fixtures they would otherwise compile themselves (the mock reasoning
+    # plugin, the embed-then-fail plugin, the mock enterprise core) are built once by this runner and handed
+    # down, so no driver needs a compiler of its own.
+    if (-not $script:Py) { Skip '51 refusals (no python on PATH -- the drivers need it)'; return }
+    if (Skip-IfPySanitizerBlocked '51 refusals') { return }
+    if (-not (Resolve-Ext)) { Fail '51 refusals: no extension found (run gate 01 first)'; return }
+    $drivers = @('enterprise_errors', 'plugin_gate', 'config_matrix', 't2s_matrix',
+                 'vectorizer_matrix', 'sql_agent_matrix', 'unicode_matrix')
+    foreach ($d in $drivers) {
+        if (-not (Test-Path -LiteralPath (Join-Path $script:Here "test\$d.py"))) {
+            Skip "51 refusals (test/$d.py not present)"; return
+        }
+    }
+    # The fixtures, built once by this runner (the same .dlls the SQL-level gates load).
+    $env:FSQL_EXT                   = $script:ExtAbs
+    # The shell's .load tokenizer splits on spaces, so the CLI-safe form of the path goes down separately.
+    $env:FSQL_EXT_LOAD              = $script:ExtLoad
+    $env:SQLITE3                    = $script:Sqlite3
+    $env:FSQL_CC                    = $script:Cc
+    $env:FSQL_MOCK_PLUGIN           = $script:Mock
+    $env:FSQL_EMBED_THEN_FAIL_PLUGIN = $script:EmbFail
+    $env:FSQL_ENTERPRISE_CORE       = $script:MockEnt
+    # The enterprise opt-out for the unsigned mock core. It has to be in the environment BEFORE the
+    # driver starts: the extension reads the environment when it is loaded, and the Windows build links
+    # the static MSVC runtime, so it reads a private copy of the environment frozen at load time.
+    $env:FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE = '0'
+    # plugin_gate writes and removes .sig files beside the plugin it loads, so it gets a COPY of the
+    # mock: a signature file left beside the shared fixture would make every later driver refuse it.
+    $gatePlug = Join-Path $script:PlugDir 'plugin_gate_mock.dll'
+    if (Test-Path -LiteralPath $script:Mock) { Copy-Item -LiteralPath $script:Mock -Destination $gatePlug -Force }
+    $total = 0; $bad = 0; $skipped = 0
+    foreach ($d in $drivers) {
+        if ($d -eq 'plugin_gate' -and (Test-Path -LiteralPath $gatePlug)) { $env:FSQL_MOCK_PLUGIN = $gatePlug }
+        else { $env:FSQL_MOCK_PLUGIN = $script:Mock }
+        $out = & $script:Py -I (Join-Path $script:Here "test\$d.py") 2>&1 | Out-String
+        # The count first: a second -match would overwrite $Matches.
+        $n = -1
+        if ($out -match '(\d+) checks passed') { $n = [int]$Matches[1] }
+        if ($n -ge 0 -and $out -match ' 0 failed') {
+            $total += $n
+        }
+        elseif ($out -match '^SKIP') {
+            $skipped++
+        }
+        else {
+            $bad++
+            Write-Host "         $d : $((($out -split "`n") | Where-Object { $_ -match 'FAIL|Error|Traceback' } | Select-Object -First 3) -join ' | ')"
+        }
+    }
+    Remove-Item -LiteralPath $gatePlug -Force -ErrorAction SilentlyContinue
+    Remove-Item Env:\FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE -ErrorAction SilentlyContinue
+    Remove-Item Env:\FSQL_EXT, Env:\FSQL_EXT_LOAD, Env:\SQLITE3, Env:\FSQL_CC, Env:\FSQL_MOCK_PLUGIN, `
+                        Env:\FSQL_EMBED_THEN_FAIL_PLUGIN, Env:\FSQL_ENTERPRISE_CORE -ErrorAction SilentlyContinue
+    if ($bad -eq 0 -and $skipped -eq 0) {
+        Pass "51 refusals: $total checks passed (the enterprise library, the reasoning plugin, the configuration keys, the text-to-SQL replies, the vectorizer, the SQL agent, Unicode)"
+    }
+    elseif ($bad -eq 0) {
+        Skip "51 refusals: $skipped driver(s) skipped on this host; $total checks passed in the rest"
+    }
+    else {
+        Fail "51 refusals: $bad driver(s) failed, see the output above"
+    }
 }
 
 function Invoke-Gate { param([string]$G)
@@ -4350,10 +4714,18 @@ function Invoke-Gate { param([string]$G)
         '41' { Gate-41-DbProbe }                  '42' { Gate-42-ConcurrencyProbe }
         '43' { Gate-43-Kits }
         '45' { Gate-45-McpConformance }
+        '46' { Gate-46-PluginSigVendored }
+        '47' { Gate-47-McpCli }
+        '49' { Gate-49-RedactUnit }
+        '50' { Gate-50-LedgerUnit }
+        '51' { Gate-51-Refusals }
         '52' { Gate-52-AuditRegress }
         '53' { Gate-53-Precision }
         '54' { Gate-54-Index }
         '55' { Gate-55-LedgerV2 }
+        '59' { Gate-59-IdEmission }      '60' { Gate-60-ScriptedReplies }
+        '61' { Gate-61-LedgerPayloads }  '62' { Gate-62-Rename }
+        '63' { Gate-63-LedgerEnv }       '64' { Gate-64-Analytics }
     }
 }
 
@@ -4464,7 +4836,7 @@ function Gate-37-McpSmoke {
     & $script:Py -u (Join-Path $script:Here 'mcp\tests\mcp_smoke_client.py') 2>&1 |
         ForEach-Object { Write-Host "    $_" }
     if ($LASTEXITCODE -eq 0) {
-        Pass '37 mcp_smoke: full MCP session (initialize, 87-tool catalog, discovery/cognition/agency round trips, enterprise clean-error path, $/cancel, resources+prompts)'
+        Pass '37 mcp_smoke: full MCP session (initialize, 108-tool catalog, discovery/cognition/agency round trips, enterprise clean-error path, $/cancel, resources+prompts)'
     }
     else {
         Fail "37 mcp_smoke: client driver exited $LASTEXITCODE"

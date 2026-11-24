@@ -15,13 +15,19 @@ EXT = os.path.abspath(os.environ.get("FSQL_EXT") or os.path.join(ROOT, "fractals
 if not os.path.exists(EXT):
     print("  FAIL need the built extension (FSQL_EXT)"); sys.exit(1)
 os.environ["FSQL_REASONING_REQUIRE_SIGNATURE"] = "0"
-W = os.path.realpath(tempfile.mkdtemp(prefix="fsql_agm_")); PLUG = os.path.join(W, "mock.so")
+W = os.path.realpath(tempfile.mkdtemp(prefix="fsql_agm_"))
+# A harness that already built the mock plugin hands its path in, so this driver needs no compiler
+# of its own (the Windows runner builds it once and passes it down).
+PLUG = os.environ.get("FSQL_MOCK_PLUGIN")
 # The compiler runs unsanitized: this process carries the sanitizer runtime (preloaded, so the
 # instrumented extension under test can be loaded into this process), and a preloaded runtime in the
 # compiler trips the leak checker over the toolchain's own allocations.
 BUILD_ENV = {k: v for k, v in os.environ.items() if k != "LD_PRELOAD"}
-if subprocess.run(["cc", "-shared", "-fPIC", "-std=c99", "-I" + os.path.join(ROOT, "include"), os.path.join(ROOT, "tests", "mock_reasoning_plugin.c"), "-o", PLUG], capture_output=True, env=BUILD_ENV).returncode != 0:
-    print("  FAIL the mock plugin did not build"); sys.exit(1)
+CC = os.environ.get("FSQL_CC") or "cc"
+if PLUG is None:
+    PLUG = os.path.join(W, "mock.so")
+    if subprocess.run([CC, "-shared", "-fPIC", "-std=c99", "-I" + os.path.join(ROOT, "include"), os.path.join(ROOT, "tests", "mock_reasoning_plugin.c"), "-o", PLUG], capture_output=True, env=BUILD_ENV).returncode != 0:
+        print("  FAIL the mock plugin did not build"); sys.exit(1)
 SQLFILE = "/tmp/fractalsql_bt_sql.txt"
 passes = fails = 0
 def check(cond, what, detail=""):

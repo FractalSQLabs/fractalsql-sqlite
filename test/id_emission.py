@@ -15,12 +15,17 @@ EXT = os.path.abspath(os.environ.get("FSQL_EXT") or os.path.join(ROOT, "fractals
 if not os.path.exists(EXT):
     print("  FAIL need the built extension (FSQL_EXT)"); sys.exit(1)
 WORK = os.path.realpath(tempfile.mkdtemp(prefix="fsql_idemit_"))   # canonical: the extension refuses a plugin or library path that goes through a symlink (macOS /var -> /private/var)
-PLUG = os.path.join(WORK, "embed_then_fail_plugin.so")
+# A harness that already built the plugin hands its path in, so this driver needs no compiler of its
+# own (the Windows runner builds it once and passes it down).
+PLUG = os.environ.get("FSQL_EMBED_THEN_FAIL_PLUGIN")
 _cc_env = {k: v for k, v in os.environ.items() if k not in ("LD_PRELOAD", "DYLD_INSERT_LIBRARIES")}
-r = subprocess.run(["cc", "-shared", "-fPIC", "-std=c99", "-I" + os.path.join(ROOT, "include"), os.path.join(ROOT, "tests", "embed_then_fail_plugin.c"), "-o", PLUG],
-                   capture_output=True, text=True, env=_cc_env)
-if r.returncode != 0:
-    print("  FAIL the scripted plugin did not build:\n" + r.stderr); sys.exit(1)
+CC = os.environ.get("FSQL_CC") or "cc"
+if not PLUG:
+    PLUG = os.path.join(WORK, "embed_then_fail_plugin.so")
+    r = subprocess.run([CC, "-shared", "-fPIC", "-std=c99", "-I" + os.path.join(ROOT, "include"), os.path.join(ROOT, "tests", "embed_then_fail_plugin.c"), "-o", PLUG],
+                       capture_output=True, text=True, env=_cc_env)
+    if r.returncode != 0:
+        print("  FAIL the scripted plugin did not build:" + chr(10) + r.stderr); sys.exit(1)
 import math
 HEADING = ",".join("%.4f" % (math.sin(i * 0.37) + (i % 7) * 0.05) for i in range(64))
 os.environ["FSQL_REASONING_REQUIRE_SIGNATURE"] = "0"
@@ -31,10 +36,17 @@ def conn():
     for k, v in (("reasoning_plugin", PLUG), ("http_url", "https://l.invalid/v1"), ("http_model", "m")):
         c.execute("SELECT fractal_config_set(?, ?)", (k, v))
     return c
+def safe(t):
+    """The text under test may hold characters a Windows console (cp1252) cannot print: show them escaped.
+
+    Printing it raw kills the driver, and the report of the defect goes with it."""
+    return str(t).encode("ascii", "backslashreplace").decode("ascii")
+
+
 def check(cond, what, detail=""):
     global passes, fails
     if cond: passes += 1
-    else: fails += 1; print("  FAIL %s %s" % (what, ("-- " + str(detail)[:250]) if detail else ""))
+    else: fails += 1; print("  FAIL %s %s" % (safe(what), ("-- " + safe(detail)[:250]) if detail else ""))
 
 # (id text, written as a number?)
 IDS = (("42", True), ("0", True), ("-0", True), ("-7", True), ("10.5", True), ("-0.25", True), ("1e5", True), ("1E-3", True), ("2.5e+10", True), ("0.5", True),

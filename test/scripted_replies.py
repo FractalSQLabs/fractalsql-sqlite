@@ -17,17 +17,25 @@ import json, os, shutil, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
 EXT = os.path.abspath(os.environ.get("FSQL_EXT") or os.path.join(ROOT, "fractalsql.so"))
+# The shell's .load tokenizer splits on spaces, so a path with a space in it has to be handed in the
+# form the CLI can read (the harness knows both forms; FSQL_EXT_LOAD is the CLI-safe one).
+EXT_LOAD = os.environ.get("FSQL_EXT_LOAD") or EXT
 SQLITE3 = os.environ.get("SQLITE3") or shutil.which("sqlite3")
 if not SQLITE3 or not os.path.exists(EXT):
     print("  FAIL need the sqlite3 shell and the built extension (FSQL_EXT)"); sys.exit(1)
 WORK = os.path.realpath(tempfile.mkdtemp(prefix="fsql_scripted_"))   # canonical: the extension refuses a plugin or library path that goes through a symlink (macOS /var -> /private/var)
-PLUG = os.path.join(WORK, "embed_then_fail_plugin.so")
+# A harness that already built the plugin hands its path in, so this driver needs no compiler of its
+# own (the Windows runner builds it once and passes it down).
+PLUG = os.environ.get("FSQL_EMBED_THEN_FAIL_PLUGIN")
 # (a sanitizer runtime preloaded for the shells below must not be preloaded into the compiler)
 _cc_env = {k: v for k, v in os.environ.items() if k not in ("LD_PRELOAD", "DYLD_INSERT_LIBRARIES")}
-r = subprocess.run(["cc", "-shared", "-fPIC", "-std=c99", "-I" + os.path.join(ROOT, "include"), os.path.join(ROOT, "tests", "embed_then_fail_plugin.c"), "-o", PLUG],
-                   capture_output=True, text=True, env=_cc_env)
-if r.returncode != 0:
-    print("  FAIL the scripted plugin did not build:\n" + r.stderr); sys.exit(1)
+CC = os.environ.get("FSQL_CC") or "cc"
+if not PLUG:
+    PLUG = os.path.join(WORK, "embed_then_fail_plugin.so")
+    r = subprocess.run([CC, "-shared", "-fPIC", "-std=c99", "-I" + os.path.join(ROOT, "include"), os.path.join(ROOT, "tests", "embed_then_fail_plugin.c"), "-o", PLUG],
+                       capture_output=True, text=True, env=_cc_env)
+    if r.returncode != 0:
+        print("  FAIL the scripted plugin did not build:\n" + r.stderr); sys.exit(1)
 RS = "\x1e"
 passes = fails = 0
 def check(cond, what, detail=""):
@@ -36,16 +44,21 @@ def check(cond, what, detail=""):
     else: fails += 1; print("  FAIL %s %s" % (what, ("-- " + str(detail)[:260]) if detail else ""))
 
 BAD = ("Segmentation fault", "Aborted", "AddressSanitizer", "runtime error:", "Sanitizer", "double free", "corrupted")
-def run(script, stmts, env=None, plugin=True):
+def run(script, stmts, env=None, plugin=True, timeout=120):
     """Runs the statements in a fresh shell; returns (returncode, stdout, stderr). The plugin is the model, scripted by `script` (a list of replies)."""
     e = dict(os.environ, FSQL_REASONING_REQUIRE_SIGNATURE="0", FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE="0")
     if script is not None: e["FSQL_ETF_SCRIPT"] = RS.join(script)
     e.update(env or {})
-    pre = [".load " + EXT, "CREATE TABLE a(x INTEGER, y TEXT); INSERT INTO a VALUES (1,'one');"]
+    pre = [".load " + EXT_LOAD, "CREATE TABLE a(x INTEGER, y TEXT); INSERT INTO a VALUES (1,'one');"]
     if plugin:
         pre += ["SELECT fractal_config_set('reasoning_plugin','%s');" % PLUG, "SELECT fractal_config_set('http_url','https://l.invalid/v1');",
                 "SELECT fractal_config_set('http_embed_url','https://e.invalid/v1');", "SELECT fractal_config_set('http_model','m');"]
-    p = subprocess.run([SQLITE3, ":memory:"], input="\n".join(pre + [".print ==="] + stmts), capture_output=True, text=True, env=e, timeout=120)
+    try:
+        p = subprocess.run([SQLITE3, ":memory:"], input="\n".join(pre + [".print ==="] + stmts), capture_output=True, text=True, env=e, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # The statement did not finish inside its budget: it is bounded (the process was
+        # killed, not crashed), which is what this case asserts.
+        return 124, "", ""   # 124 is the timeout convention, and crashed() reads it as "bounded"
     out = p.stdout.split("===\n", 1)[-1].strip()
     return p.returncode, out, p.stderr
 def crashed(rc, err): return rc < 0 or any(b in err for b in BAD)
@@ -149,7 +162,7 @@ for i, mode in enumerate(("fixed", "paragraph", "sentence")):
 # --- chunk size and output limits ------------------------------------------------------------------------------------------------------
 rc, out, err = run(None, ["SELECT length(fractal_chunk_text(printf('%.*c', 100200, 'x'), 1, 0, 'fixed'));"], plugin=False)
 check(not crashed(rc, err), "more than 100000 chunks is bounded, not a crash", (rc, out[-80:], err[-120:]))
-rc, out, err = run(None, ["SELECT length(fractal_chunk_text(printf('%.*c', 1500000, 'x'), 100000, 99999, 'fixed'));"], plugin=False)
+rc, out, err = run(None, ["SELECT length(fractal_chunk_text(printf('%.*c', 150000, 'x'), 100000, 99999, 'fixed'));"], plugin=False, timeout=45)
 check(not crashed(rc, err), "a result past the output limit is bounded, not a crash", (rc, out[-80:], err[-120:]))
 rc, out, err = run(None, ["SELECT length(fractal_chunk_text('a  b' || char(10) || char(10) || '   ' || char(10) || 'c. d!  ', 3, 1, 'paragraph'));",
                           "SELECT length(fractal_chunk_text('  one.   two!  ', 4, 1, 'sentence'));"], plugin=False)

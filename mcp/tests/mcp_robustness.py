@@ -15,7 +15,7 @@ the same environment contract and no new gate to register:
 
 The probes use only the wire protocol and the server's own tools/list, so the
 same file serves every engine repo. They pin defects that were found in the
-PostgreSQL server and that the sibling servers share by construction:
+PostgreSQL server and that the other engine servers share by construction:
 
   1. A line of valid JSON that is not an object ([] / 42 / null / "s"), a
      non-string "method", or a non-object "params" must never take the

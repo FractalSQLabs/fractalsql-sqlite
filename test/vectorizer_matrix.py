@@ -21,7 +21,7 @@ W = os.path.realpath(tempfile.mkdtemp(prefix="fsql_vecm_"))
 BUILD_ENV = {k: v for k, v in os.environ.items() if k != "LD_PRELOAD"}
 def build(name):
     out = os.path.join(W, name + ".so")
-    ok = subprocess.run(["cc", "-shared", "-fPIC", "-std=c99", "-I" + os.path.join(ROOT, "include"), os.path.join(ROOT, "tests", name + ".c"), "-o", out], capture_output=True, env=BUILD_ENV).returncode == 0
+    ok = subprocess.run([os.environ.get("FSQL_CC") or "cc", "-shared", "-fPIC", "-std=c99", "-I" + os.path.join(ROOT, "include"), os.path.join(ROOT, "tests", name + ".c"), "-o", out], capture_output=True, env=BUILD_ENV).returncode == 0
     return out if ok else None
 GOOD, EVIL, LIE = build("mock_embed_plugin"), build("evil_embed_plugin"), build("evil_lying_length_plugin")
 if not GOOD: print("  FAIL the mock embed plugin did not build"); sys.exit(1)

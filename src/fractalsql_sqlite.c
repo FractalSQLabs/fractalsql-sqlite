@@ -77,8 +77,8 @@ FsqlState *fsql_state_create(sqlite3 *db, char **pzErrMsg) {
     fsql_config_apply_defaults(st);
 
     /* Capture the operator's process-level FSQL_REASONING_HTTP_RESPONSE_MODE
-     * once, at state creation -- the analog of the pg wrapper's _PG_init
-     * capture (g_response_mode_boot in the pg repo's src/fractalsql.c).
+     * once, at state creation -- the analog of the PostgreSQL wrapper's
+     * _PG_init boot-time capture (g_response_mode_boot).
      * Plain malloc+memcpy, not strdup (MSVC deprecates strdup; see
      * fsql_config.c's matching comment). The CHAT tier re-applies this
      * value on every reasoning load (env_apply in fsql_reasoning.c),

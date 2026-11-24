@@ -12,6 +12,9 @@ import os, shutil, subprocess, sys, tempfile
 HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
 SQLITE3 = os.environ.get("SQLITE3") or shutil.which("sqlite3")
 EXT = os.path.abspath(os.environ.get("FSQL_EXT") or os.path.join(ROOT, "fractalsql.so"))
+# The shell's .load tokenizer splits on spaces, so a path with a space in it has to be handed in the
+# form the CLI can read (the harness knows both forms; FSQL_EXT_LOAD is the CLI-safe one).
+EXT_LOAD = os.environ.get("FSQL_EXT_LOAD") or EXT
 if not SQLITE3 or not os.path.exists(EXT):
     print("  FAIL need the sqlite3 shell and the built extension (FSQL_EXT)"); sys.exit(1)
 W = os.path.realpath(tempfile.mkdtemp(prefix="fsql_enterr_"))
@@ -19,11 +22,19 @@ W = os.path.realpath(tempfile.mkdtemp(prefix="fsql_enterr_"))
 # instrumented extension under test can be loaded into the host), and a preloaded runtime in the
 # compiler trips the leak checker over the toolchain's own allocations.
 BUILD_ENV = {k: v for k, v in os.environ.items() if k != "LD_PRELOAD"}
+CC = os.environ.get("FSQL_CC") or "cc"
 def build(src, out, extra=()):
-    return subprocess.run(["cc", "-shared", "-fPIC", "-std=c99", "-I" + os.path.join(ROOT, "include"), src, "-o", out, *extra], capture_output=True, env=BUILD_ENV).returncode == 0
-ENT = os.path.join(W, "ent.so"); NOSYM = os.path.join(W, "nosym.so")
+    return subprocess.run([CC, "-shared", "-fPIC", "-std=c99", "-I" + os.path.join(ROOT, "include"), src, "-o", out, *extra], capture_output=True, env=BUILD_ENV).returncode == 0
+# A harness that already built the fixtures hands their paths in, so this driver needs no compiler
+# of its own (the Windows runner builds them once and passes them down).
+ENT = os.environ.get("FSQL_ENTERPRISE_CORE")
+NOSYM = os.path.join(W, "nosym.so")
 open(os.path.join(W, "nosym.c"), "w").write("int fsql_nothing(void){return 0;}\n")
-if not build(os.path.join(ROOT, "tests", "mock_enterprise_core.c"), ENT) or not build(os.path.join(W, "nosym.c"), NOSYM):
+if ENT is None:
+    ENT = os.path.join(W, "ent.so")
+    if not build(os.path.join(ROOT, "tests", "mock_enterprise_core.c"), ENT):
+        print("  FAIL the test libraries did not build"); sys.exit(1)
+if not build(os.path.join(W, "nosym.c"), NOSYM):
     print("  FAIL the test libraries did not build"); sys.exit(1)
 
 passes = fails = 0
@@ -32,7 +43,7 @@ def run(lib, calls=1, env=None, sig=None, pre=""):
     if sig is not None: open(lib + ".sig", "wb").write(sig)
     e = {k: v for k, v in os.environ.items() if not k.startswith("FRACTALSQL_ENTERPRISE")}
     e.update(env or {})
-    script = ".load %s\nSELECT fractal_config_set('enterprise_lib','%s');\n%s%s" % (EXT, lib, pre, "SELECT fractal_ledger_truth_count();\n" * calls)
+    script = ".load %s\nSELECT fractal_config_set('enterprise_lib','%s');\n%s%s" % (EXT_LOAD, lib, pre, "SELECT fractal_ledger_truth_count();\n" * calls)
     p = subprocess.run([SQLITE3, "-batch", ":memory:"], input=script, capture_output=True, text=True, env=e, timeout=60)
     return p.stdout + p.stderr
 def check(out, want, what, absent=False):
